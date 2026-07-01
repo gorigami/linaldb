@@ -283,7 +283,7 @@ pub fn handle_show(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslO
                 output.push_str(&format!(
                     "{:<20} {:<20} {:<10}\n",
                     field.name,
-                    format!("{}", field.value_type),
+                    format!("{:?}", field.value_type),
                     field.nullable
                 ));
             }
