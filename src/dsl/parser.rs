@@ -1086,10 +1086,7 @@ impl Parser {
     fn parse_index_specs(&mut self) -> Result<Vec<IndexSpec>, ParseError> {
         let mut specs = Vec::new();
         while !self.at(&Token::RBracket) && !self.eof() {
-            let spec = if self.at(&Token::Star) {
-                self.advance();
-                IndexSpec::All
-            } else if self.at(&Token::Colon) {
+            let spec = if self.at(&Token::Star) || self.at(&Token::Colon) {
                 self.advance();
                 IndexSpec::All
             } else {
