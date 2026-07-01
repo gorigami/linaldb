@@ -7,7 +7,7 @@ fn test_dataset_integrity_health_warning() {
 
     // 1. Create a tensor and a dataset
     execute_line(&mut db, "VECTOR v1 = [1.0, 2.0, 3.0]", 1).unwrap();
-    execute_line(&mut db, "LET ds = dataset('test_ds')", 2).unwrap();
+    execute_line(&mut db, r#"LET ds = dataset("test_ds")"#, 2).unwrap();
     execute_line(&mut db, "ds.add_column('col1', v1)", 3).unwrap();
 
     // 2. Verify it's healthy
@@ -32,7 +32,7 @@ fn test_row_count_validation_error_message() {
 
     execute_line(&mut db, "VECTOR v1 = [1.0, 2.0, 3.0]", 1).unwrap();
     execute_line(&mut db, "VECTOR v2 = [10.0, 20.0]", 2).unwrap();
-    execute_line(&mut db, "LET ds = dataset('test_ds')", 3).unwrap();
+    execute_line(&mut db, r#"LET ds = dataset("test_ds")"#, 3).unwrap();
     execute_line(&mut db, "ds.add_column('col1', v1)", 4).unwrap();
 
     let result = execute_line(&mut db, "ds.add_column('col2', v2)", 5);
@@ -52,7 +52,7 @@ fn test_matrix_row_count_validation() {
         2,
     )
     .unwrap(); // 3 rows
-    execute_line(&mut db, "LET ds = dataset('matrix_ds')", 3).unwrap();
+    execute_line(&mut db, r#"LET ds = dataset("matrix_ds")"#, 3).unwrap();
     execute_line(&mut db, "ds.add_column('col1', m1)", 4).unwrap();
 
     let result = execute_line(&mut db, "ds.add_column('col2', m2)", 5);

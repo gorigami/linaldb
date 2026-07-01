@@ -5,6 +5,27 @@ All notable changes to LINAL will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed — Legacy Handler Cleanup
+
+Deleted three handler files that were fully superseded by `src/dsl/executor.rs` (landed in v0.1.15). The typed executor now owns all dispatch for these statement types; no functionality was removed.
+
+- **Deleted `src/dsl/handlers/operations.rs`** (739 lines) — string-dispatch LET handler with sub-parsers for indexing, dot notation, infix ops, and all math operations
+- **Deleted `src/dsl/handlers/semantics.rs`** (107 lines) — BIND / ATTACH / DERIVE handlers; `handle_derive` internally delegated to `operations::handle_let`
+- **Deleted `src/dsl/handlers/tensor.rs`** (197 lines) — DEFINE / VECTOR / MATRIX handlers
+
+### Changed
+
+- **`src/dsl/handlers/mod.rs`** — removed `pub mod` and `pub use` declarations for all three deleted modules
+- **`src/dsl/mod.rs`** — removed `handle_define` / `handle_let` imports; removed DEFINE, VECTOR, MATRIX, LET/LAZY LET, BIND, ATTACH, and DERIVE branches from the legacy fallback chain in `execute_line_with_context`
+
+### Fixed
+
+- **`tests/dataset_integrity_test.rs`** — changed three `dataset('name')` calls (single-quoted) to `dataset("name")` (double-quoted) so the Logos lexer can tokenize them and the typed parser handles them correctly
+
+---
+
 ## [0.1.15] - 2026-07-01
 
 ### Added — Typed DSL Parser
