@@ -152,7 +152,10 @@ pub fn execute_statement(
                     .collect();
                 let schema = Arc::new(Schema::new(fields));
                 db.create_dataset(s.name.clone(), schema)
-                    .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
                 Ok(DslOutput::Message(format!("Created dataset: {}", s.name)))
             }
         }
@@ -166,7 +169,10 @@ pub fn execute_statement(
                     Value::Null,
                     col_def.nullable,
                 )
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
                 Ok(DslOutput::Message(format!(
                     "Added column '{}' to dataset '{}'",
                     col_def.name, s.dataset
@@ -177,7 +183,10 @@ pub fn execute_statement(
         Statement::InsertInto(s) => {
             let schema = db
                 .get_dataset(&s.dataset)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?
                 .schema
                 .clone();
             let col_map: std::collections::HashMap<&str, &InsertValue> =
@@ -194,10 +203,15 @@ pub fn execute_statement(
                     Some(InsertValue::TensorRef(_)) | Some(InsertValue::Null) | None => Value::Null,
                 })
                 .collect();
-            let tuple = Tuple::new(schema.clone(), values)
-                .map_err(|e| DslError::Parse { line: line_no, msg: e })?;
+            let tuple = Tuple::new(schema.clone(), values).map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: e,
+            })?;
             db.insert_row(&s.dataset, tuple)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
             Ok(DslOutput::None)
         }
 
@@ -205,15 +219,12 @@ pub fn execute_statement(
             // Fall back to string-reconstruction for GROUP BY / aggregate queries
             // since SelectColumns::Named only carries strings, not aggregate exprs.
             if !s.group_by.is_empty() {
-                return handlers::dataset::handle_select(
-                    db,
-                    &select_to_string(&s),
-                    line_no,
-                );
+                return handlers::dataset::handle_select(db, &select_to_string(&s), line_no);
             }
-            let source_ds = db
-                .get_dataset(&s.dataset)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+            let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
             let source_schema = source_ds.schema.clone();
 
             let mut plan = LogicalPlan::Scan {
@@ -247,7 +258,11 @@ pub fn execute_statement(
                 };
             }
             let cols = match s.columns {
-                SelectColumns::All => source_schema.fields.iter().map(|f| f.name.clone()).collect(),
+                SelectColumns::All => source_schema
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect(),
                 SelectColumns::Named(cs) => cs,
             };
             plan = LogicalPlan::Project {
@@ -256,12 +271,17 @@ pub fn execute_statement(
             };
 
             let planner = Planner::new(db);
-            let physical_plan = planner
-                .create_physical_plan(&plan)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
-            let result_rows = physical_plan
-                .execute(db)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+            let physical_plan =
+                planner
+                    .create_physical_plan(&plan)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+            let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
             let result_schema = physical_plan.schema();
             let ds = crate::core::dataset_legacy::Dataset::with_rows(
                 crate::core::dataset_legacy::DatasetId(0),
@@ -269,7 +289,10 @@ pub fn execute_statement(
                 result_rows,
                 Some("Query Result".into()),
             )
-            .map_err(|e| DslError::Parse { line: line_no, msg: e })?;
+            .map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: e,
+            })?;
             Ok(DslOutput::Table(ds))
         }
 
@@ -280,7 +303,10 @@ pub fn execute_statement(
                 s.target.clone()
             };
             db.materialize_lazy_columns(&dataset_name)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
             Ok(DslOutput::Message(format!(
                 "Materialized lazy columns in dataset '{}'",
                 dataset_name
