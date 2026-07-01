@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Query Engine Quick Wins
+
+- **`src/core/storage.rs`** — `compute_stats` now fills `min`, `max`, and `mean` for `Float32`, `Float64`, `Int64`, and `Int32` columns (previously always `None`); non-numeric columns remain `None`
+- **`src/query/logical.rs`** — added `Expr::And` and `Expr::Or` variants so compound predicates (`col > 5 AND col < 10`) can be represented in the logical plan
+- **`src/query/planner.rs`** — `evaluate_expr` now handles `>=`, `<=`, `AND`, and `OR`; previously `>=`/`<=` silently returned `false` and compound predicates were unsupported
+- **`src/query/physical.rs`** — `evaluate_expression` handles `Expr::And`/`Expr::Or`, returning `Value::Bool`
+
 ### Removed — Legacy Handler Cleanup
 
 Deleted three handler files that were fully superseded by `src/dsl/executor.rs` (landed in v0.1.15). The typed executor now owns all dispatch for these statement types; no functionality was removed.

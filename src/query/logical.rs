@@ -10,12 +10,16 @@ pub enum Expr {
     Column(String),
     /// Constants
     Literal(Value),
-    /// Binary operation (e.g. =, >, <)
+    /// Binary operation (e.g. =, >, <, >=, <=)
     BinaryExpr {
         left: Box<Expr>,
         op: String,
         right: Box<Expr>,
     },
+    /// Logical AND of two predicates
+    And(Box<Expr>, Box<Expr>),
+    /// Logical OR of two predicates
+    Or(Box<Expr>, Box<Expr>),
     /// Aggregation function
     AggregateExpr {
         func: AggregateFunction,
@@ -166,6 +170,7 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                 _ => ValueType::Int,
             }
         }
-        Expr::AggregateExpr { .. } => ValueType::Int, // Nested aggregations? Should not happen in logical plan simple exprs
+        Expr::And(_, _) | Expr::Or(_, _) => ValueType::Bool,
+        Expr::AggregateExpr { .. } => ValueType::Int,
     }
 }

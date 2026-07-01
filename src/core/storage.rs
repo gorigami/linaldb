@@ -246,18 +246,81 @@ impl ParquetStorage {
 
     fn compute_stats(&self, batch: &RecordBatch) -> DatasetStats {
         let mut stats = DatasetStats::new(batch.num_rows() as u64);
-        // Basic stats implementation
         for field in batch.schema().fields() {
             let col_name = field.name();
             let array = batch.column_by_name(col_name).unwrap();
             let null_count = array.null_count() as u64;
 
+            let (min, max, mean) = match field.data_type() {
+                DataType::Float32 => {
+                    if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+                        let vals: Vec<f32> = arr.iter().flatten().collect();
+                        if vals.is_empty() {
+                            (None, None, None)
+                        } else {
+                            let mn = vals.iter().cloned().fold(f32::INFINITY, f32::min);
+                            let mx = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                            let avg = vals.iter().sum::<f32>() / vals.len() as f32;
+                            (Some(mn), Some(mx), Some(avg))
+                        }
+                    } else {
+                        (None, None, None)
+                    }
+                }
+                DataType::Float64 => {
+                    if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+                        let vals: Vec<f64> = arr.iter().flatten().collect();
+                        if vals.is_empty() {
+                            (None, None, None)
+                        } else {
+                            let mn = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+                            let mx = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                            let avg = vals.iter().sum::<f64>() / vals.len() as f64;
+                            (Some(mn as f32), Some(mx as f32), Some(avg as f32))
+                        }
+                    } else {
+                        (None, None, None)
+                    }
+                }
+                DataType::Int64 => {
+                    if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                        let vals: Vec<i64> = arr.iter().flatten().collect();
+                        if vals.is_empty() {
+                            (None, None, None)
+                        } else {
+                            let mn = *vals.iter().min().unwrap();
+                            let mx = *vals.iter().max().unwrap();
+                            let avg = vals.iter().sum::<i64>() as f32 / vals.len() as f32;
+                            (Some(mn as f32), Some(mx as f32), Some(avg))
+                        }
+                    } else {
+                        (None, None, None)
+                    }
+                }
+                DataType::Int32 => {
+                    if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                        let vals: Vec<i32> = arr.iter().flatten().collect();
+                        if vals.is_empty() {
+                            (None, None, None)
+                        } else {
+                            let mn = *vals.iter().min().unwrap();
+                            let mx = *vals.iter().max().unwrap();
+                            let avg = vals.iter().sum::<i32>() as f32 / vals.len() as f32;
+                            (Some(mn as f32), Some(mx as f32), Some(avg))
+                        }
+                    } else {
+                        (None, None, None)
+                    }
+                }
+                _ => (None, None, None),
+            };
+
             stats.add_column_stats(
                 col_name.to_string(),
                 ColumnStats {
-                    min: None, // TODO: Implement min/max per type
-                    max: None,
-                    mean: None,
+                    min,
+                    max,
+                    mean,
                     sparsity: Some(1.0 - (null_count as f32 / batch.num_rows() as f32)),
                     null_count,
                     tensor_shape: None,

@@ -194,8 +194,9 @@ impl<'a> Planner<'a> {
 }
 
 fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
-    // Basic evaluator
     match expr {
+        Expr::And(left, right) => evaluate_expr(left, row) && evaluate_expr(right, row),
+        Expr::Or(left, right) => evaluate_expr(left, row) || evaluate_expr(right, row),
         Expr::BinaryExpr { left, op, right } => {
             let left_val = eval_value(left, row);
             let right_val = eval_value(right, row);
@@ -207,13 +208,21 @@ fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
                     "!=" => ord.is_some() && ord != Some(std::cmp::Ordering::Equal),
                     ">" => ord == Some(std::cmp::Ordering::Greater),
                     "<" => ord == Some(std::cmp::Ordering::Less),
-                    _ => false, // TODO: Implement others
+                    ">=" => matches!(
+                        ord,
+                        Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
+                    ),
+                    "<=" => matches!(
+                        ord,
+                        Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
+                    ),
+                    _ => false,
                 }
             } else {
                 false
             }
         }
-        _ => false, // Only binary exprs supported as predicates top level
+        _ => false,
     }
 }
 
