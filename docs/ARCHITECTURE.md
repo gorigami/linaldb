@@ -43,12 +43,15 @@ The engine is built in Rust with a modular architecture that separates concerns 
         └─────────────┴─────────────┴─────────────┘
                            │
         ┌──────────────────┴──────────────────┐
-        │          DSL Layer (Parser)         │
-        │  ┌──────────────────────────────┐   │
-        │  │  Command Parsing & Routing   │   │
-        │  │  Expression Evaluation       │   │
-        │  │  Error Handling              │   │
-        │  └──────────────────────────────┘   │
+        │     DSL Layer (Compiler Pipeline)   │
+        │  ┌───────────┐  ┌────────────────┐  │
+        │  │  Lexer    │→ │ Parser (RD+    │  │
+        │  │  (Logos)  │  │  Pratt)        │  │
+        │  └───────────┘  └───────┬────────┘  │
+        │  ┌────────────────────────────────┐ │
+        │  │  Executor (typed AST → engine) │ │
+        │  │  Legacy handlers  (fallback)   │ │
+        │  └────────────────────────────────┘ │
         └──────────────────┬──────────────────┘
                            │
         ┌──────────────────┴──────────────────┐
@@ -203,34 +206,65 @@ The engine module orchestrates execution:
 
 ### 3. DSL Module (`src/dsl/`)
 
-The DSL module handles command parsing and execution:
+The DSL module implements a full compiler-grade pipeline from source text to engine calls.
 
-#### `mod.rs`
+#### `lexer.rs` — DFA Tokenizer (Logos 0.14)
 
-- **execute_line()**: Execute a single DSL command
-- **execute_script()**: Execute a script file
-- **DslOutput**: Structured output format
+- 80+ tokens covering all keywords, operators, punctuation, and literals
+- Skips whitespace and `--` / `#` / `//` comment styles automatically
+- Keyword tokens always win over the `Ident` regex (DFA property ensures no ambiguity)
+- `tokenize(source) -> Result<Vec<(Token, Span)>, usize>` — returns error offset on unknown character
+
+#### `ast.rs` — Typed AST
+
+- `Statement` — 27 variants, one per top-level command
+- `Statement::is_read_only()` — gates the shared-reference `execute_line_shared` path
+- `Expr` — expression sub-language: `Ref`, `Scalar`, `StringLit`, `Infix`, `Call`, `Index`, `Field`, `DatasetRef`
+- `CallExpr` — 18 named-prefix operations: binary (`ADD`, `MATMUL`, `CORRELATE`, …), unary (`NORMALIZE`, `RESHAPE`, …), n-ary (`STACK`)
+- All types (`ColType`, `TensorKindAst`, `InfixOp`) are decoupled from engine internals; the executor maps them
+
+#### `parser.rs` — Recursive-Descent + Pratt Parser
+
+- `parse(source) -> Result<Statement, ParseError>` — main entry point
+- One `parse_*` function per statement type; dispatches on first token
+- Pratt parser for the expression sub-language with correct infix precedence (`*`/`/` > `+`/`-`) and postfix `.field` / `[...]` binding
+- `ParseError { offset: usize, msg: String }` with `into_dsl_error(line)` for integration
+
+#### `executor.rs` — Typed Dispatch Layer
+
+- `execute_statement(db, stmt, line_no, ctx)` — single `match` on `Statement`, routes each variant directly to the engine API (no string re-parsing)
+- `eval_expr_to_name()` — recursive `Expr` → engine call evaluator; generates temporary tensor names via an atomic counter for sub-expressions
+- `eval_call()` — maps all 18 `CallExpr` variants to `eval_binary` / `eval_unary` / `eval_matmul` / etc., with lazy/eager branching
+- `expr_to_string()` — round-trips an `Expr` back to DSL text; used when delegating complex statements (SELECT WHERE) to legacy string-based handlers
+
+#### `mod.rs` — Dispatch Entry Point
+
+- **`execute_line_with_context()`**: tries `parser::parse` first; on success dispatches through `execute_statement`; on parse error falls through to the legacy `if/else if starts_with()` chain
+- **`execute_line()`**: convenience wrapper (no context)
+- **`execute_script()`**: multi-line runner with paren-balance tracking
+- **`DslOutput`**: structured output enum (`None`, `Message`, `Table`, `TensorTable`, `Tensor`, `LazyTensor`)
 
 #### `handlers/`
 
-Command-specific handlers:
+Legacy command handlers (still active as fallback and for complex SQL clauses):
 
-- **tensor.rs**: DEFINE, VECTOR, MATRIX, SHOW commands
-- **dataset.rs**: DATASET, INSERT INTO, SELECT, FILTER, etc.
+- **tensor.rs**: DEFINE, VECTOR, MATRIX
+- **dataset.rs**: DATASET, INSERT INTO, SELECT, MATERIALIZE
 - **operations.rs**: LET, binary/unary operations
 - **index.rs**: CREATE INDEX, CREATE VECTOR INDEX
 - **search.rs**: SEARCH (vector similarity)
-- **persistence.rs**: SAVE, LOAD, LIST, IMPORT, EXPORT commands
+- **persistence.rs**: SAVE, LOAD, LIST, IMPORT, EXPORT
 - **instance.rs**: CREATE DATABASE, USE, DROP DATABASE
 - **metadata.rs**: SET DATASET METADATA
 - **explain.rs**: EXPLAIN, EXPLAIN PLAN
 - **introspection.rs**: SHOW commands (SCHEMA, INDEXES, LINEAGE)
-- **semantics.rs**: Explicit resource handlers (BIND, ATTACH, DERIVE)
-- **audit.rs**: Consistency checking (AUDIT DATASET)
+- **semantics.rs**: BIND, ATTACH, DERIVE
+- **audit.rs**: AUDIT DATASET
+- **session.rs**: RESET
 
-#### 3.1 `error.rs`
+#### `error.rs`
 
-- **DslError**: DSL-specific error types
+- **DslError**: DSL-specific error types (`Parse { line, msg }`, `Engine { line, source }`)
 
 ### 4. Query Module (`src/query/`)
 
@@ -286,15 +320,20 @@ Utility functions:
 
 ### 1. Command Parsing
 
-```#rs
-DSL Command → Parser → Command AST → Route to Handler
+```text
+DSL source
+  → lexer::tokenize()       — DFA, produces Vec<(Token, Span)>
+  → parser::parse()         — recursive-descent, produces Statement AST
+  → executor::execute_statement()  — typed match, calls engine API directly
 ```
+
+If `parser::parse()` returns an error (unrecognized syntax), `execute_line_with_context` falls through to the legacy `if/else if starts_with()` chain for backward compatibility.
 
 Example: `SELECT * FROM users WHERE id > 10`
 
-- Parser identifies `SELECT` command
-- Routes to `dataset.rs` handler
-- Parses query components (columns, table, filter, etc.)
+- Lexer produces `[Select, Star, From, Ident("users"), Where, Ident("id"), ...]`
+- Parser builds `Statement::Select(SelectStmt { dataset: "users", columns: All, filter: Some(Expr::Infix {...}), ... })`
+- Executor calls `handlers::dataset::handle_select(db, &select_to_string(&s), line_no)` (SELECT is still delegated)
 
 ### 2. Query Planning (for SELECT queries)
 
@@ -698,7 +737,7 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 |-----------|----------------|-----------|
 | `Tensor` / `Shape` | **Semantic Core** | Frozen (v1) |
 | `ReferenceGraph` (TF Datasets) | **Semantic Core** | Frozen (v1) |
-| `DslParser` / `Lexer` | **Semantic Core** | Solidified |
+| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.15) |
 | `SimdBackend` (NEON/AVX) | **Engine Extension** | Evolving |
 | `ParquetPersistence` | **Engine Extension** | Evolving |
 | `HttpServer` / `REST API` | **Application Layer** | Flexible |

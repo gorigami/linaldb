@@ -30,6 +30,7 @@ uuid = { version = "1.8", features = ["v4", "serde"] }
 sha2 = "0.10.8"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 rayon = "1.11.0"
+logos = "0.14"
 smallvec = "1.13"
 hdf5 = "0.8.1"
 ndarray = "0.15.6"
