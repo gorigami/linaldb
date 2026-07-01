@@ -13,8 +13,8 @@ Engine errors occur during the internal execution of algebraic or data operation
 | `NameNotFound` | Referred to a tensor variable that is not in the store. | Verify the variable name or check if the tensor was deleted. |
 | `InvalidOp` | Attempted an operation that is mathematically impossible (e.g., MATMUL with incompatible shapes). | Verify dimensions (e.g., Matrix A: 2x3, Matrix B: 3x5 for MATMUL). |
 | `DatasetNotFound` | Referred to a dataset that does not exist in the active database. | Check your spelling or run `SHOW ALL DATASETS`. |
-| `ConstraintViolation` | Data does not meet schema requirements (e.g., inserting a string into an Int column). | Check the input types against the `SHOW SCHEMA` output. |
-| `ReferenceError` | Internal failure resolving zero-copy links or semantic views. | Run `AUDIT DATASET <name>` to check for dangling references. |
+| `ConstraintViolation` | *(Reserved)* Intended for type/schema constraint violations. Currently not emitted — type mismatches surface as `InvalidOp`. | Check the input types against the `SHOW SCHEMA` output. |
+| `ReferenceError` | *(Reserved)* Intended for failures resolving zero-copy reference graph links. Currently not emitted — reference errors surface as `InvalidOp`. | Run `AUDIT DATASET <name>` to check for dangling references. |
 | `ExecutionError` | A generic failure in the computational kernel or parallel execution. | Check for resource exhaustion or complex tensor layouts. |
 
 ---

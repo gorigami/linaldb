@@ -270,29 +270,50 @@ pub fn handle_show(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslO
         )))
     } else if rest.starts_with("SCHEMA ") {
         let name = rest.trim_start_matches("SCHEMA ").trim();
-        let dataset = db.get_dataset(name).map_err(|e| DslError::Engine {
-            line: line_no,
-            source: e,
-        })?;
 
-        // Build schema output
-        let mut output = format!("Schema for dataset '{}':\n", name);
-        output.push_str(&format!(
-            "{:<20} {:<10} {:<10}\n",
-            "Field", "Type", "Nullable"
-        ));
-        output.push_str(&format!("{:-<42}\n", ""));
-
-        for field in &dataset.schema.fields {
+        // Try legacy dataset first
+        if let Ok(dataset) = db.get_dataset(name) {
+            let mut output = format!("Schema for dataset '{}' (Legacy):\n", name);
             output.push_str(&format!(
-                "{:<20} {:<10} {:<10}\n",
-                field.name,
-                format!("{:?}", field.value_type),
-                field.nullable
+                "{:<20} {:<20} {:<10}\n",
+                "Field", "Type", "Nullable"
             ));
+            output.push_str(&format!("{:-<52}\n", ""));
+            for field in &dataset.schema.fields {
+                output.push_str(&format!(
+                    "{:<20} {:<20} {:<10}\n",
+                    field.name,
+                    format!("{}", field.value_type),
+                    field.nullable
+                ));
+            }
+            return Ok(DslOutput::Message(output));
         }
 
-        Ok(DslOutput::Message(output))
+        // Fall back to tensor-first dataset
+        if let Some(ds) = db.get_tensor_dataset(name) {
+            let mut output = format!("Schema for dataset '{}' (Tensor-First):\n", name);
+            output.push_str(&format!(
+                "{:<20} {:<20} {:<10} {:<10}\n",
+                "Column", "Type", "Role", "Nullable"
+            ));
+            output.push_str(&format!("{:-<62}\n", ""));
+            for col in &ds.schema.columns {
+                output.push_str(&format!(
+                    "{:<20} {:<20} {:<10} {:<10}\n",
+                    col.name,
+                    format!("{}", col.value_type),
+                    format!("{:?}", col.role),
+                    col.nullable
+                ));
+            }
+            return Ok(DslOutput::Message(output));
+        }
+
+        Err(DslError::Engine {
+            line: line_no,
+            source: crate::engine::EngineError::DatasetNotFound(name.to_string()),
+        })
     } else {
         let name = rest;
         if name.is_empty() {

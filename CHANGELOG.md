@@ -5,6 +5,35 @@ All notable changes to LINAL will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15] - 2026-07-01
+
+### Fixed
+
+- **`SHOW SCHEMA` for tensor-first datasets** (`src/dsl/handlers/introspection.rs`)
+  - Previously only checked the legacy `DatasetStore`; now falls through to `DatasetRegistry` when no match is found
+  - Tensor-first output includes a `Role` column (`Feature`, `Target`, `Weight`, `Guid`, `Generic`) from `ColumnSchema`
+  - Returns `DatasetNotFound` instead of an opaque error when neither store contains the name
+
+### Documentation
+
+- **`docs/DSL_REFERENCE.md`** — documented previously undocumented features:
+  - `DEFINE x AS STRICT TENSOR [dims] VALUES [...]` and `TensorKind::Strict` semantics
+  - `LET ds = dataset("name")` tensor-first dataset constructor
+  - `<ds>.add_column(<col>, <tensor>)` zero-copy column attachment syntax
+  - `LAZY LET` / `LET LAZY` as interchangeable aliases
+  - `SAVE TENSOR`, `LOAD TENSOR`, `LIST TENSORS`, `LIST DATASET VERSIONS`
+  - Full `SHOW` command family: `SHOW ALL`, `SHOW ALL DATASETS`, `SHOW SHAPE`, `SHOW DATASET METADATA`, `SHOW DATASET VERSIONS`, `SHOW "<string>"`
+  - Complete server endpoint tables for jobs, scheduler, databases, and delivery routes
+  - Per-request DB isolation guarantee (`X-Linal-Database` header restores previous context after each request)
+- **`docs/ARCHITECTURE.md`** — corrected stale/inaccurate claims:
+  - Backend dispatch diagram: Rayon is embedded in `engine/kernels.rs` kernel functions (≥50k element threshold), not a named third `CpuBackend` tier
+  - SIMD threshold corrected to `1024` elements (was undocumented)
+  - SIMD op coverage: listed the 6 ops with SIMD implementations (`add`, `sub`, `multiply`, `matmul`, `dot`, `distance`) and the 11 with scalar fallback + TODOs
+  - Added `TensorKind` (`Normal`, `Strict`, `Lazy`) to the Type System section
+  - Corrected `dataset/dataset.rs` path to `dataset/mod.rs`
+  - Expanded server module docs with full API surface and scheduler endpoints
+- **`docs/ERROR_REFERENCE.md`** — marked `ConstraintViolation` and `ReferenceError` as `*(Reserved)*`; both variants exist in `error.rs` but are not currently emitted — errors surface as `InvalidOp` instead
+
 ## [0.1.14] - 2026-01-08
 
 ### Added - Scientific Dataset Ingestion
