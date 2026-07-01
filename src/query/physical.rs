@@ -398,16 +398,14 @@ impl PhysicalPlan for AggregateExec {
                                         }
                                     }
                                 }
-                                (Value::Matrix(sum_mat), Value::Matrix(v)) => {
-                                    // Element-wise sum
+                                (Value::Matrix(sum_mat), Value::Matrix(v))
                                     if sum_mat.len() == v.len()
                                         && !sum_mat.is_empty()
-                                        && sum_mat[0].len() == v[0].len()
-                                    {
-                                        for i in 0..sum_mat.len() {
-                                            for j in 0..sum_mat[i].len() {
-                                                sum_mat[i][j] += v[i][j];
-                                            }
+                                        && sum_mat[0].len() == v[0].len() =>
+                                {
+                                    for i in 0..sum_mat.len() {
+                                        for j in 0..sum_mat[i].len() {
+                                            sum_mat[i][j] += v[i][j];
                                         }
                                     }
                                 }
@@ -636,12 +634,7 @@ pub fn evaluate_expression(
                                 "+" => res[i][j] += r[i][j],
                                 "-" => res[i][j] -= r[i][j],
                                 "*" => res[i][j] *= r[i][j], // Element-wise mul
-                                "/" => {
-                                    if r[i][j] != 0.0 {
-                                        res[i][j] /= r[i][j]
-                                    } else { /*NaN?*/
-                                    }
-                                }
+                                "/" if r[i][j] != 0.0 => res[i][j] /= r[i][j],
                                 _ => {}
                             }
                         }
@@ -657,11 +650,7 @@ pub fn evaluate_expression(
                                 "+" => *val += s,
                                 "-" => *val -= s,
                                 "*" => *val *= s,
-                                "/" => {
-                                    if s != 0.0 {
-                                        *val /= s
-                                    }
-                                }
+                                "/" if s != 0.0 => *val /= s,
                                 _ => {}
                             }
                         }
@@ -676,11 +665,7 @@ pub fn evaluate_expression(
                                 "+" => *val += scalar,
                                 "-" => *val -= scalar,
                                 "*" => *val *= scalar,
-                                "/" => {
-                                    if scalar != 0.0 {
-                                        *val /= scalar
-                                    }
-                                }
+                                "/" if scalar != 0.0 => *val /= scalar,
                                 _ => {}
                             }
                         }
