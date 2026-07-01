@@ -47,6 +47,36 @@ Explicit tensor definition for higher dimensions.
 DEFINE t AS TENSOR(2, 2, 2) VALUES [1, 2, 3, 4, 5, 6, 7, 8]
 ```
 
+The optional `STRICT` modifier enforces shape-strictness: any binary operation involving a strict tensor propagates the strict flag to its output, preventing accidental shape relaxation.
+
+```sql
+DEFINE w AS STRICT TENSOR [3] VALUES [1, 0, 0]
+```
+
+### Tensor-First Dataset Constructor
+
+Create a zero-copy tensor-first dataset using the `dataset()` constructor inside a `LET` assignment:
+
+```sql
+LET ds = dataset("my_dataset")
+```
+
+This registers an empty named dataset in the `DatasetRegistry`. Columns are added later via `.add_column()`.
+
+### Adding Columns to a Tensor-First Dataset
+
+After creating a tensor-first dataset you can attach any in-memory tensor as a column using dot-method syntax:
+
+```sql
+VECTOR v_temp = [36.6, 37.1, 36.9]
+LET raw = dataset("raw")
+raw.add_column(temp, v_temp)
+```
+
+Syntax: `<dataset_var>.add_column(<column_name>, <tensor_var>)`
+
+This is an O(1) metadata operation — no data is copied.
+
 ### DATASET
 
 Define a persistent relational structure.
@@ -82,6 +112,16 @@ LINAL provides two ways to perform math: Functional keywords and Infix operators
 - `SUM a`: Sum of all elements in the tensor.
 - `MEAN a`: Arithmetic mean of all elements.
 - `STDEV a`: Standard deviation of all elements.
+
+### Lazy Evaluation
+
+Prefix a `LET` with `LAZY` (either word order is accepted) to defer computation. The expression is stored as a computation graph and materialized only when `SHOW` is called.
+
+```sql
+LAZY LET trend = STDEV sensor_3d   -- deferred
+LET LAZY trend = STDEV sensor_3d   -- identical alias
+SHOW trend                         -- triggers materialization
+```
 
 ### Infix Operators
 
@@ -144,7 +184,11 @@ Load and save data across different formats.
 - `EXPORT CSV name TO "path"`: Save dataset to CSV.
 - `SAVE DATASET name [TO "path"]`: Persist to Parquet (includes metadata/lineage).
 - `LOAD DATASET name [FROM "path"]`: Restore a persisted dataset.
-- `LIST DATASETS`: Show available datasets in the current database context.
+- `SAVE TENSOR name [TO "path"]`: Persist a tensor to JSON.
+- `LOAD TENSOR name [FROM "path"]`: Restore a persisted tensor (preserves lineage).
+- `LIST DATASETS [FROM "path"]`: Show available datasets in the current database context.
+- `LIST TENSORS [FROM "path"]`: Show available tensors in the current storage path.
+- `LIST DATASET VERSIONS <name>`: Show version history and schema evolution log for a persisted dataset.
 
 ### Scientific Data Ingestion
 
@@ -166,7 +210,7 @@ LINAL supports multi-platform isolated instances.
 CREATE DATABASE research
 USE research
 DROP DATABASE obsolete_db
-SHOW DATABASES
+SHOW DATABASES          -- also: SHOW ALL DATABASES
 ```
 
 ### RESET SESSION
@@ -177,11 +221,35 @@ Clears all in-memory registers (Tensors and Datasets) for the current session.
 
 ## 7. Diagnostics
 
-- `SHOW <name>`: Display contents/schema of any resource.
-- `SHOW LINEAGE <name>`: Display the graph of computations that produced the resource.
-- `SHOW SCHEMA <dataset>`: Display column names and types.
-- `EXPLAIN <query>`: Show the logical execution plan.
-- `AUDIT DATASET <name>`: Perform a health check on referential integrity.
+### Resource Display
+
+- `SHOW <name>`: Display contents of any resource — tensor, legacy dataset, or tensor-first dataset. Automatically materializes lazy tensors before displaying.
+- `SHOW ALL` / `SHOW ALL TENSORS`: List all in-memory tensors with shapes and data.
+- `SHOW ALL DATASETS`: List all legacy datasets with row/column counts.
+- `SHOW DATABASES` / `SHOW ALL DATABASES`: List all database instances.
+- `SHOW SCHEMA <dataset>`: Display column names and types for a legacy dataset.
+- `SHOW SHAPE <name>`: Display only the shape dimensions of a tensor.
+- `SHOW LINEAGE <name>`: Display the recursive computation graph that produced a tensor.
+- `SHOW INDEXES [<dataset>]`: List all indexes; optionally filter to a specific dataset.
+
+### Dataset Metadata & Versioning
+
+- `SHOW DATASET METADATA <name>`: Display version, hash, origin, author, tags, and timestamps for a dataset (checks in-memory first, falls back to disk).
+- `SHOW DATASET VERSIONS <name>`: Display the full schema evolution history for a persisted dataset.
+- `LIST DATASET VERSIONS <name>`: Equivalent to `SHOW DATASET VERSIONS` — returns the same schema history output.
+
+### Utility
+
+- `SHOW "<string>"`: Print a string literal directly. Useful for annotating script output.
+
+```sql
+SHOW "--- Begin training phase ---"
+```
+
+### Query Planning
+
+- `EXPLAIN <query>`: Show the logical execution plan for a SELECT query.
+- `AUDIT DATASET <name>`: Perform a deep health check on the reference graph — detects dangling tensor references.
 
 ---
 
@@ -189,8 +257,39 @@ Clears all in-memory registers (Tensors and Datasets) for the current session.
 
 For remote execution and production workloads.
 
-- **Background Jobs**: Submit commands via `POST /jobs` to get a `job_id`.
-- **Status Polling**: `GET /jobs/:id` returns `Pending`, `Running`, or `Completed`.
+### Background Jobs
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/jobs` | `POST` | Submit a DSL command for background execution. Returns `job_id`. |
+| `/jobs` | `GET` | List all jobs and their statuses. |
+| `/jobs/:id` | `GET` | Poll a specific job — returns `Pending`, `Running`, `Completed`, or `Failed`. |
+| `/jobs/:id/result` | `GET` | Retrieve structured `DslOutput` for a completed job. |
+| `/jobs/:id` | `DELETE` | Cancel a **Pending** job. Running or finished jobs cannot be cancelled. |
+
+### Scheduler
+
+Submit recurring DSL commands that execute on a fixed interval:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/schedule` | `POST` | Register a named scheduled command (`name`, `command`, `interval_secs`, optional `target_db`). |
+| `/schedule` | `GET` | List all active scheduled tasks. |
+| `/schedule/:id` | `DELETE` | Remove a scheduled task by ID. |
+
+### Other Server Endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | `GET` | Server health check. |
+| `/execute` | `POST` | Execute a DSL command synchronously. |
+| `/databases` | `GET` | List database instances. |
+| `/databases/:name` | `POST` | Create a database instance. |
+| `/databases/:name` | `DELETE` | Drop a database instance. |
+| `/delivery/...` | `GET` | Read-only dataset delivery endpoints. |
+
+Multi-tenant isolation is provided via the `X-Linal-Database: <db_name>` request header. Each request restores the previous active database after execution, so concurrent requests with different headers do not interfere.
+
 - **Graceful Shutdown**: Server handles `SIGINT`/`SIGTERM` to safely close connections.
 
 ---

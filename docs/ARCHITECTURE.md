@@ -261,12 +261,18 @@ HTTP server implementation built with **Axum**:
 - **High-Concurrency Model**: Uses `Arc<RwLock<TensorDb>>` to allow multiple parallel read operations (analytical queries) while maintaining exclusive access for state-modifying commands.
 - **Asynchronous Job System** (`jobs.rs`):
   - `POST /jobs`: Submit long-running queries for background execution.
+  - `GET /jobs`: List all jobs.
   - `GET /jobs/:id`: Poll for status (Pending, Running, Completed, Failed).
   - `GET /jobs/:id/result`: Retrieve structured `DslOutput`.
+  - `DELETE /jobs/:id`: Cancel a **Pending** job. Running or Completed jobs return `400 Bad Request`.
 - **Background Scheduler** (`scheduler.rs`): Cron-like execution of DSL commands registered at runtime.
-- **Multi-tenant Isolation**: Isolated database contexts via `X-Linal-Database` header.
+  - `POST /schedule`: Register a named task (`name`, `command`, `interval_secs`, optional `target_db`).
+  - `GET /schedule`: List active scheduled tasks.
+  - `DELETE /schedule/:id`: Remove a scheduled task.
+- **Database Management API**: `GET /databases`, `POST /databases/:name`, `DELETE /databases/:name`.
+- **Multi-tenant Isolation**: Isolated database contexts via `X-Linal-Database` header. After each request the server restores the previously active database, so concurrent requests with different headers cannot affect each other's context.
 - **Graceful Shutdown**: Native support for `SIGINT` and `SIGTERM` to ensure in-flight requests complete before termination.
-- **OpenAPI/Swagger documentation**: Interactive API explorer at `/swagger-ui`.
+- **OpenAPI/Swagger documentation**: Interactive API explorer at `/swagger-ui`. Note: only `/execute` and `/health` are currently included in the generated schema; all other routes are functional but undocumented in the spec.
 
 ### 6. Utils Module (`src/utils/`)
 
@@ -441,6 +447,14 @@ Value
     └── Tensor(Shape)
 ```
 
+### TensorKind
+
+Every stored tensor carries a `TensorKind` tag:
+
+- **`Normal`**: Default. Participates in all operations without restriction.
+- **`Strict`**: Shape-strictness flag. Any binary operation that takes at least one Strict operand produces a Strict result, making strictness contagious through a computation graph. Defined via `DEFINE x AS STRICT TENSOR [dims] VALUES [...]`.
+- **`Lazy`**: Set internally by `LAZY LET` / `LET LAZY`. The tensor has no data in the store; instead an `Expression` tree is kept in `lazy_store` and evaluated on first `SHOW`.
+
 ### Type Inference
 
 - **Arithmetic**: Int + Float → Float
@@ -570,23 +584,29 @@ Tensor Size → Allocation Strategy:
 **Backend Dispatch**:
 
 ```
-Operation → Size Check → Backend Selection:
-├─ Contiguous + ≥threshold → SimdBackend (SIMD optimized)
-├─ ≥50k elements → Rayon parallel execution
+Operation → CpuBackend:
+├─ Contiguous + ≥1024 elements → SimdBackend (SIMD optimized)
 └─ Otherwise → ScalarBackend (fallback)
 ```
 
-**SIMD Kernels**:
+`CpuBackend` dispatches to `SimdBackend` when the tensor is contiguous and has ≥1024 elements; otherwise it falls through to `ScalarBackend`. There is no separate Rayon backend tier — Rayon parallelism is embedded directly inside the kernel functions in `engine/kernels.rs`.
+
+**SIMD Kernels** (`src/core/backend/simd.rs`):
 
 - Platform-specific: NEON (ARM), SSE/AVX (x86_64)
-- Operations: add, sub, mul, matmul (tiled)
-- Automatic dispatch based on tensor properties
+- Operations with SIMD implementations: `add`, `sub`, `multiply`, `matmul` (tiled), `dot`, `distance`
+- Operations currently using scalar fallback (with TODOs): `divide`, `scale`, `normalize`, `sum`, `mean`, `stdev`, `cosine_similarity`, `transpose`, `flatten`, `reshape`, `stack`
+- Automatic dispatch based on tensor contiguity and element count
 
-**Parallel Execution**:
+**Parallel Execution** (via `rayon`, threshold: 50k elements):
 
-- Rayon for operations on ≥50k elements
+Rayon parallelism fires inside individual kernel functions in `engine/kernels.rs`, not as a separate dispatch tier:
+
+- `add`, `sub`, `multiply`: `par_iter()` for contiguous tensors ≥50k elements
+- `scalar_mul` (backing `SCALE`): `par_iter()` at ≥50k elements
+- `matmul`: `par_chunks_mut` for large tile passes
+- Dataset batch operations: `par_chunks` for row processing ≥10k rows
 - 2.5x speedup on 100k-element vectors
-- Automatic thread pool management
 
 ### Zero-Copy Operations
 
@@ -612,8 +632,8 @@ Operation → Size Check → Backend Selection:
 
 **Architecture**:
 
-- `dataset_legacy.rs`: Row-based (current, active)
-- `dataset/dataset.rs`: Zero-copy views (future)
+- `dataset_legacy.rs`: Row-based materialized tables (current, active for relational workloads)
+- `dataset/mod.rs`: Zero-copy reference graph datasets (active for tensor-first workloads)
 
 ### Performance Results
 
