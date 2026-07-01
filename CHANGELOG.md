@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.1.16] - 2026-07-01
+
+### Fixed — Executor Dispatch Bugs (All Remaining String Round-Trip Bugs)
+
+Eliminated five latent format-string bugs and ported five more statement handlers to direct engine API calls in `src/dsl/executor.rs`:
+
+- **`Audit`** — was passing `"AUDIT {target}"` but `handle_audit` expected `"AUDIT DATASET {target}"`; always errored at runtime. Now calls `db.verify_tensor_dataset()` directly.
+- **`Reset`** — was passing `"RESET"` but `handle_session` stripped prefix and checked `== "SESSION"`; always errored. Now calls `db.reset_session()` directly.
+- **`SetMetadata`** — format string was `"SET DATASET {ds} {key} = "{val}""` but handler expected `"SET DATASET {ds} METADATA {key} = "{val}""` (missing `METADATA` keyword); always errored.
+- **`Export`** — format string was `"EXPORT {name} TO "{path}""` but handler checked `rest.starts_with("CSV ")`; always errored. Fixed to `"EXPORT CSV {name} TO "{path}""`.
+- **`Import`** — the `name` field (`AS <alias>`) from `ImportStmt` was silently dropped from the format string; imports with an explicit alias were always ignored.
+
+### Changed — More Direct Engine Dispatch
+
+- **`CreateDatabase`** — calls `db.create_database()` directly (was delegating to `handlers::instance`)
+- **`DropDatabase`** — calls `db.drop_database()` directly
+- **`UseDatabase`** — calls `db.use_database()` directly
+- **`CreateIndex`** — calls `db.create_index()` directly based on `IndexKindAst`; removes the always-`HASH` format-string assumption
+
 ### Changed — Direct Executor Dispatch for Dataset Operations
 
 Eliminated four string-reconstruction round-trips in `src/dsl/executor.rs`. These statements now build engine objects directly from the typed AST instead of serialising back to a string and re-parsing:

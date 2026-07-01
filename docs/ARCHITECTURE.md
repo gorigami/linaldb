@@ -232,10 +232,12 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 
 #### `executor.rs` — Typed Dispatch Layer
 
-- `execute_statement(db, stmt, line_no, ctx)` — single `match` on `Statement`, routes each variant directly to the engine API (no string re-parsing)
+- `execute_statement(db, stmt, line_no, ctx)` — single `match` on `Statement`, routes every variant directly to the engine API with no string re-parsing
 - `eval_expr_to_name()` — recursive `Expr` → engine call evaluator; generates temporary tensor names via an atomic counter for sub-expressions
 - `eval_call()` — maps all 18 `CallExpr` variants to `eval_binary` / `eval_unary` / `eval_matmul` / etc., with lazy/eager branching
-- `expr_to_string()` — round-trips an `Expr` back to DSL text; used when delegating complex statements (SELECT WHERE) to legacy string-based handlers
+- `col_type_to_value_type()` — converts `ColType` → `ValueType` without a string round-trip
+- `dsl_expr_to_logical_expr()` — converts `ast::Expr` → `query::logical::Expr` for WHERE/HAVING clauses (arithmetic InfixOp only; comparison predicates fall through to legacy)
+- `expr_to_string()` — round-trips an `Expr` back to DSL text; used only for GROUP BY fallback (SELECT with GROUP BY still delegates to legacy handler since `SelectColumns` only carries column name strings)
 
 #### `mod.rs` — Dispatch Entry Point
 
@@ -246,21 +248,24 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 
 #### `handlers/`
 
-Legacy command handlers (still active as fallback and for complex SQL clauses):
+Legacy command handlers. Most statement types are now dispatched directly from `executor.rs`; the handlers below are still invoked for statements whose logic is not yet fully ported:
 
-- **tensor.rs**: DEFINE, VECTOR, MATRIX
-- **dataset.rs**: DATASET, INSERT INTO, SELECT, MATERIALIZE
-- **operations.rs**: LET, binary/unary operations
-- **index.rs**: CREATE INDEX, CREATE VECTOR INDEX
-- **search.rs**: SEARCH (vector similarity)
-- **persistence.rs**: SAVE, LOAD, LIST, IMPORT, EXPORT
-- **instance.rs**: CREATE DATABASE, USE, DROP DATABASE
-- **metadata.rs**: SET DATASET METADATA
-- **explain.rs**: EXPLAIN, EXPLAIN PLAN
-- **introspection.rs**: SHOW commands (SCHEMA, INDEXES, LINEAGE)
-- **semantics.rs**: BIND, ATTACH, DERIVE
-- **audit.rs**: AUDIT DATASET
-- **session.rs**: RESET
+- **dataset.rs**: `DATASET … FROM source` (query variant), `SELECT … GROUP BY` (aggregate fallback)
+- **explain.rs**: `EXPLAIN` — has real plan-building logic (`build_dataset_query_plan`, `build_select_query_plan`, `build_search_query_plan`)
+- **introspection.rs**: `SHOW` commands (SCHEMA, INDEXES, LINEAGE, DATASET METADATA, etc.)
+- **persistence.rs**: `SAVE`, `LOAD`, `LIST`, `IMPORT`, `EXPORT`
+- **search.rs**: `SEARCH` (vector similarity; AST fields are a subset of what the handler expects)
+- **metadata.rs**: `SET DATASET … METADATA …`
+
+The following handlers were **deleted** (fully superseded by the typed executor):
+
+- ~~**tensor.rs**~~: DEFINE, VECTOR, MATRIX
+- ~~**operations.rs**~~: LET, binary/unary operations
+- ~~**semantics.rs**~~: BIND, ATTACH, DERIVE
+- ~~**audit.rs**~~: AUDIT DATASET (now calls `db.verify_tensor_dataset()` directly)
+- ~~**session.rs**~~: RESET (now calls `db.reset_session()` directly)
+- ~~**index.rs**~~: CREATE INDEX (now calls `db.create_index()` directly)
+- ~~**instance.rs**~~: CREATE DATABASE, USE, DROP DATABASE (now calls engine methods directly)
 
 #### `error.rs`
 
@@ -737,7 +742,7 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 |-----------|----------------|-----------|
 | `Tensor` / `Shape` | **Semantic Core** | Frozen (v1) |
 | `ReferenceGraph` (TF Datasets) | **Semantic Core** | Frozen (v1) |
-| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.15) |
+| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.16) |
 | `SimdBackend` (NEON/AVX) | **Engine Extension** | Evolving |
 | `ParquetPersistence` | **Engine Extension** | Evolving |
 | `HttpServer` / `REST API` | **Application Layer** | Flexible |
