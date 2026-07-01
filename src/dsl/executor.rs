@@ -38,7 +38,10 @@ pub fn execute_statement(
             let values: Vec<f32> = s.values.iter().map(|&v| v as f32).collect();
             let kind = to_engine_kind(s.kind);
             db.insert_named_with_kind(s.name.clone(), shape, values, kind)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
             Ok(DslOutput::Message(format!("Defined tensor: {}", s.name)))
         }
 
@@ -47,7 +50,10 @@ pub fn execute_statement(
             let shape = Shape::new(vec![n]);
             let values: Vec<f32> = s.values.iter().map(|&v| v as f32).collect();
             db.insert_named_with_kind(s.name.clone(), shape, values, TensorKind::Normal)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
             Ok(DslOutput::Message(format!("Defined vector: {}", s.name)))
         }
 
@@ -55,7 +61,10 @@ pub fn execute_statement(
             let shape = Shape::new(vec![s.rows, s.cols]);
             let values: Vec<f32> = s.values.iter().map(|&v| v as f32).collect();
             db.insert_named_with_kind(s.name.clone(), shape, values, TensorKind::Normal)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
             Ok(DslOutput::Message(format!("Defined matrix: {}", s.name)))
         }
 
@@ -68,7 +77,10 @@ pub fn execute_statement(
         Statement::Bind(s) => {
             db.active_instance_mut()
                 .bind_resource(&s.alias, &s.target)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
             Ok(DslOutput::Message(format!(
                 "Bound alias '{}' to resource '{}'",
                 s.alias, s.target
@@ -78,7 +90,10 @@ pub fn execute_statement(
         Statement::Attach(s) => {
             db.active_instance_mut()
                 .add_column_to_tensor_dataset(&s.dataset, &s.column, &s.tensor)
-                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
             Ok(DslOutput::Message(format!(
                 "Attached tensor '{}' as column '{}' in dataset '{}'",
                 s.tensor, s.column, s.dataset
@@ -86,28 +101,20 @@ pub fn execute_statement(
         }
 
         // ── Database management ─────────────────────────────────────────────
-        Statement::CreateDatabase(s) => {
-            handlers::instance::handle_create_database(
-                db,
-                &format!("CREATE DATABASE {}", s.name),
-                line_no,
-            )
-        }
+        Statement::CreateDatabase(s) => handlers::instance::handle_create_database(
+            db,
+            &format!("CREATE DATABASE {}", s.name),
+            line_no,
+        ),
 
-        Statement::DropDatabase(s) => {
-            handlers::instance::handle_drop_database(
-                db,
-                &format!("DROP DATABASE {}", s.name),
-                line_no,
-            )
-        }
+        Statement::DropDatabase(s) => handlers::instance::handle_drop_database(
+            db,
+            &format!("DROP DATABASE {}", s.name),
+            line_no,
+        ),
 
         Statement::UseDatabase(s) => {
-            handlers::instance::handle_use_database(
-                db,
-                &format!("USE {}", s.name),
-                line_no,
-            )
+            handlers::instance::handle_use_database(db, &format!("USE {}", s.name), line_no)
         }
 
         // ── Introspection ───────────────────────────────────────────────────
@@ -152,13 +159,9 @@ pub fn execute_statement(
         }
 
         // ── Persistence ─────────────────────────────────────────────────────
-        Statement::Save(s) => {
-            handlers::persistence::handle_save(db, &save_to_string(&s), line_no)
-        }
+        Statement::Save(s) => handlers::persistence::handle_save(db, &save_to_string(&s), line_no),
 
-        Statement::Load(s) => {
-            handlers::persistence::handle_load(db, &load_to_string(&s), line_no)
-        }
+        Statement::Load(s) => handlers::persistence::handle_load(db, &load_to_string(&s), line_no),
 
         Statement::List(s) => {
             handlers::persistence::handle_list_datasets(db, &list_to_string(&s), line_no)
@@ -180,41 +183,31 @@ pub fn execute_statement(
             }
         }
 
-        Statement::Export(s) => {
-            handlers::persistence::handle_export(
-                db,
-                &format!("EXPORT {} TO \"{}\"", s.name, s.path),
-                line_no,
-            )
-        }
+        Statement::Export(s) => handlers::persistence::handle_export(
+            db,
+            &format!("EXPORT {} TO \"{}\"", s.name, s.path),
+            line_no,
+        ),
 
         // ── Index ───────────────────────────────────────────────────────────
-        Statement::CreateIndex(s) => {
-            handlers::index::handle_create_index(
-                db,
-                &format!("CREATE INDEX idx ON {}({})", s.dataset, s.column),
-                line_no,
-            )
-        }
+        Statement::CreateIndex(s) => handlers::index::handle_create_index(
+            db,
+            &format!("CREATE INDEX idx ON {}({})", s.dataset, s.column),
+            line_no,
+        ),
 
         // ── Metadata ────────────────────────────────────────────────────────
-        Statement::SetMetadata(s) => {
-            handlers::metadata::handle_set_metadata(
-                db,
-                &format!("SET DATASET {} {} = \"{}\"", s.dataset, s.key, s.value),
-                line_no,
-            )
-        }
+        Statement::SetMetadata(s) => handlers::metadata::handle_set_metadata(
+            db,
+            &format!("SET DATASET {} {} = \"{}\"", s.dataset, s.key, s.value),
+            line_no,
+        ),
 
         // ── Search ──────────────────────────────────────────────────────────
-        Statement::Search(s) => {
-            handlers::search::handle_search(db, &search_to_string(&s), line_no)
-        }
+        Statement::Search(s) => handlers::search::handle_search(db, &search_to_string(&s), line_no),
 
         // ── Session ─────────────────────────────────────────────────────────
-        Statement::Reset => {
-            handlers::session::handle_session(db, "RESET", line_no)
-        }
+        Statement::Reset => handlers::session::handle_session(db, "RESET", line_no),
     }
 }
 
@@ -250,7 +243,10 @@ fn eval_expr_to_name(
     lazy: bool,
     line_no: usize,
 ) -> Result<String, DslError> {
-    let eng = |e| DslError::Engine { line: line_no, source: e };
+    let eng = |e| DslError::Engine {
+        line: line_no,
+        source: e,
+    };
 
     match expr {
         // A bare name — no computation needed; just return the reference
@@ -303,9 +299,7 @@ fn eval_expr_to_name(
         Expr::Field { base, field } => {
             let base_tmp = fresh_temp("base");
             let base_name = eval_expr_to_name(db, ctx, &base_tmp, base, false, line_no)?;
-            if db.get_dataset(&base_name).is_ok()
-                || db.get_tensor_dataset(&base_name).is_some()
-            {
+            if db.get_dataset(&base_name).is_ok() || db.get_tensor_dataset(&base_name).is_some() {
                 db.eval_column_access(ctx, desired_name, &base_name, field)
             } else {
                 db.eval_field_access(ctx, desired_name, &base_name, field)
@@ -334,7 +328,10 @@ fn eval_call(
     lazy: bool,
     line_no: usize,
 ) -> Result<(), DslError> {
-    let eng = |e| DslError::Engine { line: line_no, source: e };
+    let eng = |e| DslError::Engine {
+        line: line_no,
+        source: e,
+    };
 
     // Resolve a sub-expression operand to a tensor name, creating a temp if needed
     macro_rules! operand {
@@ -348,87 +345,124 @@ fn eval_call(
         // ── Two-operand ops ─────────────────────────────────────────────────
         CallExpr::Add(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            if lazy { db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Add) }
-            else     { db.eval_binary(ctx, output, &a, &b, BinaryOp::Add) }
+            if lazy {
+                db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Add)
+            } else {
+                db.eval_binary(ctx, output, &a, &b, BinaryOp::Add)
+            }
             .map_err(eng)
         }
         CallExpr::Subtract(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            if lazy { db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Subtract) }
-            else     { db.eval_binary(ctx, output, &a, &b, BinaryOp::Subtract) }
+            if lazy {
+                db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Subtract)
+            } else {
+                db.eval_binary(ctx, output, &a, &b, BinaryOp::Subtract)
+            }
             .map_err(eng)
         }
         CallExpr::Multiply(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            if lazy { db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Multiply) }
-            else     { db.eval_binary(ctx, output, &a, &b, BinaryOp::Multiply) }
+            if lazy {
+                db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Multiply)
+            } else {
+                db.eval_binary(ctx, output, &a, &b, BinaryOp::Multiply)
+            }
             .map_err(eng)
         }
         CallExpr::Divide(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            if lazy { db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Divide) }
-            else     { db.eval_binary(ctx, output, &a, &b, BinaryOp::Divide) }
+            if lazy {
+                db.eval_lazy_binary(ctx, output, &a, &b, BinaryOp::Divide)
+            } else {
+                db.eval_binary(ctx, output, &a, &b, BinaryOp::Divide)
+            }
             .map_err(eng)
         }
         CallExpr::Correlate(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            db.eval_binary(ctx, output, &a, &b, BinaryOp::Correlate).map_err(eng)
+            db.eval_binary(ctx, output, &a, &b, BinaryOp::Correlate)
+                .map_err(eng)
         }
         CallExpr::Similarity(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            db.eval_binary(ctx, output, &a, &b, BinaryOp::Similarity).map_err(eng)
+            db.eval_binary(ctx, output, &a, &b, BinaryOp::Similarity)
+                .map_err(eng)
         }
         CallExpr::Distance(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            db.eval_binary(ctx, output, &a, &b, BinaryOp::Distance).map_err(eng)
+            db.eval_binary(ctx, output, &a, &b, BinaryOp::Distance)
+                .map_err(eng)
         }
         CallExpr::Matmul(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
-            if lazy { db.eval_lazy_matmul(ctx, output, &a, &b) }
-            else     { db.eval_matmul(ctx, output, &a, &b) }
+            if lazy {
+                db.eval_lazy_matmul(ctx, output, &a, &b)
+            } else {
+                db.eval_matmul(ctx, output, &a, &b)
+            }
             .map_err(eng)
         }
 
         // ── Single-operand ops ──────────────────────────────────────────────
         CallExpr::Normalize(a) => {
             let a = operand!(a, "a");
-            if lazy { db.eval_lazy_unary(ctx, output, &a, UnaryOp::Normalize) }
-            else     { db.eval_unary(ctx, output, &a, UnaryOp::Normalize) }
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Normalize)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Normalize)
+            }
             .map_err(eng)
         }
         CallExpr::Transpose(a) => {
             let a = operand!(a, "a");
-            db.eval_unary(ctx, output, &a, UnaryOp::Transpose).map_err(eng)
+            db.eval_unary(ctx, output, &a, UnaryOp::Transpose)
+                .map_err(eng)
         }
         CallExpr::Flatten(a) => {
             let a = operand!(a, "a");
-            if lazy { db.eval_lazy_unary(ctx, output, &a, UnaryOp::Flatten) }
-            else     { db.eval_unary(ctx, output, &a, UnaryOp::Flatten) }
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Flatten)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Flatten)
+            }
             .map_err(eng)
         }
         CallExpr::Sum(a) => {
             let a = operand!(a, "a");
-            if lazy { db.eval_lazy_unary(ctx, output, &a, UnaryOp::Sum) }
-            else     { db.eval_unary(ctx, output, &a, UnaryOp::Sum) }
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Sum)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Sum)
+            }
             .map_err(eng)
         }
         CallExpr::Mean(a) => {
             let a = operand!(a, "a");
-            if lazy { db.eval_lazy_unary(ctx, output, &a, UnaryOp::Mean) }
-            else     { db.eval_unary(ctx, output, &a, UnaryOp::Mean) }
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Mean)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Mean)
+            }
             .map_err(eng)
         }
         CallExpr::Stdev(a) => {
             let a = operand!(a, "a");
-            if lazy { db.eval_lazy_unary(ctx, output, &a, UnaryOp::Stdev) }
-            else     { db.eval_unary(ctx, output, &a, UnaryOp::Stdev) }
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Stdev)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Stdev)
+            }
             .map_err(eng)
         }
         CallExpr::Scale { input, factor } => {
             let a = operand!(input, "a");
             let op = UnaryOp::Scale(*factor as f32);
-            if lazy { db.eval_lazy_unary(ctx, output, &a, op) }
-            else     { db.eval_unary(ctx, output, &a, op) }
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, op)
+            } else {
+                db.eval_unary(ctx, output, &a, op)
+            }
             .map_err(eng)
         }
         CallExpr::Reshape { input, shape } => {
@@ -463,7 +497,10 @@ fn apply_index(
     line_no: usize,
 ) -> Result<(), DslError> {
     use crate::engine::kernels::SliceSpec;
-    let eng = |e| DslError::Engine { line: line_no, source: e };
+    let eng = |e| DslError::Engine {
+        line: line_no,
+        source: e,
+    };
 
     let specs: Vec<SliceSpec> = indices
         .iter()
@@ -478,7 +515,13 @@ fn apply_index(
     if all_single {
         let idx: Vec<usize> = specs
             .iter()
-            .filter_map(|s| if let SliceSpec::Index(n) = s { Some(*n) } else { None })
+            .filter_map(|s| {
+                if let SliceSpec::Index(n) = s {
+                    Some(*n)
+                } else {
+                    None
+                }
+            })
             .collect();
         db.eval_index(ctx, output, base_name, idx).map_err(eng)
     } else {
@@ -492,16 +535,16 @@ fn to_engine_kind(k: TensorKindAst) -> TensorKind {
     match k {
         TensorKindAst::Normal => TensorKind::Normal,
         TensorKindAst::Strict => TensorKind::Strict,
-        TensorKindAst::Lazy   => TensorKind::Lazy,
+        TensorKindAst::Lazy => TensorKind::Lazy,
     }
 }
 
 fn infix_to_binary_op(op: InfixOp) -> BinaryOp {
     match op {
-        InfixOp::Add      => BinaryOp::Add,
+        InfixOp::Add => BinaryOp::Add,
         InfixOp::Subtract => BinaryOp::Subtract,
         InfixOp::Multiply => BinaryOp::Multiply,
-        InfixOp::Divide   => BinaryOp::Divide,
+        InfixOp::Divide => BinaryOp::Divide,
     }
 }
 
@@ -517,18 +560,18 @@ fn fresh_temp(hint: &str) -> String {
 
 fn show_to_string(s: &ShowStmt) -> String {
     let target = match &s.target {
-        ShowTarget::All               => "ALL".to_string(),
-        ShowTarget::AllDatasets       => "ALL DATASETS".to_string(),
-        ShowTarget::AllDatabases      => "DATABASES".to_string(),
-        ShowTarget::Schema(n)         => format!("SCHEMA {}", n),
-        ShowTarget::Shape(n)          => format!("SHAPE {}", n),
-        ShowTarget::Lineage(n)        => format!("LINEAGE {}", n),
-        ShowTarget::Indexes(None)     => "INDEXES".to_string(),
-        ShowTarget::Indexes(Some(n))  => format!("INDEXES {}", n),
-        ShowTarget::DatasetMetadata(n)=> format!("DATASET METADATA {}", n),
-        ShowTarget::DatasetVersions(n)=> format!("DATASET VERSIONS {}", n),
-        ShowTarget::StringLiteral(s)  => format!("\"{}\"", s),
-        ShowTarget::Named(n)          => n.clone(),
+        ShowTarget::All => "ALL".to_string(),
+        ShowTarget::AllDatasets => "ALL DATASETS".to_string(),
+        ShowTarget::AllDatabases => "DATABASES".to_string(),
+        ShowTarget::Schema(n) => format!("SCHEMA {}", n),
+        ShowTarget::Shape(n) => format!("SHAPE {}", n),
+        ShowTarget::Lineage(n) => format!("LINEAGE {}", n),
+        ShowTarget::Indexes(None) => "INDEXES".to_string(),
+        ShowTarget::Indexes(Some(n)) => format!("INDEXES {}", n),
+        ShowTarget::DatasetMetadata(n) => format!("DATASET METADATA {}", n),
+        ShowTarget::DatasetVersions(n) => format!("DATASET VERSIONS {}", n),
+        ShowTarget::StringLiteral(s) => format!("\"{}\"", s),
+        ShowTarget::Named(n) => n.clone(),
     };
     format!("SHOW {}", target)
 }
@@ -540,7 +583,14 @@ fn create_dataset_to_string(s: &CreateDatasetStmt) -> String {
     let cols: Vec<String> = s
         .columns
         .iter()
-        .map(|c| format!("{}: {}{}", c.name, col_type_to_string(&c.col_type), if c.nullable { "" } else { " NOT NULLABLE" }))
+        .map(|c| {
+            format!(
+                "{}: {}{}",
+                c.name,
+                col_type_to_string(&c.col_type),
+                if c.nullable { "" } else { " NOT NULLABLE" }
+            )
+        })
         .collect();
     format!("DATASET {} COLUMNS ({})", s.name, cols.join(", "))
 }
@@ -559,13 +609,13 @@ fn alter_dataset_to_string(s: &AlterDatasetStmt) -> String {
 
 fn col_type_to_string(t: &ColType) -> String {
     match t {
-        ColType::Int           => "Int".into(),
-        ColType::Float         => "Float".into(),
-        ColType::String        => "String".into(),
-        ColType::Bool          => "Bool".into(),
-        ColType::Vector(n)     => format!("Vector({})", n),
-        ColType::Matrix(r, c)  => format!("Matrix({}, {})", r, c),
-        ColType::Tensor(dims)  => {
+        ColType::Int => "Int".into(),
+        ColType::Float => "Float".into(),
+        ColType::String => "String".into(),
+        ColType::Bool => "Bool".into(),
+        ColType::Vector(n) => format!("Vector({})", n),
+        ColType::Matrix(r, c) => format!("Matrix({}, {})", r, c),
+        ColType::Tensor(dims) => {
             let d: Vec<String> = dims.iter().map(|n| n.to_string()).collect();
             format!("Tensor[{}]", d.join(", "))
         }
@@ -578,10 +628,10 @@ fn insert_to_string(s: &InsertIntoStmt) -> String {
         .iter()
         .map(|(col, val)| {
             let v = match val {
-                InsertValue::Scalar(n)    => format!("{}", n),
-                InsertValue::Text(t)      => format!("\"{}\"", t),
+                InsertValue::Scalar(n) => format!("{}", n),
+                InsertValue::Text(t) => format!("\"{}\"", t),
                 InsertValue::TensorRef(r) => r.clone(),
-                InsertValue::Null         => "NULL".into(),
+                InsertValue::Null => "NULL".into(),
             };
             format!("{} = {}", col, v)
         })
@@ -591,8 +641,8 @@ fn insert_to_string(s: &InsertIntoStmt) -> String {
 
 fn select_to_string(s: &SelectStmt) -> String {
     let cols = match &s.columns {
-        SelectColumns::All        => "*".to_string(),
-        SelectColumns::Named(cs)  => cs.join(", "),
+        SelectColumns::All => "*".to_string(),
+        SelectColumns::Named(cs) => cs.join(", "),
     };
     let mut q = format!("SELECT {} FROM {}", cols, s.dataset);
     if let Some(f) = &s.filter {
@@ -620,32 +670,38 @@ fn select_to_string(s: &SelectStmt) -> String {
 fn deliver_to_string(s: &DeliverStmt) -> String {
     match &s.path {
         Some(p) => format!("DELIVER {} TO \"{}\"", s.dataset, p),
-        None    => format!("DELIVER {}", s.dataset),
+        None => format!("DELIVER {}", s.dataset),
     }
 }
 
 fn save_to_string(s: &SaveStmt) -> String {
-    let kind = match s.kind { PersistKind::Tensor => "TENSOR", PersistKind::Dataset => "DATASET" };
+    let kind = match s.kind {
+        PersistKind::Tensor => "TENSOR",
+        PersistKind::Dataset => "DATASET",
+    };
     match &s.path {
         Some(p) => format!("SAVE {} {} TO \"{}\"", kind, s.name, p),
-        None    => format!("SAVE {} {}", kind, s.name),
+        None => format!("SAVE {} {}", kind, s.name),
     }
 }
 
 fn load_to_string(s: &LoadStmt) -> String {
-    let kind = match s.kind { PersistKind::Tensor => "TENSOR", PersistKind::Dataset => "DATASET" };
+    let kind = match s.kind {
+        PersistKind::Tensor => "TENSOR",
+        PersistKind::Dataset => "DATASET",
+    };
     match &s.path {
         Some(p) => format!("LOAD {} {} FROM \"{}\"", kind, s.name, p),
-        None    => format!("LOAD {} {}", kind, s.name),
+        None => format!("LOAD {} {}", kind, s.name),
     }
 }
 
 fn list_to_string(s: &ListStmt) -> String {
     match &s.target {
-        ListTarget::Tensors              => "LIST TENSORS".into(),
-        ListTarget::Datasets             => "LIST DATASETS".into(),
-        ListTarget::DatasetVersions(n)   => format!("LIST DATASET VERSIONS {}", n),
-        ListTarget::DatasetPackages      => "LIST DATASET PACKAGES".into(),
+        ListTarget::Tensors => "LIST TENSORS".into(),
+        ListTarget::Datasets => "LIST DATASETS".into(),
+        ListTarget::DatasetVersions(n) => format!("LIST DATASET VERSIONS {}", n),
+        ListTarget::DatasetPackages => "LIST DATASET PACKAGES".into(),
     }
 }
 
@@ -664,53 +720,63 @@ fn search_to_string(s: &SearchStmt) -> String {
 /// that still does its own string parsing (e.g. SELECT WHERE clauses).
 pub fn expr_to_string(expr: &Expr) -> String {
     match expr {
-        Expr::Ref(n)         => n.clone(),
-        Expr::Scalar(n)      => format!("{}", n),
-        Expr::StringLit(s)   => format!("\"{}\"", s),
+        Expr::Ref(n) => n.clone(),
+        Expr::Scalar(n) => format!("{}", n),
+        Expr::StringLit(s) => format!("\"{}\"", s),
         Expr::Infix { op, lhs, rhs } => {
             let sym = match op {
-                InfixOp::Add      => "+",
+                InfixOp::Add => "+",
                 InfixOp::Subtract => "-",
                 InfixOp::Multiply => "*",
-                InfixOp::Divide   => "/",
+                InfixOp::Divide => "/",
             };
             format!("{} {} {}", expr_to_string(lhs), sym, expr_to_string(rhs))
         }
-        Expr::Field { base, field }   => format!("{}.{}", expr_to_string(base), field),
+        Expr::Field { base, field } => format!("{}.{}", expr_to_string(base), field),
         Expr::Index { base, indices } => {
             let idx: Vec<String> = indices
                 .iter()
                 .map(|i| match i {
-                    IndexSpec::All        => "*".into(),
-                    IndexSpec::Index(n)   => n.to_string(),
-                    IndexSpec::Range(s,e) => format!("{}:{}", s, e),
+                    IndexSpec::All => "*".into(),
+                    IndexSpec::Index(n) => n.to_string(),
+                    IndexSpec::Range(s, e) => format!("{}:{}", s, e),
                 })
                 .collect();
             format!("{}[{}]", expr_to_string(base), idx.join(", "))
         }
-        Expr::Call(c)          => call_to_string(c),
+        Expr::Call(c) => call_to_string(c),
         Expr::DatasetRef(name) => format!("dataset(\"{}\")", name),
     }
 }
 
 fn call_to_string(c: &CallExpr) -> String {
     match c {
-        CallExpr::Add(a, b)       => format!("ADD {} {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Subtract(a, b)  => format!("SUBTRACT {} {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Multiply(a, b)  => format!("MULTIPLY {} {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Divide(a, b)    => format!("DIVIDE {} {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Correlate(a, b) => format!("CORRELATE {} WITH {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Similarity(a,b) => format!("SIMILARITY {} WITH {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Distance(a, b)  => format!("DISTANCE {} TO {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Matmul(a, b)    => format!("MATMUL {} {}", expr_to_string(a), expr_to_string(b)),
-        CallExpr::Normalize(a)    => format!("NORMALIZE {}", expr_to_string(a)),
-        CallExpr::Transpose(a)    => format!("TRANSPOSE {}", expr_to_string(a)),
-        CallExpr::Flatten(a)      => format!("FLATTEN {}", expr_to_string(a)),
-        CallExpr::Sum(a)          => format!("SUM {}", expr_to_string(a)),
-        CallExpr::Mean(a)         => format!("MEAN {}", expr_to_string(a)),
-        CallExpr::Stdev(a)        => format!("STDEV {}", expr_to_string(a)),
-        CallExpr::Scale { input, factor }     => format!("SCALE {} BY {}", expr_to_string(input), factor),
-        CallExpr::Reshape { input, shape }    => {
+        CallExpr::Add(a, b) => format!("ADD {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Subtract(a, b) => format!("SUBTRACT {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Multiply(a, b) => format!("MULTIPLY {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Divide(a, b) => format!("DIVIDE {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Correlate(a, b) => {
+            format!("CORRELATE {} WITH {}", expr_to_string(a), expr_to_string(b))
+        }
+        CallExpr::Similarity(a, b) => format!(
+            "SIMILARITY {} WITH {}",
+            expr_to_string(a),
+            expr_to_string(b)
+        ),
+        CallExpr::Distance(a, b) => {
+            format!("DISTANCE {} TO {}", expr_to_string(a), expr_to_string(b))
+        }
+        CallExpr::Matmul(a, b) => format!("MATMUL {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Normalize(a) => format!("NORMALIZE {}", expr_to_string(a)),
+        CallExpr::Transpose(a) => format!("TRANSPOSE {}", expr_to_string(a)),
+        CallExpr::Flatten(a) => format!("FLATTEN {}", expr_to_string(a)),
+        CallExpr::Sum(a) => format!("SUM {}", expr_to_string(a)),
+        CallExpr::Mean(a) => format!("MEAN {}", expr_to_string(a)),
+        CallExpr::Stdev(a) => format!("STDEV {}", expr_to_string(a)),
+        CallExpr::Scale { input, factor } => {
+            format!("SCALE {} BY {}", expr_to_string(input), factor)
+        }
+        CallExpr::Reshape { input, shape } => {
             let d: Vec<String> = shape.iter().map(|n| n.to_string()).collect();
             format!("RESHAPE {} TO [{}]", expr_to_string(input), d.join(", "))
         }

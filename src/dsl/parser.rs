@@ -21,7 +21,10 @@ impl std::fmt::Display for ParseError {
 impl ParseError {
     /// Convert to a `DslError::Parse` using the given line number.
     pub fn into_dsl_error(self, line: usize) -> crate::dsl::DslError {
-        crate::dsl::DslError::Parse { line, msg: self.msg }
+        crate::dsl::DslError::Parse {
+            line,
+            msg: self.msg,
+        }
     }
 }
 
@@ -35,7 +38,11 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<(Token, Span)>, source_len: usize) -> Self {
-        Self { tokens, pos: 0, end: source_len }
+        Self {
+            tokens,
+            pos: 0,
+            end: source_len,
+        }
     }
 
     // ── Cursor primitives ────────────────────────────────────────────────────
@@ -156,13 +163,17 @@ impl Parser {
 
     fn eat_usize(&mut self) -> Result<usize, ParseError> {
         let n = self.eat_int()?;
-        n.try_into().map_err(|_| self.error(format!("expected non-negative integer, got {}", n)))
+        n.try_into()
+            .map_err(|_| self.error(format!("expected non-negative integer, got {}", n)))
     }
 
     // ── Error helpers ────────────────────────────────────────────────────────
 
     fn error(&self, msg: impl Into<String>) -> ParseError {
-        ParseError { offset: self.current_span().start, msg: msg.into() }
+        ParseError {
+            offset: self.current_span().start,
+            msg: msg.into(),
+        }
     }
 
     fn unexpected(&self, expected: &str) -> ParseError {
@@ -195,7 +206,10 @@ pub fn parse(source: &str) -> Result<Statement, ParseError> {
     let mut p = Parser::new(tokens, source.len());
 
     if p.eof() {
-        return Err(ParseError { offset: 0, msg: "empty input".to_string() });
+        return Err(ParseError {
+            offset: 0,
+            msg: "empty input".to_string(),
+        });
     }
 
     let stmt = p.parse_statement()?;
@@ -215,34 +229,36 @@ pub fn parse(source: &str) -> Result<Statement, ParseError> {
 impl Parser {
     fn parse_statement(&mut self) -> Result<Statement, ParseError> {
         match self.peek() {
-            Some(Token::Define)      => self.parse_define_tensor(),
-            Some(Token::Vector)      => self.parse_vector(),
-            Some(Token::Matrix)      => self.parse_matrix(),
-            Some(Token::Let)
-            | Some(Token::Lazy)      => self.parse_let(),
-            Some(Token::Derive)      => self.parse_derive(),
-            Some(Token::Show)        => self.parse_show(),
-            Some(Token::Bind)        => self.parse_bind(),
-            Some(Token::Attach)      => self.parse_attach(),
-            Some(Token::Dataset)     => self.parse_create_dataset(),
-            Some(Token::Insert)      => self.parse_insert_into(),
-            Some(Token::Select)      => self.parse_select(),
+            Some(Token::Define) => self.parse_define_tensor(),
+            Some(Token::Vector) => self.parse_vector(),
+            Some(Token::Matrix) => self.parse_matrix(),
+            Some(Token::Let) | Some(Token::Lazy) => self.parse_let(),
+            Some(Token::Derive) => self.parse_derive(),
+            Some(Token::Show) => self.parse_show(),
+            Some(Token::Bind) => self.parse_bind(),
+            Some(Token::Attach) => self.parse_attach(),
+            Some(Token::Dataset) => self.parse_create_dataset(),
+            Some(Token::Insert) => self.parse_insert_into(),
+            Some(Token::Select) => self.parse_select(),
             Some(Token::Materialize) => self.parse_materialize(),
-            Some(Token::Deliver)     => self.parse_deliver(),
-            Some(Token::Explain)     => self.parse_explain(),
-            Some(Token::Audit)       => self.parse_audit(),
-            Some(Token::Save)        => self.parse_save(),
-            Some(Token::Load)        => self.parse_load(),
-            Some(Token::List)        => self.parse_list(),
-            Some(Token::Import)      => self.parse_import(),
-            Some(Token::Export)      => self.parse_export(),
-            Some(Token::Create)      => self.parse_create(),
-            Some(Token::Alter)       => self.parse_alter(),
-            Some(Token::Drop)        => self.parse_drop(),
-            Some(Token::Use)         => self.parse_use(),
-            Some(Token::Set)         => self.parse_set(),
-            Some(Token::Search)      => self.parse_search(),
-            Some(Token::Reset)       => { self.advance(); Ok(Statement::Reset) }
+            Some(Token::Deliver) => self.parse_deliver(),
+            Some(Token::Explain) => self.parse_explain(),
+            Some(Token::Audit) => self.parse_audit(),
+            Some(Token::Save) => self.parse_save(),
+            Some(Token::Load) => self.parse_load(),
+            Some(Token::List) => self.parse_list(),
+            Some(Token::Import) => self.parse_import(),
+            Some(Token::Export) => self.parse_export(),
+            Some(Token::Create) => self.parse_create(),
+            Some(Token::Alter) => self.parse_alter(),
+            Some(Token::Drop) => self.parse_drop(),
+            Some(Token::Use) => self.parse_use(),
+            Some(Token::Set) => self.parse_set(),
+            Some(Token::Search) => self.parse_search(),
+            Some(Token::Reset) => {
+                self.advance();
+                Ok(Statement::Reset)
+            }
             _ => Err(self.unexpected("a statement keyword")),
         }
     }
@@ -270,7 +286,12 @@ impl Parser {
         self.eat(&Token::Values)?;
         let values = self.parse_f64_list()?;
 
-        Ok(Statement::DefineTensor(DefineTensorStmt { name, kind, shape, values }))
+        Ok(Statement::DefineTensor(DefineTensorStmt {
+            name,
+            kind,
+            shape,
+            values,
+        }))
     }
 
     // VECTOR <name> = [values]
@@ -292,7 +313,9 @@ impl Parser {
         let mut rows_data: Vec<Vec<f64>> = Vec::new();
         while !self.at(&Token::RBracket) && !self.eof() {
             rows_data.push(self.parse_f64_list()?);
-            if self.at(&Token::Comma) { self.advance(); }
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
         }
         self.eat(&Token::RBracket)?;
 
@@ -304,14 +327,21 @@ impl Parser {
             if row.len() != cols {
                 return Err(self.error(format!(
                     "row {} has {} values, expected {}",
-                    i, row.len(), cols
+                    i,
+                    row.len(),
+                    cols
                 )));
             }
         }
         let rows = rows_data.len();
         let values: Vec<f64> = rows_data.into_iter().flatten().collect();
 
-        Ok(Statement::Matrix(MatrixStmt { name, rows, cols, values }))
+        Ok(Statement::Matrix(MatrixStmt {
+            name,
+            rows,
+            cols,
+            values,
+        }))
     }
 
     // LET <name> = <expr>
@@ -327,7 +357,9 @@ impl Parser {
             Some(Token::Let) => {
                 self.advance();
                 let lazy = self.at(&Token::Lazy);
-                if lazy { self.advance(); }
+                if lazy {
+                    self.advance();
+                }
                 lazy
             }
             _ => return Err(self.unexpected("LET or LAZY LET")),
@@ -366,7 +398,11 @@ impl Parser {
         let dataset = self.eat_ident()?;
         self.eat(&Token::Dot)?;
         let column = self.eat_ident()?;
-        Ok(Statement::Attach(AttachStmt { tensor, dataset, column }))
+        Ok(Statement::Attach(AttachStmt {
+            tensor,
+            dataset,
+            column,
+        }))
     }
 
     // SHOW <target>
@@ -377,31 +413,47 @@ impl Parser {
             Some(Token::All) => {
                 self.advance();
                 match self.peek() {
-                    Some(Token::Datasets)  => { self.advance(); ShowTarget::AllDatasets }
-                    Some(Token::Databases) => { self.advance(); ShowTarget::AllDatabases }
-                    Some(Token::Tensors)   => { self.advance(); ShowTarget::All }
-                    _                      => ShowTarget::All,
+                    Some(Token::Datasets) => {
+                        self.advance();
+                        ShowTarget::AllDatasets
+                    }
+                    Some(Token::Databases) => {
+                        self.advance();
+                        ShowTarget::AllDatabases
+                    }
+                    Some(Token::Tensors) => {
+                        self.advance();
+                        ShowTarget::All
+                    }
+                    _ => ShowTarget::All,
                 }
             }
-            Some(Token::Databases) => { self.advance(); ShowTarget::AllDatabases }
-            Some(Token::Schema)    => {
+            Some(Token::Databases) => {
+                self.advance();
+                ShowTarget::AllDatabases
+            }
+            Some(Token::Schema) => {
                 self.advance();
                 ShowTarget::Schema(self.eat_ident()?)
             }
-            Some(Token::Shape)     => {
+            Some(Token::Shape) => {
                 self.advance();
                 ShowTarget::Shape(self.eat_ident()?)
             }
-            Some(Token::Lineage)   => {
+            Some(Token::Lineage) => {
                 self.advance();
                 ShowTarget::Lineage(self.eat_ident()?)
             }
-            Some(Token::Indexes)   => {
+            Some(Token::Indexes) => {
                 self.advance();
-                let ds = if self.at_any_ident() { Some(self.eat_ident()?) } else { None };
+                let ds = if self.at_any_ident() {
+                    Some(self.eat_ident()?)
+                } else {
+                    None
+                };
                 ShowTarget::Indexes(ds)
             }
-            Some(Token::Dataset)   => {
+            Some(Token::Dataset) => {
                 self.advance();
                 match self.peek() {
                     Some(Token::Metadata) => {
@@ -415,8 +467,8 @@ impl Parser {
                     _ => return Err(self.unexpected("METADATA or VERSIONS after SHOW DATASET")),
                 }
             }
-            Some(Token::Str(_))    => ShowTarget::StringLiteral(self.eat_str()?),
-            Some(Token::Ident(_))  => ShowTarget::Named(self.eat_ident()?),
+            Some(Token::Str(_)) => ShowTarget::StringLiteral(self.eat_str()?),
+            Some(Token::Ident(_)) => ShowTarget::Named(self.eat_ident()?),
             _ => return Err(self.unexpected("a SHOW target")),
         };
 
@@ -432,7 +484,11 @@ impl Parser {
             Some(Token::Columns) => {
                 self.advance();
                 let columns = self.parse_column_list()?;
-                Ok(Statement::CreateDataset(CreateDatasetStmt { name, columns, from: None }))
+                Ok(Statement::CreateDataset(CreateDatasetStmt {
+                    name,
+                    columns,
+                    from: None,
+                }))
             }
             Some(Token::From) => {
                 self.advance();
@@ -474,7 +530,9 @@ impl Parser {
             self.eat(&Token::Eq)?;
             let val = self.parse_insert_value()?;
             row.push((col, val));
-            if self.at(&Token::Comma) { self.advance(); }
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
         }
         self.eat(&Token::RParen)?;
 
@@ -483,12 +541,15 @@ impl Parser {
 
     fn parse_insert_value(&mut self) -> Result<InsertValue, ParseError> {
         match self.peek() {
-            Some(Token::Null)    => { self.advance(); Ok(InsertValue::Null) }
-            Some(Token::Str(_))  => Ok(InsertValue::Text(self.eat_str()?)),
-            Some(Token::Float(_))
-            | Some(Token::Int(_))
-            | Some(Token::Minus) => Ok(InsertValue::Scalar(self.eat_number()?)),
-            Some(Token::Ident(_))=> Ok(InsertValue::TensorRef(self.eat_ident()?)),
+            Some(Token::Null) => {
+                self.advance();
+                Ok(InsertValue::Null)
+            }
+            Some(Token::Str(_)) => Ok(InsertValue::Text(self.eat_str()?)),
+            Some(Token::Float(_)) | Some(Token::Int(_)) | Some(Token::Minus) => {
+                Ok(InsertValue::Scalar(self.eat_number()?))
+            }
+            Some(Token::Ident(_)) => Ok(InsertValue::TensorRef(self.eat_ident()?)),
             _ => Err(self.unexpected("a value (number, string, identifier, or NULL)")),
         }
     }
@@ -527,7 +588,9 @@ impl Parser {
                 }
                 Some(Token::Group) => {
                     self.advance();
-                    if self.at(&Token::By) { self.advance(); }
+                    if self.at(&Token::By) {
+                        self.advance();
+                    }
                     group_by.push(self.eat_ident()?);
                     while self.at(&Token::Comma) {
                         self.advance();
@@ -540,11 +603,15 @@ impl Parser {
                 }
                 Some(Token::Order) => {
                     self.advance();
-                    if self.at(&Token::By) { self.advance(); }
+                    if self.at(&Token::By) {
+                        self.advance();
+                    }
                     let column = self.eat_ident()?;
                     // Optional ASC/DESC
                     let ascending = !self.at_ident("DESC");
-                    if self.at_ident("ASC") || self.at_ident("DESC") { self.advance(); }
+                    if self.at_ident("ASC") || self.at_ident("DESC") {
+                        self.advance();
+                    }
                     order_by = Some(OrderByClause { column, ascending });
                 }
                 Some(Token::Limit) => {
@@ -639,8 +706,14 @@ impl Parser {
 
     fn parse_persist_kind(&mut self) -> Result<PersistKind, ParseError> {
         match self.peek() {
-            Some(Token::Tensor)  => { self.advance(); Ok(PersistKind::Tensor) }
-            Some(Token::Dataset) => { self.advance(); Ok(PersistKind::Dataset) }
+            Some(Token::Tensor) => {
+                self.advance();
+                Ok(PersistKind::Tensor)
+            }
+            Some(Token::Dataset) => {
+                self.advance();
+                Ok(PersistKind::Dataset)
+            }
             _ => Err(self.unexpected("TENSOR or DATASET")),
         }
     }
@@ -651,9 +724,15 @@ impl Parser {
     fn parse_list(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::List)?;
         let target = match self.peek() {
-            Some(Token::Tensors)  => { self.advance(); ListTarget::Tensors }
-            Some(Token::Datasets) => { self.advance(); ListTarget::Datasets }
-            Some(Token::Dataset)  => {
+            Some(Token::Tensors) => {
+                self.advance();
+                ListTarget::Tensors
+            }
+            Some(Token::Datasets) => {
+                self.advance();
+                ListTarget::Datasets
+            }
+            Some(Token::Dataset) => {
                 self.advance();
                 if self.at(&Token::Versions) {
                     self.advance();
@@ -676,7 +755,11 @@ impl Parser {
         self.eat(&Token::Dataset)?;
         self.eat(&Token::From)?;
         let path = self.eat_str()?;
-        Ok(Statement::Import(ImportStmt { ephemeral: false, path, name: None }))
+        Ok(Statement::Import(ImportStmt {
+            ephemeral: false,
+            path,
+            name: None,
+        }))
     }
 
     // EXPORT <name> TO <path>
@@ -697,11 +780,15 @@ impl Parser {
                 self.advance();
                 self.eat(&Token::From)?;
                 let path = self.eat_str()?;
-                Ok(Statement::Import(ImportStmt { ephemeral: true, path, name: None }))
+                Ok(Statement::Import(ImportStmt {
+                    ephemeral: true,
+                    path,
+                    name: None,
+                }))
             }
-            Some(Token::Ident(_)) => {
-                Ok(Statement::UseDatabase(UseDatabaseStmt { name: self.eat_ident()? }))
-            }
+            Some(Token::Ident(_)) => Ok(Statement::UseDatabase(UseDatabaseStmt {
+                name: self.eat_ident()?,
+            })),
             _ => Err(self.unexpected("a database name or DATASET FROM")),
         }
     }
@@ -719,7 +806,11 @@ impl Parser {
             Some(Token::Index) => {
                 self.advance();
                 let (dataset, column, kind) = self.parse_index_target(IndexKindAst::Default)?;
-                Ok(Statement::CreateIndex(CreateIndexStmt { dataset, column, kind }))
+                Ok(Statement::CreateIndex(CreateIndexStmt {
+                    dataset,
+                    column,
+                    kind,
+                }))
             }
             Some(Token::Ident(_)) if self.at_ident("VECTOR") => {
                 self.advance(); // VECTOR
@@ -748,7 +839,9 @@ impl Parser {
         };
 
         // ON keyword
-        if self.at_ident("ON") { self.advance(); }
+        if self.at_ident("ON") {
+            self.advance();
+        }
 
         let dataset = self.eat_ident()?;
         self.eat(&Token::LParen)?;
@@ -774,7 +867,11 @@ impl Parser {
         let key = self.eat_ident()?;
         self.eat(&Token::Eq)?;
         let value = self.eat_str()?;
-        Ok(Statement::SetMetadata(SetMetadataStmt { dataset, key, value }))
+        Ok(Statement::SetMetadata(SetMetadataStmt {
+            dataset,
+            key,
+            value,
+        }))
     }
 
     // SEARCH <query_tensor> [IN <dataset>] [TOP <k>]
@@ -796,7 +893,11 @@ impl Parser {
             None
         };
 
-        Ok(Statement::Search(SearchStmt { query_tensor, dataset, top_k }))
+        Ok(Statement::Search(SearchStmt {
+            query_tensor,
+            dataset,
+            top_k,
+        }))
     }
 }
 
@@ -817,14 +918,20 @@ impl Parser {
                 Some(Token::Dot) => {
                     self.advance();
                     let field = self.eat_ident()?;
-                    lhs = Expr::Field { base: Box::new(lhs), field };
+                    lhs = Expr::Field {
+                        base: Box::new(lhs),
+                        field,
+                    };
                     continue;
                 }
                 Some(Token::LBracket) => {
                     self.advance();
                     let indices = self.parse_index_specs()?;
                     self.eat(&Token::RBracket)?;
-                    lhs = Expr::Index { base: Box::new(lhs), indices };
+                    lhs = Expr::Index {
+                        base: Box::new(lhs),
+                        indices,
+                    };
                     continue;
                 }
                 _ => {}
@@ -832,18 +939,24 @@ impl Parser {
 
             // Infix operators with precedence
             let (left_bp, right_bp, op) = match self.peek() {
-                Some(Token::Plus)  => (1u8, 2u8, InfixOp::Add),
-                Some(Token::Minus) => (1,   2,   InfixOp::Subtract),
-                Some(Token::Star)  => (3,   4,   InfixOp::Multiply),
-                Some(Token::Slash) => (3,   4,   InfixOp::Divide),
-                _                  => break,
+                Some(Token::Plus) => (1u8, 2u8, InfixOp::Add),
+                Some(Token::Minus) => (1, 2, InfixOp::Subtract),
+                Some(Token::Star) => (3, 4, InfixOp::Multiply),
+                Some(Token::Slash) => (3, 4, InfixOp::Divide),
+                _ => break,
             };
 
-            if left_bp < min_bp { break; }
+            if left_bp < min_bp {
+                break;
+            }
 
             self.advance();
             let rhs = self.parse_pratt(right_bp)?;
-            lhs = Expr::Infix { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::Infix {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
 
         Ok(lhs)
@@ -852,11 +965,15 @@ impl Parser {
     fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
         match self.peek() {
             Some(Token::Float(_)) => {
-                if let Some(Token::Float(f)) = self.advance() { return Ok(Expr::Scalar(f)); }
+                if let Some(Token::Float(f)) = self.advance() {
+                    return Ok(Expr::Scalar(f));
+                }
                 unreachable!()
             }
             Some(Token::Int(_)) => {
-                if let Some(Token::Int(n)) = self.advance() { return Ok(Expr::Scalar(n as f64)); }
+                if let Some(Token::Int(n)) = self.advance() {
+                    return Ok(Expr::Scalar(n as f64));
+                }
                 unreachable!()
             }
             Some(Token::Str(_)) => {
@@ -965,23 +1082,29 @@ impl Parser {
             }
             // Single-operand
             Some(Token::Normalize) => CallExpr::Normalize(Box::new(self.parse_simple_expr()?)),
-            Some(Token::Transpose)  => CallExpr::Transpose(Box::new(self.parse_simple_expr()?)),
-            Some(Token::Flatten)    => CallExpr::Flatten(Box::new(self.parse_simple_expr()?)),
-            Some(Token::Sum)        => CallExpr::Sum(Box::new(self.parse_simple_expr()?)),
-            Some(Token::Mean)       => CallExpr::Mean(Box::new(self.parse_simple_expr()?)),
-            Some(Token::Stdev)      => CallExpr::Stdev(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Transpose) => CallExpr::Transpose(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Flatten) => CallExpr::Flatten(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Sum) => CallExpr::Sum(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Mean) => CallExpr::Mean(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Stdev) => CallExpr::Stdev(Box::new(self.parse_simple_expr()?)),
             // Single-operand with trailing parameter
             Some(Token::Scale) => {
                 let input = self.parse_simple_expr()?;
                 self.eat(&Token::By)?;
                 let factor = self.eat_number()?;
-                CallExpr::Scale { input: Box::new(input), factor }
+                CallExpr::Scale {
+                    input: Box::new(input),
+                    factor,
+                }
             }
             Some(Token::Reshape) => {
                 let input = self.parse_simple_expr()?;
                 self.eat(&Token::To)?;
                 let shape = self.parse_usize_list()?;
-                CallExpr::Reshape { input: Box::new(input), shape }
+                CallExpr::Reshape {
+                    input: Box::new(input),
+                    shape,
+                }
             }
             // N-ary: STACK t1 t2 t3 ...
             Some(Token::Stack) => {
@@ -1005,10 +1128,18 @@ impl Parser {
     fn parse_simple_expr(&mut self) -> Result<Expr, ParseError> {
         let mut expr = match self.peek() {
             Some(Token::Float(_)) => {
-                if let Some(Token::Float(f)) = self.advance() { Expr::Scalar(f) } else { unreachable!() }
+                if let Some(Token::Float(f)) = self.advance() {
+                    Expr::Scalar(f)
+                } else {
+                    unreachable!()
+                }
             }
             Some(Token::Int(_)) => {
-                if let Some(Token::Int(n)) = self.advance() { Expr::Scalar(n as f64) } else { unreachable!() }
+                if let Some(Token::Int(n)) = self.advance() {
+                    Expr::Scalar(n as f64)
+                } else {
+                    unreachable!()
+                }
             }
             Some(Token::Minus) => {
                 self.advance();
@@ -1021,9 +1152,11 @@ impl Parser {
                 self.eat(&Token::RParen)?;
                 e
             }
-            _ => return Err(self.unexpected(
-                "a simple expression (identifier, literal, or parenthesized expression)"
-            )),
+            _ => {
+                return Err(self.unexpected(
+                    "a simple expression (identifier, literal, or parenthesized expression)",
+                ))
+            }
         };
 
         // Allow one level of postfix per simple expr
@@ -1031,11 +1164,17 @@ impl Parser {
             self.advance();
             let indices = self.parse_index_specs()?;
             self.eat(&Token::RBracket)?;
-            expr = Expr::Index { base: Box::new(expr), indices };
+            expr = Expr::Index {
+                base: Box::new(expr),
+                indices,
+            };
         } else if self.at(&Token::Dot) {
             self.advance();
             let field = self.eat_ident()?;
-            expr = Expr::Field { base: Box::new(expr), field };
+            expr = Expr::Field {
+                base: Box::new(expr),
+                field,
+            };
         }
 
         Ok(expr)
@@ -1063,7 +1202,9 @@ impl Parser {
         let mut dims = Vec::new();
         while !self.at(&Token::RBracket) && !self.eof() {
             dims.push(self.eat_usize()?);
-            if self.at(&Token::Comma) { self.advance(); }
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
         }
         self.eat(&Token::RBracket)?;
         Ok(dims)
@@ -1075,7 +1216,9 @@ impl Parser {
         let mut vals = Vec::new();
         while !self.at(&Token::RBracket) && !self.eof() {
             vals.push(self.eat_number()?);
-            if self.at(&Token::Comma) { self.advance(); }
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
         }
         self.eat(&Token::RBracket)?;
         Ok(vals)
@@ -1100,7 +1243,9 @@ impl Parser {
                 }
             };
             specs.push(spec);
-            if self.at(&Token::Comma) { self.advance(); }
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
         }
         Ok(specs)
     }
@@ -1111,7 +1256,9 @@ impl Parser {
         let mut cols = Vec::new();
         while !self.at(&Token::RParen) && !self.eof() {
             cols.push(self.parse_column_def()?);
-            if self.at(&Token::Comma) { self.advance(); }
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
         }
         self.eat(&Token::RParen)?;
         Ok(cols)
@@ -1133,7 +1280,11 @@ impl Parser {
             true // default
         };
 
-        Ok(ColumnDef { name, col_type, nullable })
+        Ok(ColumnDef {
+            name,
+            col_type,
+            nullable,
+        })
     }
 
     fn parse_col_type(&mut self) -> Result<ColType, ParseError> {
@@ -1211,7 +1362,9 @@ mod tests {
     #[test]
     fn vector_literal() {
         let stmt = parse_ok("VECTOR v = [1, 2, 3]");
-        let Statement::Vector(s) = stmt else { panic!("expected Vector") };
+        let Statement::Vector(s) = stmt else {
+            panic!("expected Vector")
+        };
         assert_eq!(s.name, "v");
         assert_eq!(s.values, vec![1.0, 2.0, 3.0]);
     }
@@ -1219,7 +1372,9 @@ mod tests {
     #[test]
     fn matrix_literal() {
         let stmt = parse_ok("MATRIX m = [[1, 2], [3, 4]]");
-        let Statement::Matrix(s) = stmt else { panic!("expected Matrix") };
+        let Statement::Matrix(s) = stmt else {
+            panic!("expected Matrix")
+        };
         assert_eq!(s.name, "m");
         assert_eq!(s.rows, 2);
         assert_eq!(s.cols, 2);
@@ -1229,7 +1384,9 @@ mod tests {
     #[test]
     fn define_tensor_normal() {
         let stmt = parse_ok("DEFINE v AS TENSOR [3] VALUES [1, 0, 0]");
-        let Statement::DefineTensor(s) = stmt else { panic!("expected DefineTensor") };
+        let Statement::DefineTensor(s) = stmt else {
+            panic!("expected DefineTensor")
+        };
         assert_eq!(s.name, "v");
         assert_eq!(s.kind, TensorKindAst::Normal);
         assert_eq!(s.shape, vec![3]);
@@ -1239,7 +1396,9 @@ mod tests {
     #[test]
     fn define_tensor_strict() {
         let stmt = parse_ok("DEFINE v AS STRICT TENSOR [3] VALUES [1, 0, 0]");
-        let Statement::DefineTensor(s) = stmt else { panic!("expected DefineTensor") };
+        let Statement::DefineTensor(s) = stmt else {
+            panic!("expected DefineTensor")
+        };
         assert_eq!(s.kind, TensorKindAst::Strict);
     }
 
@@ -1248,7 +1407,9 @@ mod tests {
     #[test]
     fn let_named_op() {
         let stmt = parse_ok("LET result = ADD a b");
-        let Statement::Let(s) = stmt else { panic!("expected Let") };
+        let Statement::Let(s) = stmt else {
+            panic!("expected Let")
+        };
         assert_eq!(s.name, "result");
         assert!(!s.lazy);
         assert!(matches!(s.expr, Expr::Call(CallExpr::Add(..))));
@@ -1257,7 +1418,9 @@ mod tests {
     #[test]
     fn let_lazy_prefix() {
         let stmt = parse_ok("LAZY LET trend = STDEV sensor");
-        let Statement::Let(s) = stmt else { panic!("expected Let") };
+        let Statement::Let(s) = stmt else {
+            panic!("expected Let")
+        };
         assert!(s.lazy);
         assert!(matches!(s.expr, Expr::Call(CallExpr::Stdev(..))));
     }
@@ -1265,15 +1428,25 @@ mod tests {
     #[test]
     fn let_lazy_suffix() {
         let stmt = parse_ok("LET LAZY trend = MEAN sensor");
-        let Statement::Let(s) = stmt else { panic!("expected Let") };
+        let Statement::Let(s) = stmt else {
+            panic!("expected Let")
+        };
         assert!(s.lazy);
     }
 
     #[test]
     fn let_infix_add() {
         let stmt = parse_ok("LET c = a + b");
-        let Statement::Let(s) = stmt else { panic!("expected Let") };
-        assert!(matches!(s.expr, Expr::Infix { op: InfixOp::Add, .. }));
+        let Statement::Let(s) = stmt else {
+            panic!("expected Let")
+        };
+        assert!(matches!(
+            s.expr,
+            Expr::Infix {
+                op: InfixOp::Add,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1281,16 +1454,31 @@ mod tests {
         // a + b * 2.0  should parse as  a + (b * 2.0)
         let stmt = parse_ok("LET c = a + b * 2.0");
         let Statement::Let(s) = stmt else { panic!() };
-        let Expr::Infix { op: InfixOp::Add, lhs, rhs } = s.expr else { panic!("expected Add at root") };
+        let Expr::Infix {
+            op: InfixOp::Add,
+            lhs,
+            rhs,
+        } = s.expr
+        else {
+            panic!("expected Add at root")
+        };
         assert!(matches!(*lhs, Expr::Ref(_)));
-        assert!(matches!(*rhs, Expr::Infix { op: InfixOp::Multiply, .. }));
+        assert!(matches!(
+            *rhs,
+            Expr::Infix {
+                op: InfixOp::Multiply,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn let_subscript() {
         let stmt = parse_ok("LET x = t[0, 1]");
         let Statement::Let(s) = stmt else { panic!() };
-        let Expr::Index { base, indices } = s.expr else { panic!("expected Index") };
+        let Expr::Index { base, indices } = s.expr else {
+            panic!("expected Index")
+        };
         assert!(matches!(*base, Expr::Ref(ref n) if n == "t"));
         assert_eq!(indices.len(), 2);
         assert!(matches!(indices[0], IndexSpec::Index(0)));
@@ -1301,7 +1489,9 @@ mod tests {
     fn let_range_subscript() {
         let stmt = parse_ok("LET x = t[0:5, *]");
         let Statement::Let(s) = stmt else { panic!() };
-        let Expr::Index { indices, .. } = s.expr else { panic!() };
+        let Expr::Index { indices, .. } = s.expr else {
+            panic!()
+        };
         assert!(matches!(indices[0], IndexSpec::Range(0, 5)));
         assert!(matches!(indices[1], IndexSpec::All));
     }
@@ -1324,7 +1514,9 @@ mod tests {
     fn let_scale() {
         let stmt = parse_ok("LET s = SCALE a BY 0.5");
         let Statement::Let(s) = stmt else { panic!() };
-        let Expr::Call(CallExpr::Scale { factor, .. }) = s.expr else { panic!() };
+        let Expr::Call(CallExpr::Scale { factor, .. }) = s.expr else {
+            panic!()
+        };
         assert!((factor - 0.5).abs() < 1e-9);
     }
 
@@ -1332,7 +1524,9 @@ mod tests {
     fn let_reshape() {
         let stmt = parse_ok("LET r = RESHAPE a TO [2, 3]");
         let Statement::Let(s) = stmt else { panic!() };
-        let Expr::Call(CallExpr::Reshape { shape, .. }) = s.expr else { panic!() };
+        let Expr::Call(CallExpr::Reshape { shape, .. }) = s.expr else {
+            panic!()
+        };
         assert_eq!(shape, vec![2, 3]);
     }
 
@@ -1340,7 +1534,9 @@ mod tests {
     fn let_stack() {
         let stmt = parse_ok("LET s = STACK a b c");
         let Statement::Let(s) = stmt else { panic!() };
-        let Expr::Call(CallExpr::Stack(ops)) = s.expr else { panic!() };
+        let Expr::Call(CallExpr::Stack(ops)) = s.expr else {
+            panic!()
+        };
         assert_eq!(ops.len(), 3);
     }
 
@@ -1420,7 +1616,9 @@ mod tests {
     #[test]
     fn create_dataset_columns() {
         let stmt = parse_ok("DATASET diagnostics COLUMNS (id: Int, emb: Vector(128))");
-        let Statement::CreateDataset(s) = stmt else { panic!() };
+        let Statement::CreateDataset(s) = stmt else {
+            panic!()
+        };
         assert_eq!(s.name, "diagnostics");
         assert_eq!(s.columns.len(), 2);
         assert_eq!(s.columns[0].name, "id");
@@ -1431,7 +1629,9 @@ mod tests {
     #[test]
     fn create_dataset_matrix_column() {
         let stmt = parse_ok("DATASET t COLUMNS (feat: Matrix(4, 4))");
-        let Statement::CreateDataset(s) = stmt else { panic!() };
+        let Statement::CreateDataset(s) = stmt else {
+            panic!()
+        };
         assert!(matches!(s.columns[0].col_type, ColType::Matrix(4, 4)));
     }
 
@@ -1440,7 +1640,9 @@ mod tests {
         let stmt = parse_ok("SELECT col1, col2 FROM my_ds");
         let Statement::Select(s) = stmt else { panic!() };
         assert_eq!(s.dataset, "my_ds");
-        let SelectColumns::Named(cols) = s.columns else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
         assert_eq!(cols, vec!["col1", "col2"]);
     }
 
@@ -1474,7 +1676,9 @@ mod tests {
     #[test]
     fn use_database() {
         let stmt = parse_ok("USE analytics");
-        let Statement::UseDatabase(s) = stmt else { panic!() };
+        let Statement::UseDatabase(s) = stmt else {
+            panic!()
+        };
         assert_eq!(s.name, "analytics");
     }
 
@@ -1498,14 +1702,18 @@ mod tests {
     #[test]
     fn create_database() {
         let stmt = parse_ok("CREATE DATABASE mydb");
-        let Statement::CreateDatabase(s) = stmt else { panic!() };
+        let Statement::CreateDatabase(s) = stmt else {
+            panic!()
+        };
         assert_eq!(s.name, "mydb");
     }
 
     #[test]
     fn drop_database() {
         let stmt = parse_ok("DROP DATABASE mydb");
-        let Statement::DropDatabase(s) = stmt else { panic!() };
+        let Statement::DropDatabase(s) = stmt else {
+            panic!()
+        };
         assert_eq!(s.name, "mydb");
     }
 

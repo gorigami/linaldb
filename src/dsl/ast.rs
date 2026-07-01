@@ -90,10 +90,7 @@ impl Statement {
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
-            Statement::Show(_)
-                | Statement::Explain(_)
-                | Statement::Audit(_)
-                | Statement::List(_)
+            Statement::Show(_) | Statement::Explain(_) | Statement::Audit(_) | Statement::List(_)
         )
     }
 }
@@ -408,10 +405,7 @@ pub enum Expr {
         indices: Vec<IndexSpec>,
     },
     /// Field/column access: `dataset.column`
-    Field {
-        base: Box<Expr>,
-        field: String,
-    },
+    Field { base: Box<Expr>, field: String },
     /// Dataset constructor used in `LET ds = dataset("name")`
     DatasetRef(String),
 }
