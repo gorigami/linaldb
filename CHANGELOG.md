@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.15] - 2026-07-01
 
+### Added — Typed DSL Parser
+
+Replaced the `if/else if starts_with()` string-dispatch chain in `execute_line_with_context` with a proper compiler-grade pipeline. The old chain remains as a fallback for any input the new parser doesn't handle.
+
+- **`src/dsl/lexer.rs`** — Logos 0.14 DFA tokenizer
+  - 80+ tokens: all keywords, operators, punctuation, float/int/string/identifier literals
+  - Skips whitespace and all three comment styles (`--`, `#`, `//`)
+  - Keyword tokens always take priority over the `Ident` regex (DFA property)
+  - 10 unit tests
+
+- **`src/dsl/ast.rs`** — Fully-typed AST
+  - `Statement` enum with 27 variants covering every DSL command
+  - `Statement::is_read_only()` for gating shared-reference execution paths
+  - `Expr` sub-language: `Ref`, `Scalar`, `StringLit`, `Infix`, `Call`, `Index`, `Field`, `DatasetRef`
+  - `CallExpr`: 18 named-prefix operations (binary, unary, n-ary)
+  - All type nodes (`ColType`, `TensorKindAst`, `InfixOp`, `IndexSpec`) decoupled from engine internals
+
+- **`src/dsl/parser.rs`** — Recursive-descent + Pratt parser
+  - One function per statement type; dispatches on first token
+  - Pratt parser for the expression sub-language with correct operator precedence
+  - Postfix `.field` and `[...]` subscript handled before infix
+  - `ParseError { offset, msg }` with `into_dsl_error(line)` for integration
+  - 42 unit tests
+
+- **`src/dsl/executor.rs`** — Typed dispatch layer
+  - `execute_statement()` — single `match` on `Statement`, routes each variant directly to the engine API
+  - `eval_expr_to_name()` — recursive `Expr` → engine call evaluator (replaces per-handler sub-parsing)
+  - `eval_call()` — maps all 18 `CallExpr` variants to `eval_binary`/`eval_unary`/`eval_matmul`/etc. with lazy/eager branching
+  - String reconstruction helpers (`show_to_string`, `select_to_string`, etc.) for complex statements still delegated to legacy handlers
+  - `expr_to_string()` for round-tripping `Expr` nodes back to DSL text when needed
+  - `fresh_temp()` — atomic counter for intermediate tensor names
+
+- **`Cargo.toml`**: added `logos = "0.14"` dependency
+
 ### Fixed
 
 - **`SHOW SCHEMA` for tensor-first datasets** (`src/dsl/handlers/introspection.rs`)
@@ -584,6 +618,7 @@ LINAL is positioned as:
 
 ---
 
+[0.1.15]: https://github.com/gorigami/linal/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/gorigami/linal/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/gorigami/linal/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/gorigami/linal/compare/v0.1.11...v0.1.12

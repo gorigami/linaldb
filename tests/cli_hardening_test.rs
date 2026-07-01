@@ -34,8 +34,8 @@ fn test_cli_init() {
 
 #[test]
 fn test_cli_run_multiline() {
-    // We'll use tests/hardening_test.lnl
-    // This script creates a database and a dataset using multiline commands.
+    // Clean up leftover state from previous runs so CREATE DATABASE is idempotent.
+    let _ = fs::remove_dir_all("./data/hardening_db");
 
     let output = Command::new(get_bin())
         .arg("run")
@@ -43,13 +43,21 @@ fn test_cli_run_multiline() {
         .output()
         .expect("Failed to execute run command");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "script failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Check for success markers
     assert!(stdout.contains("Database 'hardening_db' created"));
     assert!(stdout.contains("Created dataset: test_ds"));
     assert!(stdout.contains("Query Result (rows: 2, columns: 3)"));
+
+    // Cleanup
+    let _ = fs::remove_dir_all("./data/hardening_db");
 }
 
 #[test]

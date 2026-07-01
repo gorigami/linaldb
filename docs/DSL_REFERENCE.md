@@ -41,10 +41,10 @@ MATRIX m = [[1, 2], [3, 4]]
 
 ### DEFINE
 
-Explicit tensor definition for higher dimensions.
+Explicit tensor definition for higher dimensions. Shape is specified as a bracket-delimited list.
 
 ```sql
-DEFINE t AS TENSOR(2, 2, 2) VALUES [1, 2, 3, 4, 5, 6, 7, 8]
+DEFINE t AS TENSOR [2, 2, 2] VALUES [1, 2, 3, 4, 5, 6, 7, 8]
 ```
 
 The optional `STRICT` modifier enforces shape-strictness: any binary operation involving a strict tensor propagates the strict flag to its output, preventing accidental shape relaxation.

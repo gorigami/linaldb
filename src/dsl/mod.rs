@@ -1,7 +1,10 @@
+pub mod ast;
 pub mod delivery_dsl;
 pub mod error;
+pub mod executor;
 pub mod handlers;
-// pub mod parser; // Not used currently, logic is in handlers/parsing logic
+pub mod lexer;
+pub mod parser;
 
 pub use error::DslError;
 
@@ -206,6 +209,11 @@ pub fn execute_line_with_context(
     line_no: usize,
     ctx: Option<&mut crate::engine::context::ExecutionContext>,
 ) -> Result<DslOutput, DslError> {
+    // Try the new typed parser first; fall through to the legacy chain on parse error.
+    if let Ok(stmt) = crate::dsl::parser::parse(line) {
+        return executor::execute_statement(db, stmt, line_no, ctx);
+    }
+
     if line.starts_with("DEFINE ") {
         handle_define(db, line, line_no)
     } else if line.starts_with("VECTOR ") {

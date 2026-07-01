@@ -25,11 +25,25 @@ DSL errors occur during the parsing or initial routing of your script commands.
 
 ### Parse Error
 
-Happens when the command doesn't match LINAL's expected grammar.
+Happens when the command doesn't match LINAL's expected grammar. As of v0.1.15, the engine runs a full Logos lexer + recursive-descent parser first and reports structured errors with a byte offset:
 
-- **Example**: `GET * FROM users` (Should be `SELECT`)
-- **Example**: `INSERT INTO ds (id) VALUES ("invalid")` (Type mismatch during parsing)
+```
+Parse error at line 3, offset 14: expected `=`, found identifier `FROM`
+```
+
+- **Example**: `GET * FROM users` (unknown command — `GET` is not a LINAL keyword)
+- **Example**: `DEFINE t AS TENSOR(2,2) VALUES [...]` (old paren syntax; use brackets: `TENSOR [2, 2]`)
 - **Fix**: Refer to [DSL_REFERENCE.md](DSL_REFERENCE.md) for correct syntax and type keywords.
+
+If the new parser does not recognize a command, the engine falls back to the legacy string-dispatch chain before raising an error.
+
+### Engine Error (from DSL)
+
+Wraps an `EngineError` with a source line number. Occurs when the grammar is valid but the operation fails at runtime (e.g., shape mismatch in `MATMUL`).
+
+```
+Engine error at line 5: InvalidOp("shape mismatch: [3] vs [4]")
+```
 
 ---
 
