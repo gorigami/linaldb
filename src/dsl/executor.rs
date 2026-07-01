@@ -1,10 +1,15 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::core::tensor::Shape;
+use crate::core::tuple::{Field, Schema, Tuple};
+use crate::core::value::{Value, ValueType};
 use crate::dsl::ast::*;
 use crate::dsl::{DslError, DslOutput};
 use crate::engine::context::ExecutionContext;
 use crate::engine::{BinaryOp, TensorDb, TensorKind, UnaryOp};
+use crate::query::logical::{Expr as LogicalExpr, LogicalPlan};
+use crate::query::planner::Planner;
+use std::sync::Arc;
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
@@ -132,26 +137,154 @@ pub fn execute_statement(
 
         // ── Dataset operations ──────────────────────────────────────────────
         Statement::CreateDataset(s) => {
-            handlers::dataset::handle_dataset(db, &create_dataset_to_string(&s), line_no)
+            if let Some(src) = s.from {
+                // DATASET name FROM source — query variant, still uses legacy handler
+                handlers::dataset::handle_dataset(
+                    db,
+                    &format!("DATASET {} FROM \"{}\"", s.name, src),
+                    line_no,
+                )
+            } else {
+                let fields: Vec<Field> = s
+                    .columns
+                    .iter()
+                    .map(|c| Field::new(&c.name, col_type_to_value_type(&c.col_type)))
+                    .collect();
+                let schema = Arc::new(Schema::new(fields));
+                db.create_dataset(s.name.clone(), schema)
+                    .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                Ok(DslOutput::Message(format!("Created dataset: {}", s.name)))
+            }
         }
 
-        Statement::AlterDataset(s) => {
-            let line = alter_dataset_to_string(&s);
-            // strip leading "ALTER " since handle_dataset expects rest after ALTER
-            let inner = line.strip_prefix("ALTER ").unwrap_or(&line);
-            handlers::dataset::handle_dataset(db, inner, line_no)
-        }
+        Statement::AlterDataset(s) => match s.operation {
+            AlterOp::AddColumn(col_def) => {
+                db.alter_dataset_add_column(
+                    &s.dataset,
+                    col_def.name.clone(),
+                    col_type_to_value_type(&col_def.col_type),
+                    Value::Null,
+                    col_def.nullable,
+                )
+                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+                Ok(DslOutput::Message(format!(
+                    "Added column '{}' to dataset '{}'",
+                    col_def.name, s.dataset
+                )))
+            }
+        },
 
         Statement::InsertInto(s) => {
-            handlers::dataset::handle_insert(db, &insert_to_string(&s), line_no)
+            let schema = db
+                .get_dataset(&s.dataset)
+                .map_err(|e| DslError::Engine { line: line_no, source: e })?
+                .schema
+                .clone();
+            let col_map: std::collections::HashMap<&str, &InsertValue> =
+                s.row.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            let values: Vec<Value> = schema
+                .fields
+                .iter()
+                .map(|f| match col_map.get(f.name.as_str()) {
+                    Some(InsertValue::Scalar(n)) => match f.value_type {
+                        ValueType::Int => Value::Int(*n as i64),
+                        _ => Value::Float(*n as f32),
+                    },
+                    Some(InsertValue::Text(t)) => Value::String(t.clone()),
+                    Some(InsertValue::TensorRef(_)) | Some(InsertValue::Null) | None => Value::Null,
+                })
+                .collect();
+            let tuple = Tuple::new(schema.clone(), values)
+                .map_err(|e| DslError::Parse { line: line_no, msg: e })?;
+            db.insert_row(&s.dataset, tuple)
+                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+            Ok(DslOutput::None)
         }
 
         Statement::Select(s) => {
-            handlers::dataset::handle_select(db, &select_to_string(&s), line_no)
+            // Fall back to string-reconstruction for GROUP BY / aggregate queries
+            // since SelectColumns::Named only carries strings, not aggregate exprs.
+            if !s.group_by.is_empty() {
+                return handlers::dataset::handle_select(
+                    db,
+                    &select_to_string(&s),
+                    line_no,
+                );
+            }
+            let source_ds = db
+                .get_dataset(&s.dataset)
+                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+            let source_schema = source_ds.schema.clone();
+
+            let mut plan = LogicalPlan::Scan {
+                dataset_name: s.dataset.clone(),
+                schema: source_schema.clone(),
+            };
+
+            if let Some(filter_expr) = &s.filter {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: dsl_expr_to_logical_expr(filter_expr),
+                };
+            }
+            if let Some(having_expr) = &s.having {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: dsl_expr_to_logical_expr(having_expr),
+                };
+            }
+            if let Some(ord) = &s.order_by {
+                plan = LogicalPlan::Sort {
+                    input: Box::new(plan),
+                    column: ord.column.clone(),
+                    ascending: ord.ascending,
+                };
+            }
+            if let Some(n) = s.limit {
+                plan = LogicalPlan::Limit {
+                    input: Box::new(plan),
+                    n,
+                };
+            }
+            let cols = match s.columns {
+                SelectColumns::All => source_schema.fields.iter().map(|f| f.name.clone()).collect(),
+                SelectColumns::Named(cs) => cs,
+            };
+            plan = LogicalPlan::Project {
+                input: Box::new(plan),
+                columns: cols,
+            };
+
+            let planner = Planner::new(db);
+            let physical_plan = planner
+                .create_physical_plan(&plan)
+                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+            let result_rows = physical_plan
+                .execute(db)
+                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+            let result_schema = physical_plan.schema();
+            let ds = crate::core::dataset_legacy::Dataset::with_rows(
+                crate::core::dataset_legacy::DatasetId(0),
+                result_schema,
+                result_rows,
+                Some("Query Result".into()),
+            )
+            .map_err(|e| DslError::Parse { line: line_no, msg: e })?;
+            Ok(DslOutput::Table(ds))
         }
 
         Statement::Materialize(s) => {
-            handlers::dataset::handle_materialize(db, &format!("MATERIALIZE {}", s.target), line_no)
+            let dataset_name = if let Some(dot) = s.target.find('.') {
+                s.target[..dot].to_string()
+            } else {
+                s.target.clone()
+            };
+            db.materialize_lazy_columns(&dataset_name)
+                .map_err(|e| DslError::Engine { line: line_no, source: e })?;
+            Ok(DslOutput::Message(format!(
+                "Materialized lazy columns in dataset '{}'",
+                dataset_name
+            )))
         }
 
         Statement::Deliver(s) => {
@@ -576,67 +709,42 @@ fn show_to_string(s: &ShowStmt) -> String {
     format!("SHOW {}", target)
 }
 
-fn create_dataset_to_string(s: &CreateDatasetStmt) -> String {
-    if let Some(ref src) = s.from {
-        return format!("DATASET {} FROM \"{}\"", s.name, src);
-    }
-    let cols: Vec<String> = s
-        .columns
-        .iter()
-        .map(|c| {
-            format!(
-                "{}: {}{}",
-                c.name,
-                col_type_to_string(&c.col_type),
-                if c.nullable { "" } else { " NOT NULLABLE" }
-            )
-        })
-        .collect();
-    format!("DATASET {} COLUMNS ({})", s.name, cols.join(", "))
-}
-
-fn alter_dataset_to_string(s: &AlterDatasetStmt) -> String {
-    match &s.operation {
-        AlterOp::AddColumn(col) => format!(
-            "ALTER DATASET {} ADD COLUMN {}: {}{}",
-            s.dataset,
-            col.name,
-            col_type_to_string(&col.col_type),
-            if col.nullable { "" } else { " NOT NULLABLE" }
-        ),
+/// Convert a DSL `ColType` to the engine's `ValueType` without a string round-trip.
+fn col_type_to_value_type(ct: &ColType) -> ValueType {
+    match ct {
+        ColType::Int => ValueType::Int,
+        ColType::Float => ValueType::Float,
+        ColType::String => ValueType::String,
+        ColType::Bool => ValueType::Bool,
+        ColType::Vector(n) => ValueType::Vector(*n),
+        ColType::Matrix(r, c) => ValueType::Matrix(*r, *c),
+        ColType::Tensor(_) => ValueType::Float,
     }
 }
 
-fn col_type_to_string(t: &ColType) -> String {
-    match t {
-        ColType::Int => "Int".into(),
-        ColType::Float => "Float".into(),
-        ColType::String => "String".into(),
-        ColType::Bool => "Bool".into(),
-        ColType::Vector(n) => format!("Vector({})", n),
-        ColType::Matrix(r, c) => format!("Matrix({}, {})", r, c),
-        ColType::Tensor(dims) => {
-            let d: Vec<String> = dims.iter().map(|n| n.to_string()).collect();
-            format!("Tensor[{}]", d.join(", "))
-        }
-    }
-}
-
-fn insert_to_string(s: &InsertIntoStmt) -> String {
-    let pairs: Vec<String> = s
-        .row
-        .iter()
-        .map(|(col, val)| {
-            let v = match val {
-                InsertValue::Scalar(n) => format!("{}", n),
-                InsertValue::Text(t) => format!("\"{}\"", t),
-                InsertValue::TensorRef(r) => r.clone(),
-                InsertValue::Null => "NULL".into(),
+/// Convert a DSL `Expr` (used in WHERE / HAVING) to a `query::logical::Expr`.
+/// Note: `InfixOp` only has arithmetic operators; comparison predicates in WHERE
+/// are not reachable via the typed AST path and resolve to `Literal(Null)`.
+fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
+    match e {
+        Expr::Ref(name) => LogicalExpr::Column(name.clone()),
+        Expr::Scalar(f) => LogicalExpr::Literal(Value::Float(*f as f32)),
+        Expr::StringLit(s) => LogicalExpr::Literal(Value::String(s.clone())),
+        Expr::Infix { op, lhs, rhs } => {
+            let sym = match op {
+                InfixOp::Add => "+",
+                InfixOp::Subtract => "-",
+                InfixOp::Multiply => "*",
+                InfixOp::Divide => "/",
             };
-            format!("{} = {}", col, v)
-        })
-        .collect();
-    format!("INSERT INTO {} ({})", s.dataset, pairs.join(", "))
+            LogicalExpr::BinaryExpr {
+                left: Box::new(dsl_expr_to_logical_expr(lhs)),
+                op: sym.to_string(),
+                right: Box::new(dsl_expr_to_logical_expr(rhs)),
+            }
+        }
+        _ => LogicalExpr::Literal(Value::Null),
+    }
 }
 
 fn select_to_string(s: &SelectStmt) -> String {
