@@ -577,6 +577,18 @@ pub fn evaluate_expression(
     match expr {
         crate::query::logical::Expr::Column(name) => row.get(name).cloned().unwrap_or(Value::Null),
         crate::query::logical::Expr::Literal(val) => val.clone(),
+        crate::query::logical::Expr::And(l, r) => {
+            match (evaluate_expression(l, row), evaluate_expression(r, row)) {
+                (Value::Bool(a), Value::Bool(b)) => Value::Bool(a && b),
+                _ => Value::Null,
+            }
+        }
+        crate::query::logical::Expr::Or(l, r) => {
+            match (evaluate_expression(l, row), evaluate_expression(r, row)) {
+                (Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
+                _ => Value::Null,
+            }
+        }
         crate::query::logical::Expr::BinaryExpr { left, op, right } => {
             let left_val = evaluate_expression(left, row);
             let right_val = evaluate_expression(right, row);
