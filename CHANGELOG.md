@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Direct Executor Dispatch for Dataset Operations
+
+Eliminated four string-reconstruction round-trips in `src/dsl/executor.rs`. These statements now build engine objects directly from the typed AST instead of serialising back to a string and re-parsing:
+
+- **`CreateDataset`** — builds `Schema` from `Vec<ColumnDef>` via `col_type_to_value_type`, calls `db.create_dataset()` directly; the `FROM source` variant still falls through to the legacy handler
+- **`AlterDataset`** — calls `db.alter_dataset_add_column()` directly from `AlterOp::AddColumn(ColumnDef)`
+- **`InsertInto`** — resolves named column values against the schema, builds `Tuple`, calls `db.insert_row()` directly; fixes a latent format-mismatch bug where `insert_to_string` generated a non-`VALUES` format that `handle_insert` could not re-parse
+- **`Select`** — builds `LogicalPlan` directly from `SelectStmt` fields, bypassing `build_select_query_plan`; GROUP BY queries fall through to the legacy handler since `SelectColumns` only carries strings
+- **`Materialize`** — calls `db.materialize_lazy_columns()` directly
+
+Removed now-dead helpers: `create_dataset_to_string`, `alter_dataset_to_string`, `col_type_to_string`, `insert_to_string`.
+
+Added helpers: `col_type_to_value_type` (ColType → ValueType), `dsl_expr_to_logical_expr` (ast::Expr → query::logical::Expr for WHERE/HAVING clauses).
+
 ### Added — Query Engine Quick Wins
 
 - **`src/core/storage.rs`** — `compute_stats` now fills `min`, `max`, and `mean` for `Float32`, `Float64`, `Int64`, and `Int32` columns (previously always `None`); non-numeric columns remain `None`
