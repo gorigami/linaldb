@@ -11,7 +11,7 @@ pub use error::DslError;
 use crate::core::dataset_legacy::Dataset;
 use crate::core::tensor::Tensor;
 use crate::engine::TensorDb;
-use handlers::{handle_define, handle_let, handle_show};
+use handlers::handle_show;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,26 +214,12 @@ pub fn execute_line_with_context(
         return executor::execute_statement(db, stmt, line_no, ctx);
     }
 
-    if line.starts_with("DEFINE ") {
-        handle_define(db, line, line_no)
-    } else if line.starts_with("VECTOR ") {
-        handlers::tensor::handle_vector(db, line, line_no)
-    } else if line.starts_with("MATRIX ") {
-        handlers::tensor::handle_matrix(db, line, line_no)
-    } else if line.starts_with("LET ") || line.starts_with("LAZY LET ") {
-        handle_let(db, line, line_no, ctx)
-    } else if line.starts_with("SHOW ") {
+    if line.starts_with("SHOW ") {
         handle_show(db, line, line_no)
     } else if line.starts_with("SELECT ") {
         handlers::dataset::handle_select(db, line, line_no)
     } else if line.starts_with("DELIVER ") {
         handlers::dataset::handle_deliver(db, line, line_no)
-    } else if line.starts_with("BIND ") {
-        handlers::semantics::handle_bind(db, line, line_no)
-    } else if line.starts_with("ATTACH ") {
-        handlers::semantics::handle_attach(db, line, line_no)
-    } else if line.starts_with("DERIVE ") {
-        handlers::semantics::handle_derive(db, line, line_no, ctx)
     } else if line.starts_with("DATASET ") {
         handlers::dataset::handle_dataset(db, line, line_no)
     } else if line.starts_with("INSERT INTO ") {
