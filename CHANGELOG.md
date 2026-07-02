@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.19] - 2026-07-02
+
+### Changed — All remaining AST → string → re-parse round-trips eliminated
+
+Every `Statement` variant in `executor.rs` now dispatches directly to typed engine APIs. No string reconstruction anywhere in the typed dispatch path.
+
+**Ported from string round-trip to direct typed dispatch:**
+
+- `Show` — new `execute_show(db, ShowTarget, line_no)` in `executor.rs` matches on the `ShowTarget` enum directly; removes `show_to_string()`
+- `Deliver` — inlined: one `DslOutput::Message` with no handler call
+- `SetMetadata` — new `set_metadata_typed(db, dataset, key, value, line_no)` in `handlers/metadata.rs`; removes format string
+- `Save` — new `save_typed(db, PersistKind, name, path, line_no)` in `handlers/persistence.rs`
+- `Load` — new `load_typed(db, PersistKind, name, path, line_no)` in `handlers/persistence.rs`
+- `List` — new `list_typed(db, &ListTarget, line_no)` in `handlers/persistence.rs`
+- `Import` — new `import_typed(db, ephemeral, path, name, line_no)` in `handlers/persistence.rs`
+- `Export` — new `export_typed(db, name, path, line_no)` in `handlers/persistence.rs`
+
+**Dead code removed:** `show_to_string`, `deliver_to_string`, `save_to_string`, `load_to_string`, `list_to_string` helpers deleted from `executor.rs`.
+
+**`handlers/persistence.rs` restructured:** Private `handle_*_dataset` / `handle_*_tensor` bodies extracted into `*_core` private functions with typed signatures. String-based `handle_*` wrappers (used by the legacy fallback chain in `mod.rs`) now parse and delegate to the cores — no logic duplication.
+
+`Explain` is intentionally unchanged — the typed parser's `parse_explain()` only captures a single ident while `handle_explain` requires the full `EXPLAIN DATASET|SEARCH|SELECT …` string; fixing it needs an `ExplainStmt` redesign.
+
+---
+
 ## [0.1.18] - 2026-07-02
 
 ### Added / Changed — DATASET FROM and SEARCH inline vector fully typed
