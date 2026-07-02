@@ -135,9 +135,7 @@ pub fn execute_statement(
         }
 
         // ── Introspection ───────────────────────────────────────────────────
-        Statement::Show(s) => {
-            handlers::introspection::handle_show(db, &show_to_string(&s), line_no)
-        }
+        Statement::Show(s) => execute_show(db, s.target, line_no),
 
         Statement::Explain(s) => {
             handlers::explain::handle_explain(db, &format!("EXPLAIN {}", s.target), line_no)
@@ -509,40 +507,31 @@ pub fn execute_statement(
             )))
         }
 
-        Statement::Deliver(s) => {
-            handlers::dataset::handle_deliver(db, &deliver_to_string(&s), line_no)
-        }
+        Statement::Deliver(s) => Ok(DslOutput::Message(format!(
+            "Delivery Projection for '{}' created. (Phase 1 Read-Only View)",
+            s.dataset
+        ))),
 
         // ── Persistence ─────────────────────────────────────────────────────
-        Statement::Save(s) => handlers::persistence::handle_save(db, &save_to_string(&s), line_no),
-
-        Statement::Load(s) => handlers::persistence::handle_load(db, &load_to_string(&s), line_no),
-
-        Statement::List(s) => {
-            handlers::persistence::handle_list_datasets(db, &list_to_string(&s), line_no)
+        Statement::Save(s) => {
+            handlers::persistence::save_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
         }
 
-        Statement::Import(s) => {
-            if s.ephemeral {
-                let cmd = match &s.name {
-                    Some(n) => format!("USE DATASET FROM \"{}\" AS {}", s.path, n),
-                    None => format!("USE DATASET FROM \"{}\"", s.path),
-                };
-                handlers::persistence::handle_use_dataset(db, &cmd, line_no)
-            } else {
-                let cmd = match &s.name {
-                    Some(n) => format!("IMPORT DATASET FROM \"{}\" AS {}", s.path, n),
-                    None => format!("IMPORT DATASET FROM \"{}\"", s.path),
-                };
-                handlers::persistence::handle_import(db, &cmd, line_no)
-            }
+        Statement::Load(s) => {
+            handlers::persistence::load_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
         }
 
-        Statement::Export(s) => handlers::persistence::handle_export(
+        Statement::List(s) => handlers::persistence::list_typed(db, &s.target, line_no),
+
+        Statement::Import(s) => handlers::persistence::import_typed(
             db,
-            &format!("EXPORT CSV {} TO \"{}\"", s.name, s.path),
+            s.ephemeral,
+            &s.path,
+            s.name.as_deref(),
             line_no,
         ),
+
+        Statement::Export(s) => handlers::persistence::export_typed(db, &s.name, &s.path, line_no),
 
         // ── Index ───────────────────────────────────────────────────────────
         Statement::CreateIndex(s) => match s.kind {
@@ -560,14 +549,9 @@ pub fn execute_statement(
         },
 
         // ── Metadata ────────────────────────────────────────────────────────
-        Statement::SetMetadata(s) => handlers::metadata::handle_set_metadata(
-            db,
-            &format!(
-                "SET DATASET {} METADATA {} = \"{}\"",
-                s.dataset, s.key, s.value
-            ),
-            line_no,
-        ),
+        Statement::SetMetadata(s) => {
+            handlers::metadata::set_metadata_typed(db, &s.dataset, &s.key, &s.value, line_no)
+        }
 
         // ── Search ──────────────────────────────────────────────────────────
         Statement::Search(s) => {
@@ -1003,24 +987,329 @@ fn fresh_temp(hint: &str) -> String {
     format!("_t_{}_{}", hint, n)
 }
 
-// ─── String reconstruction for delegated handlers ─────────────────────────────
+// ─── Show — typed dispatch ─────────────────────────────────────────────────────
 
-fn show_to_string(s: &ShowStmt) -> String {
-    let target = match &s.target {
-        ShowTarget::All => "ALL".to_string(),
-        ShowTarget::AllDatasets => "ALL DATASETS".to_string(),
-        ShowTarget::AllDatabases => "DATABASES".to_string(),
-        ShowTarget::Schema(n) => format!("SCHEMA {}", n),
-        ShowTarget::Shape(n) => format!("SHAPE {}", n),
-        ShowTarget::Lineage(n) => format!("LINEAGE {}", n),
-        ShowTarget::Indexes(None) => "INDEXES".to_string(),
-        ShowTarget::Indexes(Some(n)) => format!("INDEXES {}", n),
-        ShowTarget::DatasetMetadata(n) => format!("DATASET METADATA {}", n),
-        ShowTarget::DatasetVersions(n) => format!("DATASET VERSIONS {}", n),
-        ShowTarget::StringLiteral(s) => format!("\"{}\"", s),
-        ShowTarget::Named(n) => n.clone(),
+fn execute_show(
+    db: &mut TensorDb,
+    target: ShowTarget,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    match target {
+        ShowTarget::All => {
+            let mut names = db.list_names();
+            names.sort();
+            let mut output = String::from("--- ALL TENSORS ---\n");
+            for name in names {
+                if let Ok(t) = db.get(&name) {
+                    output.push_str(&format!(
+                        "{}: shape {:?}, len {}, data = {:?}\n",
+                        name,
+                        t.shape.dims,
+                        t.data.len(),
+                        t.data
+                    ));
+                }
+            }
+            output.push_str("-------------------");
+            Ok(DslOutput::Message(output))
+        }
+
+        ShowTarget::AllDatasets => {
+            let mut names = db.list_dataset_names();
+            names.sort();
+            let mut output = String::from("--- ALL DATASETS ---\n");
+            for name in names {
+                if let Ok(dataset) = db.get_dataset(&name) {
+                    output.push_str(&format!(
+                        "Dataset: {} (rows: {}, columns: {})\n",
+                        name,
+                        dataset.len(),
+                        dataset.schema.len()
+                    ));
+                    for field in &dataset.schema.fields {
+                        output.push_str(&format!("  - {}: {}\n", field.name, field.value_type));
+                    }
+                }
+            }
+            output.push_str("--------------------");
+            Ok(DslOutput::Message(output))
+        }
+
+        ShowTarget::AllDatabases => {
+            let mut names = db.list_databases();
+            names.sort();
+            let mut output = String::from("--- ALL DATABASES ---\n");
+            for name in names {
+                output.push_str(&format!("  - {}\n", name));
+            }
+            output.push_str("---------------------");
+            Ok(DslOutput::Message(output))
+        }
+
+        ShowTarget::Indexes(filter) => {
+            let indices = db.list_indices();
+            let mut output = if let Some(ref ds_name) = filter {
+                format!("--- INDICES FOR {} ---\n", ds_name)
+            } else {
+                String::from("--- ALL INDICES ---\n")
+            };
+            output.push_str(&format!(
+                "{:<20} {:<20} {:<10}\n",
+                "Dataset", "Column", "Type"
+            ));
+            output.push_str(&format!("{:-<52}\n", ""));
+            let mut count = 0;
+            for (ds, col, type_str) in indices {
+                if let Some(ref ds_filter) = filter {
+                    if &ds != ds_filter {
+                        continue;
+                    }
+                }
+                output.push_str(&format!("{:<20} {:<20} {:<10}\n", ds, col, type_str));
+                count += 1;
+            }
+            output.push_str("-------------------");
+            if count == 0 {
+                if let Some(ref ds_name) = filter {
+                    if db.get_dataset(ds_name).is_err() {
+                        return Err(DslError::Engine {
+                            line: line_no,
+                            source: crate::engine::EngineError::NameNotFound(ds_name.clone()),
+                        });
+                    }
+                }
+            }
+            Ok(DslOutput::Message(output))
+        }
+
+        ShowTarget::Lineage(name) => {
+            let tree = db.get_lineage_tree(&name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let mut output = format!("Lineage for tensor '{}':\n", name);
+            output.push_str(&format_lineage_tree(&tree, 0));
+            Ok(DslOutput::Message(output))
+        }
+
+        ShowTarget::DatasetMetadata(dataset_name) => {
+            if let Ok(dataset) = db.get_dataset(&dataset_name) {
+                let metadata = &dataset.metadata;
+                let mut output = format!(
+                    "=== Dataset Metadata: {} (In-Memory/Legacy) ===\n",
+                    dataset_name
+                );
+                output.push_str(&format!("Version: {}\n", metadata.version));
+                output.push_str("Origin: Created\n");
+                output.push_str(&format!("Created: {:?}\n", metadata.created_at));
+                output.push_str(&format!("Updated: {:?}\n", metadata.updated_at));
+                output.push_str(&format!("Rows: {}\n", metadata.row_count));
+                if !metadata.extra.is_empty() {
+                    output.push_str("\nExtra Metadata:\n");
+                    for (k, v) in &metadata.extra {
+                        output.push_str(&format!("  {}: {}\n", k, v));
+                    }
+                }
+                output.push_str("================================");
+                return Ok(DslOutput::Message(output));
+            }
+            if let Some(dataset) = db.get_tensor_dataset(&dataset_name) {
+                if let Some(metadata) = &dataset.metadata {
+                    let mut output = format!(
+                        "=== Dataset Metadata: {} (In-Memory/Tensor) ===\n",
+                        dataset_name
+                    );
+                    output.push_str(&format!("Version: {}\n", metadata.version));
+                    output.push_str(&format!("Hash: {}\n", metadata.hash));
+                    output.push_str(&format!("Origin: {:?}\n", metadata.origin));
+                    if let Some(author) = &metadata.author {
+                        output.push_str(&format!("Author: {}\n", author));
+                    }
+                    if let Some(desc) = &metadata.description {
+                        output.push_str(&format!("Description: {}\n", desc));
+                    }
+                    if !metadata.tags.is_empty() {
+                        output.push_str(&format!("Tags: {}\n", metadata.tags.join(", ")));
+                    }
+                    output.push_str(&format!("Created: {:?}\n", metadata.created_at));
+                    output.push_str(&format!("Updated: {:?}\n", metadata.updated_at));
+                    output.push_str("================================");
+                    return Ok(DslOutput::Message(output));
+                }
+            }
+            let path = format!(
+                "{}/{}",
+                db.config.storage.data_dir.to_string_lossy(),
+                db.active_instance().name
+            );
+            let storage = crate::core::storage::ParquetStorage::new(&path);
+            if !storage.metadata_exists(&dataset_name) {
+                return Ok(DslOutput::Message(format!(
+                    "No metadata found for dataset '{}'",
+                    dataset_name
+                )));
+            }
+            let metadata =
+                storage
+                    .load_dataset_metadata(&dataset_name)
+                    .map_err(|e| DslError::Parse {
+                        line: line_no,
+                        msg: format!("Failed to load metadata: {}", e),
+                    })?;
+            let mut output = format!("=== Dataset Metadata: {} ===\n", metadata.name);
+            output.push_str(&format!("Version: {}\n", metadata.version));
+            output.push_str(&format!("Schema Version: {}\n", metadata.schema_version));
+            output.push_str(&format!("Hash: {}\n", metadata.hash));
+            output.push_str(&format!("Origin: {:?}\n", metadata.origin));
+            if let Some(author) = &metadata.author {
+                output.push_str(&format!("Author: {}\n", author));
+            }
+            if let Some(desc) = &metadata.description {
+                output.push_str(&format!("Description: {}\n", desc));
+            }
+            if !metadata.tags.is_empty() {
+                output.push_str(&format!("Tags: {}\n", metadata.tags.join(", ")));
+            }
+            output.push_str(&format!("Created: {:?}\n", metadata.created_at));
+            output.push_str(&format!("Updated: {:?}\n", metadata.updated_at));
+            output.push_str("================================");
+            Ok(DslOutput::Message(output))
+        }
+
+        ShowTarget::DatasetVersions(dataset_name) => {
+            let path = format!(
+                "{}/{}",
+                db.config.storage.data_dir.to_string_lossy(),
+                db.active_instance().name
+            );
+            let storage = crate::core::storage::ParquetStorage::new(&path);
+            if !storage.metadata_exists(&dataset_name) {
+                return Ok(DslOutput::Message(format!(
+                    "No metadata found for dataset '{}'",
+                    dataset_name
+                )));
+            }
+            let metadata =
+                storage
+                    .load_dataset_metadata(&dataset_name)
+                    .map_err(|e| DslError::Parse {
+                        line: line_no,
+                        msg: format!("Failed to load metadata: {}", e),
+                    })?;
+            let mut output = format!("=== Version History for Dataset: {} ===\n", dataset_name);
+            output.push_str(&format!("Current Version: {}\n", metadata.version));
+            output.push_str(&format!(
+                "Current Schema Version: {}\n",
+                metadata.schema_version
+            ));
+            output.push_str("\nSchema History:\n");
+            if metadata.schema_history.is_empty() {
+                output.push_str("  (Initial schema only)\n");
+            } else {
+                for v in &metadata.schema_history {
+                    output.push_str(&format!(
+                        "  - v{}: {} columns, migration: {:?}\n",
+                        v.version,
+                        v.schema.columns.len(),
+                        v.migration
+                    ));
+                }
+            }
+            output.push_str("================================");
+            Ok(DslOutput::Message(output))
+        }
+
+        ShowTarget::Shape(name) => {
+            let t = db.get(&name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            Ok(DslOutput::Message(format!(
+                "SHAPE {}: {:?}\n",
+                name, t.shape.dims
+            )))
+        }
+
+        ShowTarget::Schema(name) => {
+            if let Ok(dataset) = db.get_dataset(&name) {
+                let mut output = format!("Schema for dataset '{}' (Legacy):\n", name);
+                output.push_str(&format!(
+                    "{:<20} {:<20} {:<10}\n",
+                    "Field", "Type", "Nullable"
+                ));
+                output.push_str(&format!("{:-<52}\n", ""));
+                for field in &dataset.schema.fields {
+                    output.push_str(&format!(
+                        "{:<20} {:<20} {:<10}\n",
+                        field.name,
+                        format!("{:?}", field.value_type),
+                        field.nullable
+                    ));
+                }
+                return Ok(DslOutput::Message(output));
+            }
+            if let Some(ds) = db.get_tensor_dataset(&name) {
+                let mut output = format!("Schema for dataset '{}' (Tensor-First):\n", name);
+                output.push_str(&format!(
+                    "{:<20} {:<20} {:<10} {:<10}\n",
+                    "Column", "Type", "Role", "Nullable"
+                ));
+                output.push_str(&format!("{:-<62}\n", ""));
+                for col in &ds.schema.columns {
+                    output.push_str(&format!(
+                        "{:<20} {:<20} {:<10} {:<10}\n",
+                        col.name,
+                        format!("{}", col.value_type),
+                        format!("{:?}", col.role),
+                        col.nullable
+                    ));
+                }
+                return Ok(DslOutput::Message(output));
+            }
+            Err(DslError::Engine {
+                line: line_no,
+                source: crate::engine::EngineError::DatasetNotFound(name),
+            })
+        }
+
+        ShowTarget::StringLiteral(s) => Ok(DslOutput::Message(s)),
+
+        ShowTarget::Named(name) => {
+            let _ = db.evaluate(&name);
+            if let Ok(t) = db.get(&name) {
+                return Ok(DslOutput::Tensor(t.clone()));
+            }
+            if let Ok(dataset) = db.get_dataset(&name) {
+                return Ok(DslOutput::Table(dataset.clone()));
+            }
+            if let Some(ds) = db.get_tensor_dataset(&name) {
+                let health_info = db.verify_tensor_dataset(&name).unwrap_or_default();
+                return Ok(DslOutput::TensorTable(ds.clone(), health_info));
+            }
+            Err(DslError::Engine {
+                line: line_no,
+                source: crate::engine::EngineError::NameNotFound(name),
+            })
+        }
+    }
+}
+
+fn format_lineage_tree(node: &crate::engine::LineageNode, indent: usize) -> String {
+    let mut out = String::new();
+    let indent_str = "  ".repeat(indent);
+    let name_part = if let Some(name) = &node.name {
+        format!(" ({})", name)
+    } else {
+        String::new()
     };
-    format!("SHOW {}", target)
+    out.push_str(&format!(
+        "{}{}{} [{}]\n",
+        indent_str, node.operation, name_part, node.tensor_id.0
+    ));
+    for input in &node.inputs {
+        out.push_str(&format_lineage_tree(input, indent + 1));
+    }
+    out
 }
 
 /// Map `AggFuncAst` to the query engine's `AggregateFunction`.
@@ -1092,44 +1381,6 @@ fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
             }
         }
         _ => LogicalExpr::Literal(Value::Null),
-    }
-}
-
-fn deliver_to_string(s: &DeliverStmt) -> String {
-    match &s.path {
-        Some(p) => format!("DELIVER {} TO \"{}\"", s.dataset, p),
-        None => format!("DELIVER {}", s.dataset),
-    }
-}
-
-fn save_to_string(s: &SaveStmt) -> String {
-    let kind = match s.kind {
-        PersistKind::Tensor => "TENSOR",
-        PersistKind::Dataset => "DATASET",
-    };
-    match &s.path {
-        Some(p) => format!("SAVE {} {} TO \"{}\"", kind, s.name, p),
-        None => format!("SAVE {} {}", kind, s.name),
-    }
-}
-
-fn load_to_string(s: &LoadStmt) -> String {
-    let kind = match s.kind {
-        PersistKind::Tensor => "TENSOR",
-        PersistKind::Dataset => "DATASET",
-    };
-    match &s.path {
-        Some(p) => format!("LOAD {} {} FROM \"{}\"", kind, s.name, p),
-        None => format!("LOAD {} {}", kind, s.name),
-    }
-}
-
-fn list_to_string(s: &ListStmt) -> String {
-    match &s.target {
-        ListTarget::Tensors => "LIST TENSORS".into(),
-        ListTarget::Datasets => "LIST DATASETS".into(),
-        ListTarget::DatasetVersions(n) => format!("LIST DATASET VERSIONS {}", n),
-        ListTarget::DatasetPackages => "LIST DATASET PACKAGES".into(),
     }
 }
 

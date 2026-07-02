@@ -2,47 +2,23 @@ use crate::core::storage::ParquetStorage;
 use crate::dsl::{DslError, DslOutput};
 use crate::engine::TensorDb;
 
-/// Handle SET DATASET <name> METADATA <key> = <value>
-pub fn handle_set_metadata(
+/// Typed entry point — called directly from the executor without a string round-trip.
+pub fn set_metadata_typed(
     db: &mut TensorDb,
-    line: &str,
+    dataset_name: &str,
+    raw_key: &str,
+    raw_value: &str,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    // Syntax: SET DATASET users METADATA version = "2"
-    let rest = line.strip_prefix("SET DATASET ").unwrap().trim();
+    let key = raw_key.to_lowercase();
+    let value = raw_value.trim_matches('"').to_string();
 
-    // Split by " METADATA "
-    let parts: Vec<&str> = rest.splitn(2, " METADATA ").collect();
-    if parts.len() != 2 {
-        return Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected: SET DATASET <name> METADATA <key> = <value>".to_string(),
-        });
-    }
-
-    let dataset_name = parts[0].trim();
-    let kv_part = parts[1].trim();
-
-    // Split by "="
-    let kv: Vec<&str> = kv_part.splitn(2, '=').collect();
-    if kv.len() != 2 {
-        return Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected: <key> = <value> after METADATA".to_string(),
-        });
-    }
-
-    let key = kv[0].trim().to_lowercase();
-    let value = kv[1].trim().trim_matches('"').to_string();
-
-    // 1. Update in-memory metadata (legacy)
     db.set_dataset_metadata(dataset_name, key.clone(), value.clone())
         .map_err(|e| DslError::Engine {
             line: line_no,
             source: e,
         })?;
 
-    // 2. Persistent Metadata Update (Phase 2)
     let path = format!(
         "{}/{}",
         db.config.storage.data_dir.to_string_lossy(),
@@ -63,10 +39,7 @@ pub fn handle_set_metadata(
             "author" => metadata.author = Some(value.clone()),
             "description" => metadata.description = Some(value.clone()),
             "tag" => metadata.add_tag(value.clone()),
-            _ => {
-                // For other keys, we might want to store them in a general map
-                // but for now let's stick to the known fields or just ignore
-            }
+            _ => {}
         }
 
         metadata.increment_version();
@@ -82,4 +55,34 @@ pub fn handle_set_metadata(
         "Updated metadata for dataset '{}': {} = {}",
         dataset_name, key, value
     )))
+}
+
+/// Handle `SET DATASET <name> METADATA <key> = <value>` (string-based, for the legacy fallback chain).
+pub fn handle_set_metadata(
+    db: &mut TensorDb,
+    line: &str,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let rest = line.strip_prefix("SET DATASET ").unwrap().trim();
+
+    let parts: Vec<&str> = rest.splitn(2, " METADATA ").collect();
+    if parts.len() != 2 {
+        return Err(DslError::Parse {
+            line: line_no,
+            msg: "Expected: SET DATASET <name> METADATA <key> = <value>".to_string(),
+        });
+    }
+
+    let dataset_name = parts[0].trim();
+    let kv_part = parts[1].trim();
+
+    let kv: Vec<&str> = kv_part.splitn(2, '=').collect();
+    if kv.len() != 2 {
+        return Err(DslError::Parse {
+            line: line_no,
+            msg: "Expected: <key> = <value> after METADATA".to_string(),
+        });
+    }
+
+    set_metadata_typed(db, dataset_name, kv[0].trim(), kv[1].trim(), line_no)
 }

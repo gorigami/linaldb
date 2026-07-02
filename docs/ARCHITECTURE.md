@@ -235,13 +235,14 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 
 #### `executor.rs` — Typed Dispatch Layer
 
-- `execute_statement(db, stmt, line_no, ctx)` — single `match` on `Statement`, routes every variant directly to the engine API with no string re-parsing
+- `execute_statement(db, stmt, line_no, ctx)` — single `match` on `Statement`, routes every variant directly to the engine API; **zero string round-trips** in the typed path as of v0.1.19
+- `execute_show(db, ShowTarget, line_no)` — private function that matches on the `ShowTarget` enum and calls engine APIs directly (no string reconstruction)
 - `eval_expr_to_name()` — recursive `Expr` → engine call evaluator; generates temporary tensor names via an atomic counter for sub-expressions
 - `eval_call()` — maps all 18 `CallExpr` variants to `eval_binary` / `eval_unary` / `eval_matmul` / etc., with lazy/eager branching
 - `col_type_to_value_type()` — converts `ColType` → `ValueType` without a string round-trip
 - `dsl_expr_to_logical_expr()` — converts `ast::Expr` → `query::logical::Expr` for WHERE/HAVING clauses (arithmetic InfixOp only; comparison predicates fall through to legacy)
 - `dataset_filter_to_logical()` — converts `DatasetFilter` → `query::logical::Expr` for FILTER/HAVING in `DATASET … FROM` queries
-- `expr_to_string()` — round-trips an `Expr` back to DSL text for the few remaining delegated handlers
+- `expr_to_string()` — round-trips an `Expr` back to DSL text; only needed by `EXPLAIN` (which delegates to the legacy handler with a minimal string)
 
 #### `mod.rs` — Dispatch Entry Point
 
@@ -252,14 +253,14 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 
 #### `handlers/`
 
-Legacy command handlers. Most statement types are now dispatched directly from `executor.rs`; the handlers below are still invoked for statements whose logic is not yet fully ported:
+Legacy string-based handlers retained for the fallback chain in `mod.rs`. Every `Statement` variant except `Explain` now dispatches from `executor.rs` via typed functions — the handlers below expose both a string-based `handle_*` wrapper (for the fallback) and typed `*_typed` / `*_core` functions (called from the executor):
 
-- **dataset.rs**: `build_dataset_query_plan` preserved for `EXPLAIN`; `handle_dataset` preserved for edge cases in the legacy fallback
-- **explain.rs**: `EXPLAIN` — has real plan-building logic (`build_dataset_query_plan`, `build_select_query_plan`, `build_search_query_plan`)
-- **introspection.rs**: `SHOW` commands (SCHEMA, INDEXES, LINEAGE, DATASET METADATA, etc.)
-- **persistence.rs**: `SAVE`, `LOAD`, `LIST`, `IMPORT`, `EXPORT`
-- **search.rs**: `build_search_query_plan` — used by `explain.rs`; the legacy `SEARCH target FROM source QUERY vector ON column K=k` string syntax still dispatches here via the fallback chain
-- **metadata.rs**: `SET DATASET … METADATA …`
+- **dataset.rs**: `build_dataset_query_plan` preserved for `EXPLAIN`; `handle_dataset` for legacy fallback edge cases
+- **explain.rs**: `EXPLAIN` — real plan-building logic (`build_dataset_query_plan`, `build_select_query_plan`, `build_search_query_plan`); intentionally not ported (typed parser only captures a single ident)
+- **introspection.rs**: `handle_show` (string wrapper for legacy fallback; logic now also lives in `executor::execute_show`)
+- **persistence.rs**: private `*_core` functions contain the real logic; `handle_*` wrappers parse strings and call them; `save_typed`, `load_typed`, `list_typed`, `import_typed`, `export_typed` are the pub typed entry points
+- **search.rs**: `build_search_query_plan` — used by `explain.rs`; legacy `SEARCH target FROM source QUERY vector ON column K=k` still dispatches here via the fallback chain
+- **metadata.rs**: `set_metadata_typed` is the typed entry point; `handle_set_metadata` parses the string and delegates to it
 
 The following handlers were **deleted** (fully superseded by the typed executor):
 
