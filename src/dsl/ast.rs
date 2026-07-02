@@ -150,8 +150,47 @@ pub struct AttachStmt {
 pub struct CreateDatasetStmt {
     pub name: String,
     pub columns: Vec<ColumnDef>,
-    /// `DATASET <name> FROM <source>` variant.
-    pub from: Option<String>,
+    /// `DATASET <name> FROM <source> [clauses]` variant.
+    pub from: Option<DatasetFromClause>,
+}
+
+/// Clause data for `DATASET target FROM source [FILTER …] [SELECT …] [GROUP BY …] [ORDER BY …] [LIMIT …]`.
+#[derive(Debug, Clone)]
+pub struct DatasetFromClause {
+    pub source: String,
+    pub filter: Option<DatasetFilter>,
+    pub select: Option<Vec<SelectExpr>>,
+    pub group_by: Vec<String>,
+    pub having: Option<DatasetFilter>,
+    pub order_by: Option<OrderByClause>,
+    pub limit: Option<usize>,
+}
+
+/// A simple `col op value` predicate used in FILTER / HAVING clauses of `DATASET FROM`.
+#[derive(Debug, Clone)]
+pub struct DatasetFilter {
+    pub column: String,
+    pub op: CmpOp,
+    pub value: FilterValue,
+}
+
+/// Comparison operators supported in FILTER / HAVING predicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    NotEq,
+    Gt,
+    GtEq,
+    Lt,
+    LtEq,
+}
+
+/// Scalar value on the right-hand side of a FILTER predicate.
+#[derive(Debug, Clone)]
+pub enum FilterValue {
+    Int(i64),
+    Float(f64),
+    Str(String),
 }
 
 #[derive(Debug, Clone)]
@@ -356,14 +395,23 @@ pub struct SetMetadataStmt {
     pub value: String,
 }
 
+/// How the query vector is supplied in a SEARCH statement.
+#[derive(Debug, Clone)]
+pub enum SearchQuery {
+    /// `QUERY <tensor_name>` — reference to an in-memory named tensor.
+    TensorRef(String),
+    /// `QUERY [v1, v2, …]` — inline vector literal.
+    Inline(Vec<f64>),
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchStmt {
     /// Dataset to search in.
     pub dataset: String,
     /// Vector column to search against.
     pub column: String,
-    /// Name of an in-memory tensor to use as the query vector.
-    pub query_tensor: String,
+    /// Query vector: either a named tensor or an inline literal.
+    pub query: SearchQuery,
     /// Number of nearest neighbours to return.
     pub top_k: usize,
     /// Optional output dataset name (defaults to `"search_results"`).

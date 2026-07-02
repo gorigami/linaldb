@@ -221,7 +221,10 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 - `Statement::is_read_only()` — gates the shared-reference `execute_line_shared` path
 - `Expr` — expression sub-language: `Ref`, `Scalar`, `StringLit`, `Infix`, `Call`, `Index`, `Field`, `DatasetRef`
 - `CallExpr` — 18 named-prefix operations: binary (`ADD`, `MATMUL`, `CORRELATE`, …), unary (`NORMALIZE`, `RESHAPE`, …), n-ary (`STACK`)
-- All types (`ColType`, `TensorKindAst`, `InfixOp`) are decoupled from engine internals; the executor maps them
+- All types (`ColType`, `TensorKindAst`, `InfixOp`, `CmpOp`, `FilterValue`) are decoupled from engine internals; the executor maps them
+- `DatasetFromClause` — typed clause bag for `DATASET … FROM source [FILTER …] [SELECT …] [GROUP BY …] [HAVING …] [ORDER BY …] [LIMIT …]`
+- `DatasetFilter { column, op: CmpOp, value: FilterValue }` — typed predicate for FILTER/HAVING in dataset queries
+- `SearchQuery` — enum: `TensorRef(String)` (named tensor) | `Inline(Vec<f64>)` (inline vector literal)
 
 #### `parser.rs` — Recursive-Descent + Pratt Parser
 
@@ -237,7 +240,8 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 - `eval_call()` — maps all 18 `CallExpr` variants to `eval_binary` / `eval_unary` / `eval_matmul` / etc., with lazy/eager branching
 - `col_type_to_value_type()` — converts `ColType` → `ValueType` without a string round-trip
 - `dsl_expr_to_logical_expr()` — converts `ast::Expr` → `query::logical::Expr` for WHERE/HAVING clauses (arithmetic InfixOp only; comparison predicates fall through to legacy)
-- `expr_to_string()` — round-trips an `Expr` back to DSL text; used only for GROUP BY fallback (SELECT with GROUP BY still delegates to legacy handler since `SelectColumns` only carries column name strings)
+- `dataset_filter_to_logical()` — converts `DatasetFilter` → `query::logical::Expr` for FILTER/HAVING in `DATASET … FROM` queries
+- `expr_to_string()` — round-trips an `Expr` back to DSL text for the few remaining delegated handlers
 
 #### `mod.rs` — Dispatch Entry Point
 
@@ -250,7 +254,7 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 
 Legacy command handlers. Most statement types are now dispatched directly from `executor.rs`; the handlers below are still invoked for statements whose logic is not yet fully ported:
 
-- **dataset.rs**: `DATASET … FROM source` (query variant), `SELECT … GROUP BY` (aggregate fallback)
+- **dataset.rs**: `build_dataset_query_plan` preserved for `EXPLAIN`; `handle_dataset` preserved for edge cases in the legacy fallback
 - **explain.rs**: `EXPLAIN` — has real plan-building logic (`build_dataset_query_plan`, `build_select_query_plan`, `build_search_query_plan`)
 - **introspection.rs**: `SHOW` commands (SCHEMA, INDEXES, LINEAGE, DATASET METADATA, etc.)
 - **persistence.rs**: `SAVE`, `LOAD`, `LIST`, `IMPORT`, `EXPORT`
@@ -742,7 +746,7 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 |-----------|----------------|-----------|
 | `Tensor` / `Shape` | **Semantic Core** | Frozen (v1) |
 | `ReferenceGraph` (TF Datasets) | **Semantic Core** | Frozen (v1) |
-| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.17) |
+| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.18) |
 | `SimdBackend` (NEON/AVX) | **Engine Extension** | Evolving |
 | `ParquetPersistence` | **Engine Extension** | Evolving |
 | `HttpServer` / `REST API` | **Application Layer** | Flexible |

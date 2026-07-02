@@ -189,6 +189,16 @@ pub enum Token {
     Eq,
     #[token(".")]
     Dot,
+    #[token(">=")]
+    GtEq,
+    #[token("<=")]
+    LtEq,
+    #[token("!=")]
+    NotEq,
+    #[token(">")]
+    Gt,
+    #[token("<")]
+    Lt,
     #[token("+")]
     Plus,
     #[token("-")]
@@ -235,6 +245,11 @@ impl std::fmt::Display for Token {
             Token::RBracket => write!(f, "`]`"),
             Token::LParen => write!(f, "`(`"),
             Token::RParen => write!(f, "`)`"),
+            Token::GtEq => write!(f, "`>=`"),
+            Token::LtEq => write!(f, "`<=`"),
+            Token::NotEq => write!(f, "`!=`"),
+            Token::Gt => write!(f, "`>`"),
+            Token::Lt => write!(f, "`<`"),
             Token::Plus => write!(f, "`+`"),
             Token::Minus => write!(f, "`-`"),
             Token::Star => write!(f, "`*`"),

@@ -492,14 +492,164 @@ impl Parser {
             }
             Some(Token::From) => {
                 self.advance();
-                let src = self.eat_str()?;
+                let source = self.eat_ident()?;
+
+                let mut filter = None;
+                let mut select = None;
+                let mut group_by = vec![];
+                let mut having = None;
+                let mut order_by = None;
+                let mut limit = None;
+
+                loop {
+                    match self.peek() {
+                        Some(Token::Filter) | Some(Token::Where) => {
+                            self.advance();
+                            filter = Some(self.parse_dataset_filter()?);
+                        }
+                        Some(Token::Select) => {
+                            self.advance();
+                            let mut exprs = vec![];
+                            loop {
+                                exprs.push(self.parse_select_expr()?);
+                                if self.at(&Token::Comma) {
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
+                            }
+                            select = Some(exprs);
+                        }
+                        Some(Token::Group) => {
+                            self.advance();
+                            self.eat(&Token::By)?;
+                            let mut cols = vec![];
+                            loop {
+                                cols.push(self.eat_ident()?);
+                                if self.at(&Token::Comma) {
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
+                            }
+                            group_by = cols;
+                        }
+                        Some(Token::Having) => {
+                            self.advance();
+                            having = Some(self.parse_dataset_filter()?);
+                        }
+                        Some(Token::Order) => {
+                            self.advance();
+                            self.eat(&Token::By)?;
+                            let column = self.eat_ident()?;
+                            let ascending = !self.at_ident("DESC");
+                            if !ascending {
+                                self.advance();
+                            }
+                            order_by = Some(OrderByClause { column, ascending });
+                        }
+                        Some(Token::Limit) => {
+                            self.advance();
+                            limit = Some(self.eat_usize()?);
+                        }
+                        _ => break,
+                    }
+                }
+
                 Ok(Statement::CreateDataset(CreateDatasetStmt {
                     name,
                     columns: vec![],
-                    from: Some(src),
+                    from: Some(DatasetFromClause {
+                        source,
+                        filter,
+                        select,
+                        group_by,
+                        having,
+                        order_by,
+                        limit,
+                    }),
                 }))
             }
             _ => Err(self.unexpected("COLUMNS or FROM after DATASET name")),
+        }
+    }
+
+    fn parse_dataset_filter(&mut self) -> Result<DatasetFilter, ParseError> {
+        let column = self.eat_ident()?;
+        let op = self.parse_cmp_op()?;
+        let value = self.parse_filter_value()?;
+        Ok(DatasetFilter { column, op, value })
+    }
+
+    fn parse_cmp_op(&mut self) -> Result<CmpOp, ParseError> {
+        match self.peek() {
+            Some(Token::GtEq) => {
+                self.advance();
+                Ok(CmpOp::GtEq)
+            }
+            Some(Token::LtEq) => {
+                self.advance();
+                Ok(CmpOp::LtEq)
+            }
+            Some(Token::NotEq) => {
+                self.advance();
+                Ok(CmpOp::NotEq)
+            }
+            Some(Token::Gt) => {
+                self.advance();
+                Ok(CmpOp::Gt)
+            }
+            Some(Token::Lt) => {
+                self.advance();
+                Ok(CmpOp::Lt)
+            }
+            Some(Token::Eq) => {
+                self.advance();
+                Ok(CmpOp::Eq)
+            }
+            _ => Err(self.unexpected("comparison operator (>, <, >=, <=, =, !=)")),
+        }
+    }
+
+    fn parse_filter_value(&mut self) -> Result<FilterValue, ParseError> {
+        match self.peek() {
+            Some(Token::Int(_)) => {
+                if let Some(Token::Int(n)) = self.advance() {
+                    return Ok(FilterValue::Int(n));
+                }
+                unreachable!()
+            }
+            Some(Token::Float(_)) => {
+                if let Some(Token::Float(f)) = self.advance() {
+                    return Ok(FilterValue::Float(f));
+                }
+                unreachable!()
+            }
+            Some(Token::Str(_)) => {
+                if let Some(Token::Str(s)) = self.advance() {
+                    return Ok(FilterValue::Str(s));
+                }
+                unreachable!()
+            }
+            Some(Token::Minus) => {
+                self.advance();
+                match self.peek() {
+                    Some(Token::Int(_)) => {
+                        if let Some(Token::Int(n)) = self.advance() {
+                            return Ok(FilterValue::Int(-n));
+                        }
+                        unreachable!()
+                    }
+                    Some(Token::Float(_)) => {
+                        if let Some(Token::Float(f)) = self.advance() {
+                            return Ok(FilterValue::Float(-f));
+                        }
+                        unreachable!()
+                    }
+                    _ => Err(self.unexpected("number after `-`")),
+                }
+            }
+            _ => Err(self.unexpected("filter value (integer, float, or string)")),
         }
     }
 
@@ -913,7 +1063,7 @@ impl Parser {
         Ok(SelectExpr::Aggregate { func, column })
     }
 
-    // SEARCH <dataset> ON <column> QUERY <tensor_name> LIMIT <k> [INTO <target>]
+    // SEARCH <dataset> ON <column> QUERY <tensor_name|[vector]> LIMIT <k> [INTO <target>]
     fn parse_search(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Search)?;
         let dataset = self.eat_ident()?;
@@ -928,7 +1078,12 @@ impl Parser {
             return Err(self.error("Expected QUERY after column name in SEARCH"));
         }
         self.advance();
-        let query_tensor = self.eat_ident()?;
+
+        let query = if self.at(&Token::LBracket) {
+            SearchQuery::Inline(self.parse_f64_list()?)
+        } else {
+            SearchQuery::TensorRef(self.eat_ident()?)
+        };
 
         self.eat(&Token::Limit)?;
         let top_k = self.eat_usize()?;
@@ -943,7 +1098,7 @@ impl Parser {
         Ok(Statement::Search(SearchStmt {
             dataset,
             column,
-            query_tensor,
+            query,
             top_k,
             target,
         }))
@@ -1781,7 +1936,7 @@ mod tests {
         let Statement::Search(s) = stmt else { panic!() };
         assert_eq!(s.dataset, "embeddings");
         assert_eq!(s.column, "vec");
-        assert_eq!(s.query_tensor, "q");
+        assert!(matches!(s.query, SearchQuery::TensorRef(ref n) if n == "q"));
         assert_eq!(s.top_k, 5);
         assert!(s.target.is_none());
     }
@@ -1791,6 +1946,67 @@ mod tests {
         let stmt = parse_ok("SEARCH embeddings ON vec QUERY q LIMIT 10 INTO results");
         let Statement::Search(s) = stmt else { panic!() };
         assert_eq!(s.target, Some("results".to_string()));
+    }
+
+    #[test]
+    fn search_inline_vector() {
+        let stmt = parse_ok("SEARCH embeddings ON vec QUERY [1.0, 2.0, 3.0] LIMIT 5");
+        let Statement::Search(s) = stmt else { panic!() };
+        assert_eq!(s.dataset, "embeddings");
+        assert_eq!(s.column, "vec");
+        assert!(matches!(s.query, SearchQuery::Inline(ref v) if v == &vec![1.0, 2.0, 3.0]));
+        assert_eq!(s.top_k, 5);
+    }
+
+    #[test]
+    fn search_inline_vector_into() {
+        let stmt = parse_ok("SEARCH emb ON col QUERY [0.5, -1.0] LIMIT 3 INTO out");
+        let Statement::Search(s) = stmt else { panic!() };
+        assert!(matches!(s.query, SearchQuery::Inline(_)));
+        assert_eq!(s.target, Some("out".to_string()));
+    }
+
+    #[test]
+    fn dataset_from_source() {
+        let stmt = parse_ok("DATASET filtered FROM employees");
+        let Statement::CreateDataset(s) = stmt else {
+            panic!()
+        };
+        assert_eq!(s.name, "filtered");
+        let from = s.from.unwrap();
+        assert_eq!(from.source, "employees");
+        assert!(from.filter.is_none());
+        assert!(from.select.is_none());
+        assert!(from.order_by.is_none());
+        assert!(from.limit.is_none());
+    }
+
+    #[test]
+    fn dataset_from_with_filter() {
+        let stmt = parse_ok("DATASET seniors FROM employees FILTER age >= 60");
+        let Statement::CreateDataset(s) = stmt else {
+            panic!()
+        };
+        let from = s.from.unwrap();
+        assert_eq!(from.source, "employees");
+        let f = from.filter.unwrap();
+        assert_eq!(f.column, "age");
+        assert_eq!(f.op, CmpOp::GtEq);
+        assert!(matches!(f.value, FilterValue::Int(60)));
+    }
+
+    #[test]
+    fn dataset_from_full_clauses() {
+        let stmt = parse_ok("DATASET top FROM orders SELECT name ORDER BY total DESC LIMIT 10");
+        let Statement::CreateDataset(s) = stmt else {
+            panic!()
+        };
+        let from = s.from.unwrap();
+        assert_eq!(from.source, "orders");
+        let ord = from.order_by.unwrap();
+        assert_eq!(ord.column, "total");
+        assert!(!ord.ascending);
+        assert_eq!(from.limit, Some(10));
     }
 
     #[test]
