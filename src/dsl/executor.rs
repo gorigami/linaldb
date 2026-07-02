@@ -106,20 +106,32 @@ pub fn execute_statement(
         }
 
         // ── Database management ─────────────────────────────────────────────
-        Statement::CreateDatabase(s) => handlers::instance::handle_create_database(
-            db,
-            &format!("CREATE DATABASE {}", s.name),
-            line_no,
-        ),
+        Statement::CreateDatabase(s) => {
+            db.create_database(s.name.clone())
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+            Ok(DslOutput::Message(format!("Created database: {}", s.name)))
+        }
 
-        Statement::DropDatabase(s) => handlers::instance::handle_drop_database(
-            db,
-            &format!("DROP DATABASE {}", s.name),
-            line_no,
-        ),
+        Statement::DropDatabase(s) => {
+            db.drop_database(&s.name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            Ok(DslOutput::Message(format!("Dropped database: {}", s.name)))
+        }
 
         Statement::UseDatabase(s) => {
-            handlers::instance::handle_use_database(db, &format!("USE {}", s.name), line_no)
+            db.use_database(&s.name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            Ok(DslOutput::Message(format!(
+                "Switched to database '{}'",
+                s.name
+            )))
         }
 
         // ── Introspection ───────────────────────────────────────────────────
@@ -132,7 +144,23 @@ pub fn execute_statement(
         }
 
         Statement::Audit(s) => {
-            handlers::audit::handle_audit(db, &format!("AUDIT {}", s.target), line_no)
+            let issues = db
+                .verify_tensor_dataset(&s.target)
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+            if issues.is_empty() {
+                Ok(DslOutput::Message(format!(
+                    "Audit PASSED for dataset '{}'. All column references are valid.",
+                    s.target
+                )))
+            } else {
+                Ok(DslOutput::Message(format!(
+                    "Audit FAILED for dataset '{}'. The following columns point to missing or invalid tensors: {:?}",
+                    s.target, issues
+                )))
+            }
         }
 
         // ── Dataset operations ──────────────────────────────────────────────
@@ -328,37 +356,48 @@ pub fn execute_statement(
 
         Statement::Import(s) => {
             if s.ephemeral {
-                handlers::persistence::handle_use_dataset(
-                    db,
-                    &format!("USE DATASET FROM \"{}\"", s.path),
-                    line_no,
-                )
+                let cmd = match &s.name {
+                    Some(n) => format!("USE DATASET FROM \"{}\" AS {}", s.path, n),
+                    None => format!("USE DATASET FROM \"{}\"", s.path),
+                };
+                handlers::persistence::handle_use_dataset(db, &cmd, line_no)
             } else {
-                handlers::persistence::handle_import(
-                    db,
-                    &format!("IMPORT DATASET FROM \"{}\"", s.path),
-                    line_no,
-                )
+                let cmd = match &s.name {
+                    Some(n) => format!("IMPORT DATASET FROM \"{}\" AS {}", s.path, n),
+                    None => format!("IMPORT DATASET FROM \"{}\"", s.path),
+                };
+                handlers::persistence::handle_import(db, &cmd, line_no)
             }
         }
 
         Statement::Export(s) => handlers::persistence::handle_export(
             db,
-            &format!("EXPORT {} TO \"{}\"", s.name, s.path),
+            &format!("EXPORT CSV {} TO \"{}\"", s.name, s.path),
             line_no,
         ),
 
         // ── Index ───────────────────────────────────────────────────────────
-        Statement::CreateIndex(s) => handlers::index::handle_create_index(
-            db,
-            &format!("CREATE INDEX idx ON {}({})", s.dataset, s.column),
-            line_no,
-        ),
+        Statement::CreateIndex(s) => match s.kind {
+            IndexKindAst::Default | IndexKindAst::Hash | IndexKindAst::BTree => {
+                db.create_index(&s.dataset, &s.column)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                Ok(DslOutput::Message(format!(
+                    "Created index on {}({})",
+                    s.dataset, s.column
+                )))
+            }
+        },
 
         // ── Metadata ────────────────────────────────────────────────────────
         Statement::SetMetadata(s) => handlers::metadata::handle_set_metadata(
             db,
-            &format!("SET DATASET {} {} = \"{}\"", s.dataset, s.key, s.value),
+            &format!(
+                "SET DATASET {} METADATA {} = \"{}\"",
+                s.dataset, s.key, s.value
+            ),
             line_no,
         ),
 
@@ -366,7 +405,12 @@ pub fn execute_statement(
         Statement::Search(s) => handlers::search::handle_search(db, &search_to_string(&s), line_no),
 
         // ── Session ─────────────────────────────────────────────────────────
-        Statement::Reset => handlers::session::handle_session(db, "RESET", line_no),
+        Statement::Reset => {
+            db.reset_session();
+            Ok(DslOutput::Message(
+                "Session reset complete. All in-memory data has been cleared from the active database.".to_string(),
+            ))
+        }
     }
 }
 
