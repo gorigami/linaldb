@@ -193,7 +193,7 @@ pub struct SelectStmt {
 #[derive(Debug, Clone)]
 pub enum SelectColumns {
     All,
-    Named(Vec<String>),
+    Named(Vec<SelectExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +216,23 @@ pub struct DeliverStmt {
 #[derive(Debug, Clone)]
 pub struct ShowStmt {
     pub target: ShowTarget,
+}
+
+/// A single item in a SELECT column list — either a plain column or an aggregate call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectExpr {
+    Column(String),
+    Aggregate { func: AggFuncAst, column: String },
+}
+
+/// Aggregate functions recognised in SELECT columns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggFuncAst {
+    Sum,
+    Avg,
+    Count,
+    Min,
+    Max,
 }
 
 /// What `SHOW` should display.
@@ -341,9 +358,16 @@ pub struct SetMetadataStmt {
 
 #[derive(Debug, Clone)]
 pub struct SearchStmt {
+    /// Dataset to search in.
+    pub dataset: String,
+    /// Vector column to search against.
+    pub column: String,
+    /// Name of an in-memory tensor to use as the query vector.
     pub query_tensor: String,
-    pub dataset: Option<String>,
-    pub top_k: Option<usize>,
+    /// Number of nearest neighbours to return.
+    pub top_k: usize,
+    /// Optional output dataset name (defaults to `"search_results"`).
+    pub target: Option<String>,
 }
 
 // ─── Shared sub-types ─────────────────────────────────────────────────────────

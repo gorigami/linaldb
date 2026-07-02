@@ -563,10 +563,10 @@ impl Parser {
             self.advance();
             SelectColumns::All
         } else {
-            let mut cols = vec![self.eat_ident()?];
+            let mut cols = vec![self.parse_select_expr()?];
             while self.at(&Token::Comma) {
                 self.advance();
-                cols.push(self.eat_ident()?);
+                cols.push(self.parse_select_expr()?);
             }
             SelectColumns::Named(cols)
         };
@@ -874,29 +874,78 @@ impl Parser {
         }))
     }
 
-    // SEARCH <query_tensor> [IN <dataset>] [TOP <k>]
+    // SELECT column list item: plain column or aggregate call (SUM, AVG, COUNT, MIN, MAX)
+    fn parse_select_expr(&mut self) -> Result<SelectExpr, ParseError> {
+        match self.peek() {
+            Some(Token::Sum) => {
+                self.advance();
+                self.parse_agg_call(AggFuncAst::Sum)
+            }
+            Some(Token::Ident(s)) if s == "AVG" => {
+                self.advance();
+                self.parse_agg_call(AggFuncAst::Avg)
+            }
+            Some(Token::Ident(s)) if s == "COUNT" => {
+                self.advance();
+                self.parse_agg_call(AggFuncAst::Count)
+            }
+            Some(Token::Ident(s)) if s == "MIN" => {
+                self.advance();
+                self.parse_agg_call(AggFuncAst::Min)
+            }
+            Some(Token::Ident(s)) if s == "MAX" => {
+                self.advance();
+                self.parse_agg_call(AggFuncAst::Max)
+            }
+            _ => Ok(SelectExpr::Column(self.eat_ident()?)),
+        }
+    }
+
+    fn parse_agg_call(&mut self, func: AggFuncAst) -> Result<SelectExpr, ParseError> {
+        self.eat(&Token::LParen)?;
+        let column = if self.at(&Token::Star) {
+            self.advance();
+            "*".to_string()
+        } else {
+            self.eat_ident()?
+        };
+        self.eat(&Token::RParen)?;
+        Ok(SelectExpr::Aggregate { func, column })
+    }
+
+    // SEARCH <dataset> ON <column> QUERY <tensor_name> LIMIT <k> [INTO <target>]
     fn parse_search(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Search)?;
+        let dataset = self.eat_ident()?;
+
+        if !self.at_ident("ON") {
+            return Err(self.error("Expected ON after dataset name in SEARCH"));
+        }
+        self.advance();
+        let column = self.eat_ident()?;
+
+        if !self.at_ident("QUERY") {
+            return Err(self.error("Expected QUERY after column name in SEARCH"));
+        }
+        self.advance();
         let query_tensor = self.eat_ident()?;
 
-        let dataset = if self.at_ident("IN") {
+        self.eat(&Token::Limit)?;
+        let top_k = self.eat_usize()?;
+
+        let target = if self.at(&Token::Into) {
             self.advance();
             Some(self.eat_ident()?)
         } else {
             None
         };
 
-        let top_k = if self.at_ident("TOP") {
-            self.advance();
-            Some(self.eat_usize()?)
-        } else {
-            None
-        };
-
         Ok(Statement::Search(SearchStmt {
-            query_tensor,
             dataset,
+            column,
+            query_tensor,
             top_k,
+            target,
         }))
     }
 }
@@ -1643,7 +1692,8 @@ mod tests {
         let SelectColumns::Named(cols) = s.columns else {
             panic!()
         };
-        assert_eq!(cols, vec!["col1", "col2"]);
+        assert!(matches!(&cols[0], SelectExpr::Column(c) if c == "col1"));
+        assert!(matches!(&cols[1], SelectExpr::Column(c) if c == "col2"));
     }
 
     #[test]
@@ -1723,6 +1773,65 @@ mod tests {
     fn reset_statement() {
         let stmt = parse_ok("RESET");
         assert!(matches!(stmt, Statement::Reset));
+    }
+
+    #[test]
+    fn search_statement() {
+        let stmt = parse_ok("SEARCH embeddings ON vec QUERY q LIMIT 5");
+        let Statement::Search(s) = stmt else { panic!() };
+        assert_eq!(s.dataset, "embeddings");
+        assert_eq!(s.column, "vec");
+        assert_eq!(s.query_tensor, "q");
+        assert_eq!(s.top_k, 5);
+        assert!(s.target.is_none());
+    }
+
+    #[test]
+    fn search_with_into() {
+        let stmt = parse_ok("SEARCH embeddings ON vec QUERY q LIMIT 10 INTO results");
+        let Statement::Search(s) = stmt else { panic!() };
+        assert_eq!(s.target, Some("results".to_string()));
+    }
+
+    #[test]
+    fn select_aggregate_columns() {
+        let stmt = parse_ok("SELECT SUM(price), AVG(qty) FROM orders GROUP BY category");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert_eq!(s.group_by, vec!["category"]);
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Sum, column } if column == "price")
+        );
+        assert!(
+            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Avg, column } if column == "qty")
+        );
+    }
+
+    #[test]
+    fn select_count_star() {
+        let stmt = parse_ok("SELECT COUNT(*) FROM orders GROUP BY category");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Count, column } if column == "*")
+        );
+    }
+
+    #[test]
+    fn select_mixed_plain_and_agg() {
+        let stmt = parse_ok("SELECT category, MAX(price) FROM orders GROUP BY category");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(&cols[0], SelectExpr::Column(c) if c == "category"));
+        assert!(
+            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Max, column } if column == "price")
+        );
     }
 
     #[test]

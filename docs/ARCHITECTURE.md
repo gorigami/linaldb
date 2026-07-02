@@ -254,7 +254,7 @@ Legacy command handlers. Most statement types are now dispatched directly from `
 - **explain.rs**: `EXPLAIN` — has real plan-building logic (`build_dataset_query_plan`, `build_select_query_plan`, `build_search_query_plan`)
 - **introspection.rs**: `SHOW` commands (SCHEMA, INDEXES, LINEAGE, DATASET METADATA, etc.)
 - **persistence.rs**: `SAVE`, `LOAD`, `LIST`, `IMPORT`, `EXPORT`
-- **search.rs**: `SEARCH` (vector similarity; AST fields are a subset of what the handler expects)
+- **search.rs**: `build_search_query_plan` — used by `explain.rs`; the legacy `SEARCH target FROM source QUERY vector ON column K=k` string syntax still dispatches here via the fallback chain
 - **metadata.rs**: `SET DATASET … METADATA …`
 
 The following handlers were **deleted** (fully superseded by the typed executor):
@@ -742,7 +742,7 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 |-----------|----------------|-----------|
 | `Tensor` / `Shape` | **Semantic Core** | Frozen (v1) |
 | `ReferenceGraph` (TF Datasets) | **Semantic Core** | Frozen (v1) |
-| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.16) |
+| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.17) |
 | `SimdBackend` (NEON/AVX) | **Engine Extension** | Evolving |
 | `ParquetPersistence` | **Engine Extension** | Evolving |
 | `HttpServer` / `REST API` | **Application Layer** | Flexible |
