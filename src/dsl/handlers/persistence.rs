@@ -33,7 +33,10 @@ fn resolve_persistence_path(db: &TensorDb, path: &str) -> String {
 /// Parse `"name [TO \"path\"]"` → `(name, Option<path>)`.
 fn parse_name_with_to(rest: &str) -> (&str, Option<&str>) {
     if let Some(idx) = rest.find(" TO ") {
-        (rest[..idx].trim(), Some(rest[idx + 4..].trim().trim_matches('"')))
+        (
+            rest[..idx].trim(),
+            Some(rest[idx + 4..].trim().trim_matches('"')),
+        )
     } else {
         (rest, None)
     }
@@ -42,7 +45,10 @@ fn parse_name_with_to(rest: &str) -> (&str, Option<&str>) {
 /// Parse `"name [FROM \"path\"]"` → `(name, Option<path>)`.
 fn parse_name_with_from(rest: &str) -> (&str, Option<&str>) {
     if let Some(idx) = rest.find(" FROM ") {
-        (rest[..idx].trim(), Some(rest[idx + 6..].trim().trim_matches('"')))
+        (
+            rest[..idx].trim(),
+            Some(rest[idx + 6..].trim().trim_matches('"')),
+        )
     } else {
         (rest, None)
     }
@@ -67,7 +73,10 @@ fn save_dataset_core(
             let parent = p_path.parent().and_then(|p| p.to_str()).unwrap_or("");
             (dn, resolve_persistence_path(db, parent))
         } else {
-            (dataset_name.to_string(), resolve_persistence_path(db, p_str))
+            (
+                dataset_name.to_string(),
+                resolve_persistence_path(db, p_str),
+            )
         }
     } else {
         (dataset_name.to_string(), resolve_persistence_path(db, ""))
@@ -98,9 +107,7 @@ fn save_dataset_core(
     let mut metadata = if storage.metadata_exists(&disk_name) {
         let mut meta = storage
             .load_dataset_metadata(&disk_name)
-            .unwrap_or_else(|_| {
-                DatasetMetadata::new(disk_name.clone(), DatasetOrigin::Created)
-            });
+            .unwrap_or_else(|_| DatasetMetadata::new(disk_name.clone(), DatasetOrigin::Created));
         meta.increment_version();
         meta
     } else {
@@ -174,7 +181,10 @@ fn load_dataset_core(
             let parent = p_path.parent().and_then(|p| p.to_str()).unwrap_or("");
             (dn, resolve_persistence_path(db, parent))
         } else {
-            (dataset_name.to_string(), resolve_persistence_path(db, p_str))
+            (
+                dataset_name.to_string(),
+                resolve_persistence_path(db, p_str),
+            )
         }
     } else {
         (dataset_name.to_string(), resolve_persistence_path(db, ""))
@@ -248,7 +258,12 @@ fn load_dataset_core(
                 ),
             });
         }
-        Err(e) => return Err(DslError::Engine { line: line_no, source: e }),
+        Err(e) => {
+            return Err(DslError::Engine {
+                line: line_no,
+                source: e,
+            })
+        }
     }
 
     let row_count = dataset.len();
@@ -277,10 +292,12 @@ fn load_tensor_core(
         .unwrap_or_else(|| resolve_persistence_path(db, ""));
 
     let storage = ParquetStorage::new(&storage_path);
-    let tensor = storage.load_tensor(tensor_name).map_err(|e| DslError::Parse {
-        line: line_no,
-        msg: format!("Failed to load tensor: {}", e),
-    })?;
+    let tensor = storage
+        .load_tensor(tensor_name)
+        .map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to load tensor: {}", e),
+        })?;
 
     db.active_instance_mut()
         .insert_tensor_object(tensor_name, tensor)
@@ -763,8 +780,8 @@ pub fn handle_import_csv(
             msg: format!("Failed to import CSV: {}", e),
         })?;
 
-    let final_name = dataset_name_override
-        .unwrap_or(dataset.metadata.name.as_deref().unwrap_or("imported_csv"));
+    let final_name =
+        dataset_name_override.unwrap_or(dataset.metadata.name.as_deref().unwrap_or("imported_csv"));
 
     let schema = dataset.schema.clone();
     db.create_dataset(final_name.to_string(), schema)
@@ -789,11 +806,7 @@ pub fn handle_import_csv(
 }
 
 /// Handle IMPORT command (string-based, for the legacy fallback chain).
-pub fn handle_import(
-    db: &mut TensorDb,
-    line: &str,
-    line_no: usize,
-) -> Result<DslOutput, DslError> {
+pub fn handle_import(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslOutput, DslError> {
     let rest = line.strip_prefix("IMPORT ").unwrap().trim();
     if rest.starts_with("CSV ") {
         handle_import_csv(db, line, line_no)
@@ -808,11 +821,7 @@ pub fn handle_import(
 }
 
 /// Handle EXPORT CSV command (string-based, for the legacy fallback chain).
-pub fn handle_export(
-    db: &mut TensorDb,
-    line: &str,
-    line_no: usize,
-) -> Result<DslOutput, DslError> {
+pub fn handle_export(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslOutput, DslError> {
     let rest = line.strip_prefix("EXPORT ").unwrap().trim();
     if !rest.starts_with("CSV ") {
         return Err(DslError::Parse {

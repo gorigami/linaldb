@@ -531,9 +531,7 @@ pub fn execute_statement(
             line_no,
         ),
 
-        Statement::Export(s) => {
-            handlers::persistence::export_typed(db, &s.name, &s.path, line_no)
-        }
+        Statement::Export(s) => handlers::persistence::export_typed(db, &s.name, &s.path, line_no),
 
         // ── Index ───────────────────────────────────────────────────────────
         Statement::CreateIndex(s) => match s.kind {
@@ -991,7 +989,11 @@ fn fresh_temp(hint: &str) -> String {
 
 // ─── Show — typed dispatch ─────────────────────────────────────────────────────
 
-fn execute_show(db: &mut TensorDb, target: ShowTarget, line_no: usize) -> Result<DslOutput, DslError> {
+fn execute_show(
+    db: &mut TensorDb,
+    target: ShowTarget,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
     match target {
         ShowTarget::All => {
             let mut names = db.list_names();
@@ -1001,7 +1003,10 @@ fn execute_show(db: &mut TensorDb, target: ShowTarget, line_no: usize) -> Result
                 if let Ok(t) = db.get(&name) {
                     output.push_str(&format!(
                         "{}: shape {:?}, len {}, data = {:?}\n",
-                        name, t.shape.dims, t.data.len(), t.data
+                        name,
+                        t.shape.dims,
+                        t.data.len(),
+                        t.data
                     ));
                 }
             }
@@ -1017,7 +1022,9 @@ fn execute_show(db: &mut TensorDb, target: ShowTarget, line_no: usize) -> Result
                 if let Ok(dataset) = db.get_dataset(&name) {
                     output.push_str(&format!(
                         "Dataset: {} (rows: {}, columns: {})\n",
-                        name, dataset.len(), dataset.schema.len()
+                        name,
+                        dataset.len(),
+                        dataset.schema.len()
                     ));
                     for field in &dataset.schema.fields {
                         output.push_str(&format!("  - {}: {}\n", field.name, field.value_type));
@@ -1046,7 +1053,10 @@ fn execute_show(db: &mut TensorDb, target: ShowTarget, line_no: usize) -> Result
             } else {
                 String::from("--- ALL INDICES ---\n")
             };
-            output.push_str(&format!("{:<20} {:<20} {:<10}\n", "Dataset", "Column", "Type"));
+            output.push_str(&format!(
+                "{:<20} {:<20} {:<10}\n",
+                "Dataset", "Column", "Type"
+            ));
             output.push_str(&format!("{:-<52}\n", ""));
             let mut count = 0;
             for (ds, col, type_str) in indices {
@@ -1186,8 +1196,7 @@ fn execute_show(db: &mut TensorDb, target: ShowTarget, line_no: usize) -> Result
                         line: line_no,
                         msg: format!("Failed to load metadata: {}", e),
                     })?;
-            let mut output =
-                format!("=== Version History for Dataset: {} ===\n", dataset_name);
+            let mut output = format!("=== Version History for Dataset: {} ===\n", dataset_name);
             output.push_str(&format!("Current Version: {}\n", metadata.version));
             output.push_str(&format!(
                 "Current Schema Version: {}\n",
@@ -1200,7 +1209,9 @@ fn execute_show(db: &mut TensorDb, target: ShowTarget, line_no: usize) -> Result
                 for v in &metadata.schema_history {
                     output.push_str(&format!(
                         "  - v{}: {} columns, migration: {:?}\n",
-                        v.version, v.schema.columns.len(), v.migration
+                        v.version,
+                        v.schema.columns.len(),
+                        v.migration
                     ));
                 }
             }
