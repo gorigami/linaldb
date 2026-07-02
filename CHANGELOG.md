@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.17] - 2026-07-02
+
+### Added — Typed SEARCH and SELECT GROUP BY in the Executor
+
+**SEARCH — new typed syntax with direct engine dispatch:**
+
+The `SEARCH` statement is redesigned with a complete typed AST and dispatches directly to the query engine with no string reconstruction. Old string-based syntax (`SEARCH target FROM source QUERY vector ON column K=k`) still works via the legacy fallback chain.
+
+New syntax parsed by the typed parser:
+```
+SEARCH <dataset> ON <column> QUERY <tensor_name> LIMIT <k> [INTO <target>]
+```
+
+- Updated `SearchStmt` fields: `dataset`, `column`, `query_tensor`, `top_k`, `target`
+- Parser: `parse_search()` rewritten; `parse_select_expr()` and `parse_agg_call()` added
+- Executor: builds `LogicalPlan::VectorSearch` directly from typed AST; result stored in `target` dataset (default: `"search_results"`)
+- Removed dead helper `search_to_string`
+
+**SELECT GROUP BY — direct aggregate plan construction:**
+
+The GROUP BY fallback to `select_to_string` + `handle_select` is eliminated. Aggregate queries now build `LogicalPlan::Aggregate` directly from the typed AST.
+
+- Added `SelectExpr` enum (`Column(String)` | `Aggregate { func: AggFuncAst, column: String }`) to `ast.rs`
+- Added `AggFuncAst` enum: `Sum`, `Avg`, `Count`, `Min`, `Max`
+- `SelectColumns::Named` now carries `Vec<SelectExpr>` instead of `Vec<String>`
+- Parser: SELECT column list now calls `parse_select_expr()` which recognises `SUM(col)`, `AVG(col)`, `COUNT(*)`, `MIN(col)`, `MAX(col)` in addition to plain column names
+- Executor: `agg_func_to_logical()` helper maps `AggFuncAst` → `query::logical::AggregateFunction`
+- Removed dead helper `select_to_string`
+
+### Tests
+
+Added 5 new parser unit tests: `search_statement`, `search_with_into`, `select_aggregate_columns`, `select_count_star`, `select_mixed_plain_and_agg`.
+
+---
+
 ## [0.1.16] - 2026-07-01
 
 ### Fixed — Executor Dispatch Bugs (All Remaining String Round-Trip Bugs)

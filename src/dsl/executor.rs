@@ -244,11 +244,6 @@ pub fn execute_statement(
         }
 
         Statement::Select(s) => {
-            // Fall back to string-reconstruction for GROUP BY / aggregate queries
-            // since SelectColumns::Named only carries strings, not aggregate exprs.
-            if !s.group_by.is_empty() {
-                return handlers::dataset::handle_select(db, &select_to_string(&s), line_no);
-            }
             let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
                 line: line_no,
                 source: e,
@@ -266,37 +261,79 @@ pub fn execute_statement(
                     predicate: dsl_expr_to_logical_expr(filter_expr),
                 };
             }
-            if let Some(having_expr) = &s.having {
-                plan = LogicalPlan::Filter {
-                    input: Box::new(plan),
-                    predicate: dsl_expr_to_logical_expr(having_expr),
-                };
-            }
-            if let Some(ord) = &s.order_by {
-                plan = LogicalPlan::Sort {
-                    input: Box::new(plan),
-                    column: ord.column.clone(),
-                    ascending: ord.ascending,
-                };
-            }
-            if let Some(n) = s.limit {
-                plan = LogicalPlan::Limit {
-                    input: Box::new(plan),
-                    n,
-                };
-            }
-            let cols = match s.columns {
-                SelectColumns::All => source_schema
-                    .fields
+
+            if !s.group_by.is_empty() {
+                // Build aggregate plan directly from typed AST
+                let group_exprs: Vec<LogicalExpr> = s
+                    .group_by
                     .iter()
-                    .map(|f| f.name.clone())
-                    .collect(),
-                SelectColumns::Named(cs) => cs,
-            };
-            plan = LogicalPlan::Project {
-                input: Box::new(plan),
-                columns: cols,
-            };
+                    .map(|c| LogicalExpr::Column(c.clone()))
+                    .collect();
+                let aggr_exprs: Vec<LogicalExpr> = match &s.columns {
+                    SelectColumns::Named(exprs) => exprs
+                        .iter()
+                        .filter_map(|e| match e {
+                            SelectExpr::Aggregate { func, column } => {
+                                Some(LogicalExpr::AggregateExpr {
+                                    func: agg_func_to_logical(func),
+                                    expr: Box::new(LogicalExpr::Column(column.clone())),
+                                })
+                            }
+                            SelectExpr::Column(_) => None,
+                        })
+                        .collect(),
+                    SelectColumns::All => vec![],
+                };
+                plan = LogicalPlan::Aggregate {
+                    input: Box::new(plan),
+                    group_expr: group_exprs,
+                    aggr_expr: aggr_exprs,
+                };
+                if let Some(having_expr) = &s.having {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate: dsl_expr_to_logical_expr(having_expr),
+                    };
+                }
+            } else {
+                if let Some(having_expr) = &s.having {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate: dsl_expr_to_logical_expr(having_expr),
+                    };
+                }
+                if let Some(ord) = &s.order_by {
+                    plan = LogicalPlan::Sort {
+                        input: Box::new(plan),
+                        column: ord.column.clone(),
+                        ascending: ord.ascending,
+                    };
+                }
+                if let Some(n) = s.limit {
+                    plan = LogicalPlan::Limit {
+                        input: Box::new(plan),
+                        n,
+                    };
+                }
+                let cols: Vec<String> = match s.columns {
+                    SelectColumns::All => source_schema
+                        .fields
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect(),
+                    SelectColumns::Named(exprs) => exprs
+                        .into_iter()
+                        .filter_map(|e| match e {
+                            SelectExpr::Column(name) => Some(name),
+                            SelectExpr::Aggregate { .. } => None,
+                        })
+                        .collect(),
+                };
+                plan = LogicalPlan::Project {
+                    input: Box::new(plan),
+                    columns: cols,
+                };
+            }
 
             let planner = Planner::new(db);
             let physical_plan =
@@ -402,7 +439,64 @@ pub fn execute_statement(
         ),
 
         // ── Search ──────────────────────────────────────────────────────────
-        Statement::Search(s) => handlers::search::handle_search(db, &search_to_string(&s), line_no),
+        Statement::Search(s) => {
+            let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let schema = source_ds.schema.clone();
+            let query_tensor = db
+                .get(&s.query_tensor)
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?
+                .clone();
+            let plan = LogicalPlan::VectorSearch {
+                input: Box::new(LogicalPlan::Scan {
+                    dataset_name: s.dataset.clone(),
+                    schema,
+                }),
+                column: s.column.clone(),
+                query: query_tensor,
+                k: s.top_k,
+            };
+            let planner = Planner::new(db);
+            let physical_plan =
+                planner
+                    .create_physical_plan(&plan)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+            let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let result_schema = physical_plan.schema();
+            let row_count = result_rows.len();
+            let target = s.target.unwrap_or_else(|| "search_results".to_string());
+            if let Ok(ds) = db.get_dataset_mut(&target) {
+                ds.rows = result_rows;
+                ds.metadata.update_stats(&ds.schema, &ds.rows);
+            } else {
+                db.create_dataset(target.clone(), result_schema.clone())
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                let ds = db.get_dataset_mut(&target).map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+                ds.rows = result_rows;
+                ds.metadata.update_stats(&ds.schema, &ds.rows);
+            }
+            Ok(DslOutput::Message(format!(
+                "Search completed. Found {} results in '{}'.",
+                row_count, target
+            )))
+        }
 
         // ── Session ─────────────────────────────────────────────────────────
         Statement::Reset => {
@@ -779,6 +873,18 @@ fn show_to_string(s: &ShowStmt) -> String {
     format!("SHOW {}", target)
 }
 
+/// Map `AggFuncAst` to the query engine's `AggregateFunction`.
+fn agg_func_to_logical(f: &AggFuncAst) -> crate::query::logical::AggregateFunction {
+    use crate::query::logical::AggregateFunction;
+    match f {
+        AggFuncAst::Sum => AggregateFunction::Sum,
+        AggFuncAst::Avg => AggregateFunction::Avg,
+        AggFuncAst::Count => AggregateFunction::Count,
+        AggFuncAst::Min => AggregateFunction::Min,
+        AggFuncAst::Max => AggregateFunction::Max,
+    }
+}
+
 /// Convert a DSL `ColType` to the engine's `ValueType` without a string round-trip.
 fn col_type_to_value_type(ct: &ColType) -> ValueType {
     match ct {
@@ -817,34 +923,6 @@ fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
     }
 }
 
-fn select_to_string(s: &SelectStmt) -> String {
-    let cols = match &s.columns {
-        SelectColumns::All => "*".to_string(),
-        SelectColumns::Named(cs) => cs.join(", "),
-    };
-    let mut q = format!("SELECT {} FROM {}", cols, s.dataset);
-    if let Some(f) = &s.filter {
-        q.push_str(&format!(" WHERE {}", expr_to_string(f)));
-    }
-    if !s.group_by.is_empty() {
-        q.push_str(&format!(" GROUP BY {}", s.group_by.join(", ")));
-    }
-    if let Some(h) = &s.having {
-        q.push_str(&format!(" HAVING {}", expr_to_string(h)));
-    }
-    if let Some(ord) = &s.order_by {
-        q.push_str(&format!(
-            " ORDER BY {} {}",
-            ord.column,
-            if ord.ascending { "ASC" } else { "DESC" }
-        ));
-    }
-    if let Some(n) = s.limit {
-        q.push_str(&format!(" LIMIT {}", n));
-    }
-    q
-}
-
 fn deliver_to_string(s: &DeliverStmt) -> String {
     match &s.path {
         Some(p) => format!("DELIVER {} TO \"{}\"", s.dataset, p),
@@ -881,17 +959,6 @@ fn list_to_string(s: &ListStmt) -> String {
         ListTarget::DatasetVersions(n) => format!("LIST DATASET VERSIONS {}", n),
         ListTarget::DatasetPackages => "LIST DATASET PACKAGES".into(),
     }
-}
-
-fn search_to_string(s: &SearchStmt) -> String {
-    let mut q = format!("SEARCH {}", s.query_tensor);
-    if let Some(ref ds) = s.dataset {
-        q.push_str(&format!(" IN {}", ds));
-    }
-    if let Some(k) = s.top_k {
-        q.push_str(&format!(" TOP {}", k));
-    }
-    q
 }
 
 /// Serialize an `Expr` back to DSL text.  Used when delegating to a handler
