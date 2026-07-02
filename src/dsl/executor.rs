@@ -165,13 +165,144 @@ pub fn execute_statement(
 
         // ── Dataset operations ──────────────────────────────────────────────
         Statement::CreateDataset(s) => {
-            if let Some(src) = s.from {
-                // DATASET name FROM source — query variant, still uses legacy handler
-                handlers::dataset::handle_dataset(
-                    db,
-                    &format!("DATASET {} FROM \"{}\"", s.name, src),
-                    line_no,
-                )
+            if let Some(clause) = s.from {
+                // DATASET name FROM source [clauses] — build LogicalPlan directly
+                let source_ds = db
+                    .get_dataset(&clause.source)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                let source_schema = source_ds.schema.clone();
+
+                let mut plan = LogicalPlan::Scan {
+                    dataset_name: clause.source.clone(),
+                    schema: source_schema,
+                };
+
+                if let Some(f) = clause.filter {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate: dataset_filter_to_logical(&f),
+                    };
+                }
+
+                if !clause.group_by.is_empty() {
+                    let group_exprs: Vec<LogicalExpr> = clause
+                        .group_by
+                        .iter()
+                        .map(|c| LogicalExpr::Column(c.clone()))
+                        .collect();
+                    let aggr_exprs: Vec<LogicalExpr> = clause
+                        .select
+                        .as_ref()
+                        .map(|exprs| {
+                            exprs
+                                .iter()
+                                .filter_map(|e| match e {
+                                    SelectExpr::Aggregate { func, column } => {
+                                        Some(LogicalExpr::AggregateExpr {
+                                            func: agg_func_to_logical(func),
+                                            expr: Box::new(LogicalExpr::Column(column.clone())),
+                                        })
+                                    }
+                                    SelectExpr::Column(_) => None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    plan = LogicalPlan::Aggregate {
+                        input: Box::new(plan),
+                        group_expr: group_exprs,
+                        aggr_expr: aggr_exprs,
+                    };
+                } else if let Some(exprs) = clause.select {
+                    let has_aggr = exprs
+                        .iter()
+                        .any(|e| matches!(e, SelectExpr::Aggregate { .. }));
+                    if has_aggr {
+                        let aggr_exprs: Vec<LogicalExpr> = exprs
+                            .into_iter()
+                            .filter_map(|e| match e {
+                                SelectExpr::Aggregate { func, column } => {
+                                    Some(LogicalExpr::AggregateExpr {
+                                        func: agg_func_to_logical(&func),
+                                        expr: Box::new(LogicalExpr::Column(column)),
+                                    })
+                                }
+                                SelectExpr::Column(_) => None,
+                            })
+                            .collect();
+                        plan = LogicalPlan::Aggregate {
+                            input: Box::new(plan),
+                            group_expr: vec![],
+                            aggr_expr: aggr_exprs,
+                        };
+                    } else {
+                        let cols: Vec<String> = exprs
+                            .into_iter()
+                            .filter_map(|e| match e {
+                                SelectExpr::Column(c) => Some(c),
+                                SelectExpr::Aggregate { .. } => None,
+                            })
+                            .collect();
+                        plan = LogicalPlan::Project {
+                            input: Box::new(plan),
+                            columns: cols,
+                        };
+                    }
+                }
+
+                if let Some(f) = clause.having {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate: dataset_filter_to_logical(&f),
+                    };
+                }
+
+                if let Some(ord) = clause.order_by {
+                    plan = LogicalPlan::Sort {
+                        input: Box::new(plan),
+                        column: ord.column,
+                        ascending: ord.ascending,
+                    };
+                }
+
+                if let Some(n) = clause.limit {
+                    plan = LogicalPlan::Limit {
+                        input: Box::new(plan),
+                        n,
+                    };
+                }
+
+                let planner = Planner::new(db);
+                let physical_plan =
+                    planner
+                        .create_physical_plan(&plan)
+                        .map_err(|e| DslError::Engine {
+                            line: line_no,
+                            source: e,
+                        })?;
+                let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+                let result_schema = physical_plan.schema();
+
+                db.create_dataset(s.name.clone(), result_schema)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                let target_ds = db.get_dataset_mut(&s.name).map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+                target_ds.rows = result_rows;
+                target_ds
+                    .metadata
+                    .update_stats(&target_ds.schema, &target_ds.rows);
+                Ok(DslOutput::None)
             } else {
                 let fields: Vec<Field> = s
                     .columns
@@ -445,13 +576,32 @@ pub fn execute_statement(
                 source: e,
             })?;
             let schema = source_ds.schema.clone();
-            let query_tensor = db
-                .get(&s.query_tensor)
-                .map_err(|e| DslError::Engine {
-                    line: line_no,
-                    source: e,
-                })?
-                .clone();
+            let query_tensor = match s.query {
+                SearchQuery::TensorRef(ref name) => db
+                    .get(name)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?
+                    .clone(),
+                SearchQuery::Inline(ref values) => {
+                    use crate::core::tensor::{TensorId, TensorMetadata};
+                    let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                    let n = vals_f32.len();
+                    let id = TensorId::new();
+                    let meta = TensorMetadata::new(id, None);
+                    crate::core::tensor::Tensor::new(
+                        id,
+                        crate::core::tensor::Shape::new(vec![n]),
+                        vals_f32,
+                        meta,
+                    )
+                    .map_err(|e| DslError::Parse {
+                        line: line_no,
+                        msg: e,
+                    })?
+                }
+            };
             let plan = LogicalPlan::VectorSearch {
                 input: Box::new(LogicalPlan::Scan {
                     dataset_name: s.dataset.clone(),
@@ -895,6 +1045,28 @@ fn col_type_to_value_type(ct: &ColType) -> ValueType {
         ColType::Vector(n) => ValueType::Vector(*n),
         ColType::Matrix(r, c) => ValueType::Matrix(*r, *c),
         ColType::Tensor(_) => ValueType::Float,
+    }
+}
+
+/// Convert a typed `DatasetFilter` to a `query::logical::Expr` predicate.
+fn dataset_filter_to_logical(f: &DatasetFilter) -> LogicalExpr {
+    let op = match f.op {
+        CmpOp::Eq => "=",
+        CmpOp::NotEq => "!=",
+        CmpOp::Gt => ">",
+        CmpOp::GtEq => ">=",
+        CmpOp::Lt => "<",
+        CmpOp::LtEq => "<=",
+    };
+    let val = match &f.value {
+        FilterValue::Int(n) => Value::Int(*n),
+        FilterValue::Float(f) => Value::Float(*f as f32),
+        FilterValue::Str(s) => Value::String(s.clone()),
+    };
+    LogicalExpr::BinaryExpr {
+        left: Box::new(LogicalExpr::Column(f.column.clone())),
+        op: op.to_string(),
+        right: Box::new(LogicalExpr::Literal(val)),
     }
 }
 

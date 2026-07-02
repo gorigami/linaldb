@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.18] - 2026-07-02
+
+### Added / Changed — DATASET FROM and SEARCH inline vector fully typed
+
+**DATASET target FROM source — direct typed dispatch (no more string round-trip):**
+
+`DATASET target FROM source [FILTER …] [SELECT …] [GROUP BY …] [HAVING …] [ORDER BY … [DESC]] [LIMIT n]` is now fully parsed by the typed parser and dispatched directly from `executor.rs` — no string reconstruction, no re-parse through `handle_dataset()`.
+
+Changes:
+- `CreateDatasetStmt.from` changed from `Option<String>` to `Option<DatasetFromClause>`
+- New AST types in `ast.rs`: `DatasetFromClause`, `DatasetFilter`, `CmpOp` (`Eq`, `NotEq`, `Gt`, `GtEq`, `Lt`, `LtEq`), `FilterValue` (`Int`, `Float`, `Str`)
+- New lexer tokens: `Gt`, `Lt`, `GtEq`, `LtEq`, `NotEq` — comparisons now lexed as dedicated tokens
+- Parser: `parse_create_dataset()` extended to parse all optional clauses (`FILTER`/`WHERE`, `SELECT`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`) using new helpers `parse_dataset_filter()`, `parse_cmp_op()`, `parse_filter_value()`
+- Executor: `CreateDataset` FROM arm now builds the `LogicalPlan` (`Scan` → `Filter` → `Aggregate`/`Project` → `Having` → `Sort` → `Limit`) directly, then executes and persists the result dataset
+- `build_dataset_query_plan` in `handlers/dataset.rs` is preserved — still used by `explain.rs`
+
+**SEARCH inline vector literal support:**
+
+`SEARCH <dataset> ON <column> QUERY [v1, v2, …] LIMIT <k> [INTO <target>]` now accepted by the typed parser alongside the existing named-tensor form (`QUERY tensor_name`).
+
+Changes:
+- New `SearchQuery` enum in `ast.rs`: `TensorRef(String)` | `Inline(Vec<f64>)`
+- `SearchStmt.query_tensor: String` renamed to `query: SearchQuery`
+- Parser: `parse_search()` detects `[` after `QUERY` and calls `parse_f64_list()` for inline vectors
+- Executor: `Search` arm materialises the inline vector as an anonymous `Tensor` before building `LogicalPlan::VectorSearch`
+- Legacy `SEARCH target FROM source QUERY vector ON column K=k` and `SEARCH source WHERE col ~= vector LIMIT k` syntaxes unchanged — still handled via the legacy fallback chain
+
+### Tests
+
+Added 6 new parser unit tests: `search_inline_vector`, `search_inline_vector_into`, `dataset_from_source`, `dataset_from_with_filter`, `dataset_from_full_clauses`.
+
+---
+
 ## [0.1.17] - 2026-07-02
 
 ### Added — Typed SEARCH and SELECT GROUP BY in the Executor
@@ -22,7 +55,7 @@ New syntax parsed by the typed parser:
 SEARCH <dataset> ON <column> QUERY <tensor_name> LIMIT <k> [INTO <target>]
 ```
 
-- Updated `SearchStmt` fields: `dataset`, `column`, `query_tensor`, `top_k`, `target`
+- Updated `SearchStmt` fields: `dataset`, `column`, `query_tensor` (renamed to `query: SearchQuery` in v0.1.18), `top_k`, `target`
 - Parser: `parse_search()` rewritten; `parse_select_expr()` and `parse_agg_call()` added
 - Executor: builds `LogicalPlan::VectorSearch` directly from typed AST; result stored in `target` dataset (default: `"search_results"`)
 - Removed dead helper `search_to_string`
