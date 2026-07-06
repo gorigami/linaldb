@@ -1,10 +1,7 @@
-// tests/hardening_test.vdb
-// This script contains multi-line commands to verify the hardening work.
+// hardening_test.lnl
+// Multiline command test for CLI 'run' mode.
 
-CREATE DATABASE hardening_db (
-    "purpose" = "testing_multiline",
-    "version" = "1.1"
-)
+CREATE DATABASE hardening_db
 
 USE hardening_db
 
@@ -15,14 +12,14 @@ DATASET test_ds COLUMNS (
 )
 
 INSERT INTO test_ds VALUES (
-    1, 
-    10.5, 
+    1,
+    10.5,
     "first_row"
 )
 
 INSERT INTO test_ds VALUES (
-    2, 
-    20.5, 
+    2,
+    20.5,
     "second_row"
 )
 

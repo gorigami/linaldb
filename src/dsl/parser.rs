@@ -257,6 +257,10 @@ impl Parser {
             Some(Token::Search) => self.parse_search(),
             Some(Token::Reset) => {
                 self.advance();
+                // Optional SESSION keyword (not a lexer keyword, arrives as Ident)
+                if self.at_ident("SESSION") {
+                    self.advance();
+                }
                 Ok(Statement::Reset)
             }
             _ => Err(self.unexpected("a statement keyword")),
@@ -810,16 +814,52 @@ impl Parser {
         Ok(Statement::Deliver(DeliverStmt { dataset, path }))
     }
 
-    // EXPLAIN <name>
+    // EXPLAIN [PLAN] DATASET <name>
+    // EXPLAIN [PLAN] SEARCH <ds> ON <col> QUERY <q> LIMIT <k>
+    // EXPLAIN [PLAN] SELECT …
+    // EXPLAIN <bare_ident>   — treated as a simple dataset scan
     fn parse_explain(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Explain)?;
-        let target = self.eat_ident()?;
+        // Optional PLAN keyword (not a lexer keyword, so arrives as Ident)
+        if self.at_ident("PLAN") {
+            self.advance();
+        }
+        let target = match self.peek().cloned() {
+            Some(Token::Dataset) => {
+                self.advance();
+                ExplainTarget::Dataset(self.eat_ident()?)
+            }
+            Some(Token::Search) => {
+                let stmt = self.parse_search()?;
+                let inner = if let Statement::Search(s) = stmt {
+                    s
+                } else {
+                    unreachable!()
+                };
+                ExplainTarget::Search(inner)
+            }
+            Some(Token::Select) => {
+                let stmt = self.parse_select()?;
+                let inner = if let Statement::Select(s) = stmt {
+                    s
+                } else {
+                    unreachable!()
+                };
+                ExplainTarget::Select(inner)
+            }
+            Some(Token::Ident(_)) => ExplainTarget::Dataset(self.eat_ident()?),
+            _ => return Err(self.error("EXPLAIN expects DATASET, SEARCH, SELECT, or a name")),
+        };
         Ok(Statement::Explain(ExplainStmt { target }))
     }
 
-    // AUDIT <name>
+    // AUDIT DATASET <name>  or  AUDIT <name>
     fn parse_audit(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Audit)?;
+        // Consume optional DATASET keyword (it is a keyword token, not an ident)
+        if self.at(&Token::Dataset) {
+            self.advance();
+        }
         let target = self.eat_ident()?;
         Ok(Statement::Audit(AuditStmt { target }))
     }
@@ -899,16 +939,22 @@ impl Parser {
         Ok(Statement::List(ListStmt { target }))
     }
 
-    // IMPORT DATASET FROM <path>
+    // IMPORT DATASET FROM <path> [AS <name>]
     fn parse_import(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Import)?;
         self.eat(&Token::Dataset)?;
         self.eat(&Token::From)?;
         let path = self.eat_str()?;
+        let name = if self.at(&Token::As) {
+            self.advance();
+            Some(self.eat_ident()?)
+        } else {
+            None
+        };
         Ok(Statement::Import(ImportStmt {
             ephemeral: false,
             path,
-            name: None,
+            name,
         }))
     }
 
@@ -922,7 +968,7 @@ impl Parser {
     }
 
     // USE <database_name>
-    // USE DATASET FROM <path>   (ephemeral import)
+    // USE DATASET FROM <path> [AS <name>]   (ephemeral import)
     fn parse_use(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Use)?;
         match self.peek() {
@@ -930,10 +976,16 @@ impl Parser {
                 self.advance();
                 self.eat(&Token::From)?;
                 let path = self.eat_str()?;
+                let name = if self.at(&Token::As) {
+                    self.advance();
+                    Some(self.eat_ident()?)
+                } else {
+                    None
+                };
                 Ok(Statement::Import(ImportStmt {
                     ephemeral: true,
                     path,
-                    name: None,
+                    name,
                 }))
             }
             Some(Token::Ident(_)) => Ok(Statement::UseDatabase(UseDatabaseStmt {
@@ -943,15 +995,31 @@ impl Parser {
         }
     }
 
-    // CREATE DATABASE <name>
+    // CREATE DATABASE [IF NOT EXISTS] <name>
     // CREATE [VECTOR] INDEX <idx_name> ON <dataset>(<column>)
     fn parse_create(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Create)?;
-        match self.peek() {
+        match self.peek().cloned() {
             Some(Token::Database) => {
                 self.advance();
+                // Optional IF NOT EXISTS guard
+                let if_not_exists = if self.at_ident("IF") {
+                    self.advance(); // IF
+                    self.eat(&Token::Not)?; // NOT
+                    if !self.at_ident("EXISTS") {
+                        return Err(self
+                            .error("expected EXISTS after NOT in CREATE DATABASE IF NOT EXISTS"));
+                    }
+                    self.advance(); // EXISTS
+                    true
+                } else {
+                    false
+                };
                 let name = self.eat_ident()?;
-                Ok(Statement::CreateDatabase(CreateDatabaseStmt { name }))
+                Ok(Statement::CreateDatabase(CreateDatabaseStmt {
+                    name,
+                    if_not_exists,
+                }))
             }
             Some(Token::Index) => {
                 self.advance();
@@ -962,14 +1030,15 @@ impl Parser {
                     kind,
                 }))
             }
-            Some(Token::Ident(_)) if self.at_ident("VECTOR") => {
+            // Token::Vector is a keyword, not an ident — match it directly
+            Some(Token::Vector) => {
                 self.advance(); // VECTOR
                 self.eat(&Token::Index)?;
                 let (dataset, column, _) = self.parse_index_target(IndexKindAst::Default)?;
                 Ok(Statement::CreateIndex(CreateIndexStmt {
                     dataset,
                     column,
-                    kind: IndexKindAst::Hash, // vector index maps to hash-style
+                    kind: IndexKindAst::Vector,
                 }))
             }
             _ => Err(self.unexpected("DATABASE or INDEX after CREATE")),
@@ -1001,12 +1070,26 @@ impl Parser {
         Ok((dataset, column, default_kind))
     }
 
-    // DROP DATABASE <name>
+    // DROP DATABASE [IF EXISTS] <name>
     fn parse_drop(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Drop)?;
         self.eat(&Token::Database)?;
+        // Optional IF EXISTS guard (both IF and EXISTS are Ident tokens, not keywords)
+        let if_exists = if self.at_ident("IF") {
+            self.advance(); // IF
+            if !self.at_ident("EXISTS") {
+                return Err(self.error("expected EXISTS after IF in DROP DATABASE IF EXISTS"));
+            }
+            self.advance(); // EXISTS
+            true
+        } else {
+            false
+        };
         let name = self.eat_ident()?;
-        Ok(Statement::DropDatabase(DropDatabaseStmt { name }))
+        Ok(Statement::DropDatabase(DropDatabaseStmt {
+            name,
+            if_exists,
+        }))
     }
 
     // SET DATASET <name> <key> = <value>
@@ -1911,6 +1994,17 @@ mod tests {
             panic!()
         };
         assert_eq!(s.name, "mydb");
+        assert!(!s.if_not_exists);
+    }
+
+    #[test]
+    fn create_database_if_not_exists() {
+        let stmt = parse_ok("CREATE DATABASE IF NOT EXISTS mydb");
+        let Statement::CreateDatabase(s) = stmt else {
+            panic!()
+        };
+        assert_eq!(s.name, "mydb");
+        assert!(s.if_not_exists);
     }
 
     #[test]
@@ -1920,6 +2014,52 @@ mod tests {
             panic!()
         };
         assert_eq!(s.name, "mydb");
+        assert!(!s.if_exists);
+    }
+
+    #[test]
+    fn drop_database_if_exists() {
+        let stmt = parse_ok("DROP DATABASE IF EXISTS mydb");
+        let Statement::DropDatabase(s) = stmt else {
+            panic!()
+        };
+        assert_eq!(s.name, "mydb");
+        assert!(s.if_exists);
+    }
+
+    #[test]
+    fn reset_session() {
+        let stmt = parse_ok("RESET SESSION");
+        assert!(matches!(stmt, Statement::Reset));
+    }
+
+    #[test]
+    fn create_vector_index() {
+        let stmt = parse_ok("CREATE VECTOR INDEX v_idx ON vecs(col)");
+        let Statement::CreateIndex(s) = stmt else {
+            panic!()
+        };
+        assert_eq!(s.dataset, "vecs");
+        assert_eq!(s.column, "col");
+        assert!(matches!(s.kind, IndexKindAst::Vector));
+    }
+
+    #[test]
+    fn explain_dataset() {
+        let stmt = parse_ok("EXPLAIN DATASET users");
+        let Statement::Explain(s) = stmt else {
+            panic!()
+        };
+        assert!(matches!(s.target, ExplainTarget::Dataset(ref n) if n == "users"));
+    }
+
+    #[test]
+    fn explain_bare_ident() {
+        let stmt = parse_ok("EXPLAIN foo");
+        let Statement::Explain(s) = stmt else {
+            panic!()
+        };
+        assert!(matches!(s.target, ExplainTarget::Dataset(ref n) if n == "foo"));
     }
 
     // ── Misc ─────────────────────────────────────────────────────────────────

@@ -107,6 +107,12 @@ pub fn execute_statement(
 
         // ── Database management ─────────────────────────────────────────────
         Statement::CreateDatabase(s) => {
+            if s.if_not_exists && db.list_databases().contains(&s.name) {
+                return Ok(DslOutput::Message(format!(
+                    "Database '{}' already exists (skipped)",
+                    s.name
+                )));
+            }
             db.create_database(s.name.clone())
                 .map_err(|e| DslError::Engine {
                     line: line_no,
@@ -116,6 +122,12 @@ pub fn execute_statement(
         }
 
         Statement::DropDatabase(s) => {
+            if s.if_exists && !db.list_databases().contains(&s.name) {
+                return Ok(DslOutput::Message(format!(
+                    "Database '{}' not found (skipped)",
+                    s.name
+                )));
+            }
             db.drop_database(&s.name).map_err(|e| DslError::Engine {
                 line: line_no,
                 source: e,
@@ -137,9 +149,7 @@ pub fn execute_statement(
         // ── Introspection ───────────────────────────────────────────────────
         Statement::Show(s) => execute_show(db, s.target, line_no),
 
-        Statement::Explain(s) => {
-            handlers::explain::handle_explain(db, &format!("EXPLAIN {}", s.target), line_no)
-        }
+        Statement::Explain(s) => execute_explain(db, s.target, line_no),
 
         Statement::Audit(s) => {
             let issues = db
@@ -543,6 +553,17 @@ pub fn execute_statement(
                     })?;
                 Ok(DslOutput::Message(format!(
                     "Created index on {}({})",
+                    s.dataset, s.column
+                )))
+            }
+            IndexKindAst::Vector => {
+                db.create_vector_index(&s.dataset, &s.column)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                Ok(DslOutput::Message(format!(
+                    "Created VECTOR index on {}({})",
                     s.dataset, s.column
                 )))
             }
@@ -1292,6 +1313,179 @@ fn execute_show(
             })
         }
     }
+}
+
+// ─── Explain — typed dispatch ──────────────────────────────────────────────────
+
+fn execute_explain(
+    db: &mut TensorDb,
+    target: ExplainTarget,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let logical_plan = match target {
+        ExplainTarget::Dataset(name) => {
+            let source_ds = db.get_dataset(&name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let schema = source_ds.schema.clone();
+            LogicalPlan::Scan {
+                dataset_name: name,
+                schema,
+            }
+        }
+
+        ExplainTarget::Search(s) => {
+            let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let schema = source_ds.schema.clone();
+            let query_tensor = match s.query {
+                SearchQuery::TensorRef(ref name) => db
+                    .get(name)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?
+                    .clone(),
+                SearchQuery::Inline(ref values) => {
+                    use crate::core::tensor::{TensorId, TensorMetadata};
+                    let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                    let n = vals_f32.len();
+                    let id = TensorId::new();
+                    let meta = TensorMetadata::new(id, None);
+                    crate::core::tensor::Tensor::new(
+                        id,
+                        crate::core::tensor::Shape::new(vec![n]),
+                        vals_f32,
+                        meta,
+                    )
+                    .map_err(|e| DslError::Parse {
+                        line: line_no,
+                        msg: e,
+                    })?
+                }
+            };
+            LogicalPlan::VectorSearch {
+                input: Box::new(LogicalPlan::Scan {
+                    dataset_name: s.dataset.clone(),
+                    schema,
+                }),
+                column: s.column.clone(),
+                query: query_tensor,
+                k: s.top_k,
+            }
+        }
+
+        ExplainTarget::Select(s) => {
+            let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let source_schema = source_ds.schema.clone();
+
+            let mut plan = LogicalPlan::Scan {
+                dataset_name: s.dataset.clone(),
+                schema: source_schema.clone(),
+            };
+
+            if let Some(filter_expr) = &s.filter {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: dsl_expr_to_logical_expr(filter_expr),
+                };
+            }
+
+            if !s.group_by.is_empty() {
+                let group_exprs: Vec<LogicalExpr> = s
+                    .group_by
+                    .iter()
+                    .map(|c| LogicalExpr::Column(c.clone()))
+                    .collect();
+                let aggr_exprs: Vec<LogicalExpr> = match &s.columns {
+                    SelectColumns::Named(exprs) => exprs
+                        .iter()
+                        .filter_map(|e| match e {
+                            SelectExpr::Aggregate { func, column } => {
+                                Some(LogicalExpr::AggregateExpr {
+                                    func: agg_func_to_logical(func),
+                                    expr: Box::new(LogicalExpr::Column(column.clone())),
+                                })
+                            }
+                            SelectExpr::Column(_) => None,
+                        })
+                        .collect(),
+                    SelectColumns::All => vec![],
+                };
+                plan = LogicalPlan::Aggregate {
+                    input: Box::new(plan),
+                    group_expr: group_exprs,
+                    aggr_expr: aggr_exprs,
+                };
+                if let Some(having_expr) = &s.having {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate: dsl_expr_to_logical_expr(having_expr),
+                    };
+                }
+            } else {
+                if let Some(having_expr) = &s.having {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate: dsl_expr_to_logical_expr(having_expr),
+                    };
+                }
+                if let Some(ord) = &s.order_by {
+                    plan = LogicalPlan::Sort {
+                        input: Box::new(plan),
+                        column: ord.column.clone(),
+                        ascending: ord.ascending,
+                    };
+                }
+                if let Some(n) = s.limit {
+                    plan = LogicalPlan::Limit {
+                        input: Box::new(plan),
+                        n,
+                    };
+                }
+                let cols: Vec<String> = match s.columns {
+                    SelectColumns::All => source_schema
+                        .fields
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect(),
+                    SelectColumns::Named(exprs) => exprs
+                        .into_iter()
+                        .filter_map(|e| match e {
+                            SelectExpr::Column(name) => Some(name),
+                            SelectExpr::Aggregate { .. } => None,
+                        })
+                        .collect(),
+                };
+                plan = LogicalPlan::Project {
+                    input: Box::new(plan),
+                    columns: cols,
+                };
+            }
+
+            plan
+        }
+    };
+
+    let planner = Planner::new(db);
+    let physical_plan =
+        planner
+            .create_physical_plan(&logical_plan)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+    let output = format!(
+        "--- Logical Plan ---\n{:#?}\n\n--- Physical Plan ---\n{:#?}",
+        logical_plan, physical_plan
+    );
+    Ok(DslOutput::Message(output))
 }
 
 fn format_lineage_tree(node: &crate::engine::LineageNode, indent: usize) -> String {
