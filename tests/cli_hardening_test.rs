@@ -52,7 +52,7 @@ fn test_cli_run_multiline() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Check for success markers
-    assert!(stdout.contains("Database 'hardening_db' created"));
+    assert!(stdout.contains("Created database: hardening_db"));
     assert!(stdout.contains("Created dataset: test_ds"));
     assert!(stdout.contains("Query Result (rows: 2, columns: 3)"));
 

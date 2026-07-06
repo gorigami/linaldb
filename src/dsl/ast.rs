@@ -301,9 +301,20 @@ pub enum ShowTarget {
     Named(String),
 }
 
+/// What `EXPLAIN` should show a query plan for.
+#[derive(Debug, Clone)]
+pub enum ExplainTarget {
+    /// `EXPLAIN [PLAN] DATASET <name>` — simple dataset scan
+    Dataset(String),
+    /// `EXPLAIN [PLAN] SEARCH <ds> ON <col> QUERY <q> LIMIT <k>`
+    Search(SearchStmt),
+    /// `EXPLAIN [PLAN] SELECT …`
+    Select(SelectStmt),
+}
+
 #[derive(Debug, Clone)]
 pub struct ExplainStmt {
-    pub target: String,
+    pub target: ExplainTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -362,11 +373,13 @@ pub struct ExportStmt {
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseStmt {
     pub name: String,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct DropDatabaseStmt {
     pub name: String,
+    pub if_exists: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +399,7 @@ pub enum IndexKindAst {
     Default,
     BTree,
     Hash,
+    Vector,
 }
 
 #[derive(Debug, Clone)]

@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.20] - 2026-07-06
+
+### Changed — Explain typed, five dead handlers deleted, parser hardened
+
+**Explain — final round-trip eliminated:**
+- Added `ExplainTarget` enum (`Dataset(String)`, `Search(SearchStmt)`, `Select(SelectStmt)`) to `ast.rs`
+- Rewrote `parse_explain()` to branch on `DATASET`/`SEARCH`/`SELECT` keywords (or a bare ident treated as a dataset scan); optional `PLAN` keyword consumed
+- Added `execute_explain(db, ExplainTarget, line_no)` private function in `executor.rs` that builds `LogicalPlan` directly from the typed AST and runs it through the planner — zero string reconstruction
+- Legacy `EXPLAIN DATASET name FROM source FILTER …` syntax continues to fall through to `handle_explain` for backward compat
+
+**Parser hardening:**
+- `CREATE DATABASE [IF NOT EXISTS] name` — `if_not_exists: bool` added to `CreateDatabaseStmt`; executor skips silently when flag is set and DB already exists
+- `DROP DATABASE [IF EXISTS] name` — `if_exists: bool` added to `DropDatabaseStmt`; executor skips silently when flag is set and DB is absent
+- `CREATE VECTOR INDEX` — fixed broken match arm (`Token::Ident("VECTOR")` → `Token::Vector`); `IndexKindAst::Vector` added; executor dispatches to `db.create_vector_index()`
+- `RESET SESSION` — parser now consumes the optional `SESSION` ident so this form goes through the typed path
+- `AUDIT DATASET name` — parser consumes the optional `Token::Dataset` keyword so the full form goes through the typed path
+- `USE DATASET FROM "path" AS name` and `IMPORT DATASET FROM "path" AS name` — both parsers now handle the optional `AS <ident>` clause
+
+**Dead handler files deleted (5):**
+- `src/dsl/handlers/audit.rs` — superseded by executor `Audit` arm
+- `src/dsl/handlers/session.rs` — superseded by typed RESET parser
+- `src/dsl/handlers/introspection.rs` — superseded by `execute_show()` in executor
+- `src/dsl/handlers/index.rs` — superseded by typed CREATE VECTOR INDEX parser
+- `src/dsl/handlers/instance.rs` — superseded by typed CREATE/DROP DATABASE and USE parsers
+
+**Fallback chain pruned in `mod.rs`:** removed branches for SHOW, DELIVER, AUDIT, CREATE, USE, DROP, RESET — all now handled exclusively by the typed executor path.
+
+**`execute_line_shared` updated:** AUDIT logic inlined (no more `handle_audit` call), SHOW error stub removed, DELIVER inlined.
+
+---
+
 ## [0.1.19] - 2026-07-02
 
 ### Changed — All remaining AST → string → re-parse round-trips eliminated
