@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.23] - 2026-07-07
+
+### Changed — `handlers/` directory eliminated; zero fallback campaign complete
+
+**`src/dsl/handlers/` fully deleted:**
+- Removed `handlers/dataset.rs`, `handlers/search.rs`, `handlers/metadata.rs`, `handlers/persistence.rs`, `handlers/mod.rs`
+- All live logic relocated; all dead string-based wrappers discarded
+
+**`.add_column()` method-call syntax ported to typed parser:**
+- Added single-quoted string support to `Token::Str` (second `#[regex]` on the Logos lexer)
+- Added `peek_at(offset)` lookahead helper to `Parser`
+- Added `parse_method_call` in `parse_statement`: `dataset.add_column("col", tensor)` → `Statement::Attach`
+- Removed `.add_column(` fallback branch from `execute_line_with_context` — typed parser now handles 100% of inputs
+
+**New `src/dsl/persistence.rs`:**
+- Moved core persistence functions (`save_dataset_core`, `load_dataset_core`, `export_csv_core`, `import_csv_typed`, et al.) from `handlers/persistence.rs` into a top-level `dsl/persistence` module
+- Dead string-based wrappers (`handle_save`, `handle_load`, `handle_import`, `handle_export`, etc.) not ported
+- `get_connector_registry` made `pub` to support the scientific connectors test suite
+
+**`executor.rs` updated:**
+- `Statement::SetMetadata` arm inlined (was delegating to `handlers::metadata::set_metadata_typed`)
+- All persistence calls changed from `handlers::persistence::*` to `crate::dsl::persistence::*`
+- `use crate::dsl::handlers` removed; `use crate::dsl::persistence` and `use crate::core::storage::ParquetStorage` added
+
+**`mod.rs` updated:**
+- `pub mod handlers` replaced with `pub mod persistence`
+- `execute_line_shared` `LIST` arm updated to call `persistence::list_typed` directly
+
+---
+
 ## [0.1.22] - 2026-07-07
 
 ### Changed — final legacy handler cleanup; explain.rs deleted

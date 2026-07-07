@@ -25,7 +25,8 @@ pub fn execute_statement(
     line_no: usize,
     ctx: Option<&mut ExecutionContext>,
 ) -> Result<DslOutput, DslError> {
-    use crate::dsl::handlers;
+    use crate::core::storage::ParquetStorage;
+    use crate::dsl::persistence;
 
     let mut local_ctx;
     let ctx: &mut ExecutionContext = match ctx {
@@ -580,28 +581,24 @@ pub fn execute_statement(
 
         // ── Persistence ─────────────────────────────────────────────────────
         Statement::Save(s) => {
-            handlers::persistence::save_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
+            persistence::save_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
         }
 
         Statement::Load(s) => {
-            handlers::persistence::load_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
+            persistence::load_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
         }
 
-        Statement::List(s) => handlers::persistence::list_typed(db, &s.target, line_no),
+        Statement::List(s) => persistence::list_typed(db, &s.target, line_no),
 
-        Statement::Import(s) => handlers::persistence::import_typed(
-            db,
-            s.ephemeral,
-            &s.path,
-            s.name.as_deref(),
-            line_no,
-        ),
+        Statement::Import(s) => {
+            persistence::import_typed(db, s.ephemeral, &s.path, s.name.as_deref(), line_no)
+        }
 
         Statement::ImportCsv(s) => {
-            handlers::persistence::import_csv_typed(db, &s.path, s.name.as_deref(), line_no)
+            persistence::import_csv_typed(db, &s.path, s.name.as_deref(), line_no)
         }
 
-        Statement::Export(s) => handlers::persistence::export_typed(db, &s.name, &s.path, line_no),
+        Statement::Export(s) => persistence::export_typed(db, &s.name, &s.path, line_no),
 
         // ── Index ───────────────────────────────────────────────────────────
         Statement::CreateIndex(s) => match s.kind {
@@ -631,7 +628,51 @@ pub fn execute_statement(
 
         // ── Metadata ────────────────────────────────────────────────────────
         Statement::SetMetadata(s) => {
-            handlers::metadata::set_metadata_typed(db, &s.dataset, &s.key, &s.value, line_no)
+            let key = s.key.to_lowercase();
+            let value = s.value.trim_matches('"').to_string();
+
+            db.set_dataset_metadata(&s.dataset, key.clone(), value.clone())
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+
+            let path = format!(
+                "{}/{}",
+                db.config.storage.data_dir.to_string_lossy(),
+                db.active_instance().name
+            );
+            let storage = ParquetStorage::new(&path);
+
+            if storage.metadata_exists(&s.dataset) {
+                let mut metadata =
+                    storage
+                        .load_dataset_metadata(&s.dataset)
+                        .map_err(|e| DslError::Parse {
+                            line: line_no,
+                            msg: format!("Failed to load metadata: {}", e),
+                        })?;
+
+                match key.as_str() {
+                    "author" => metadata.author = Some(value.clone()),
+                    "description" => metadata.description = Some(value.clone()),
+                    "tag" => metadata.add_tag(value.clone()),
+                    _ => {}
+                }
+
+                metadata.increment_version();
+                storage
+                    .save_dataset_metadata(&metadata)
+                    .map_err(|e| DslError::Parse {
+                        line: line_no,
+                        msg: format!("Failed to save metadata: {}", e),
+                    })?;
+            }
+
+            Ok(DslOutput::Message(format!(
+                "Updated metadata for dataset '{}': {} = {}",
+                s.dataset, key, value
+            )))
         }
 
         // ── Search ──────────────────────────────────────────────────────────

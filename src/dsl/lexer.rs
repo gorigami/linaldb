@@ -221,8 +221,12 @@ pub enum Token {
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
     Int(i64),
 
-    /// Double-quoted string literal: `"hello"`. Escaped quotes are not supported.
+    /// Double- or single-quoted string literal: `"hello"` / `'hello'`.
     #[regex(r#""[^"]*""#, |lex| {
+        let s = lex.slice();
+        Some(s[1..s.len() - 1].to_string())
+    })]
+    #[regex(r"'[^']*'", |lex| {
         let s = lex.slice();
         Some(s[1..s.len() - 1].to_string())
     })]

@@ -1,4 +1,4 @@
-use linal::dsl::handlers::persistence;
+use linal::dsl::persistence;
 use std::path::Path;
 
 #[tokio::test]

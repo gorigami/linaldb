@@ -51,6 +51,10 @@ impl Parser {
         self.tokens.get(self.pos).map(|(t, _)| t)
     }
 
+    fn peek_at(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + offset).map(|(t, _)| t)
+    }
+
     fn current_span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -262,6 +266,10 @@ impl Parser {
                     self.advance();
                 }
                 Ok(Statement::Reset)
+            }
+            // dataset.add_column("col", tensor) — method-call syntax
+            Some(Token::Ident(_)) if self.peek_at(1) == Some(&Token::Dot) => {
+                self.parse_method_call()
             }
             _ => Err(self.unexpected("a statement keyword")),
         }
@@ -793,6 +801,32 @@ impl Parser {
                 }),
             }))
         }
+    }
+
+    // dataset.add_column("col", tensor) — method-call syntax for tensor-first datasets.
+    // Parses into Statement::Attach so the executor arm is shared.
+    fn parse_method_call(&mut self) -> Result<Statement, ParseError> {
+        let dataset = self.eat_ident()?;
+        self.eat(&Token::Dot)?;
+        let method = self.eat_ident()?;
+        if method != "add_column" {
+            return Err(self.error(&format!("Unknown method '{}'", method)));
+        }
+        self.eat(&Token::LParen)?;
+        // Column name: double/single-quoted string or bare ident
+        let column = if self.at(&Token::Str("".into())) {
+            self.eat_str()?
+        } else {
+            self.eat_ident()?
+        };
+        self.eat(&Token::Comma)?;
+        let tensor = self.eat_ident()?;
+        self.eat(&Token::RParen)?;
+        Ok(Statement::Attach(AttachStmt {
+            tensor,
+            dataset,
+            column,
+        }))
     }
 
     // INSERT INTO <dataset> VALUES (v1, v2, ...)
