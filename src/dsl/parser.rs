@@ -479,6 +479,84 @@ impl Parser {
         Ok(Statement::Show(ShowStmt { target }))
     }
 
+    // Shared helper: parse everything after `FROM <source>` for both DATASET and EXPLAIN.
+    fn parse_dataset_from_clause(
+        &mut self,
+        source: String,
+    ) -> Result<DatasetFromClause, ParseError> {
+        let mut filter = None;
+        let mut select = None;
+        let mut group_by = vec![];
+        let mut having = None;
+        let mut order_by = None;
+        let mut limit = None;
+
+        loop {
+            match self.peek() {
+                Some(Token::Filter) | Some(Token::Where) => {
+                    self.advance();
+                    filter = Some(self.parse_dataset_filter()?);
+                }
+                Some(Token::Select) => {
+                    self.advance();
+                    let mut exprs = vec![];
+                    loop {
+                        exprs.push(self.parse_select_expr()?);
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    select = Some(exprs);
+                }
+                Some(Token::Group) => {
+                    self.advance();
+                    self.eat(&Token::By)?;
+                    let mut cols = vec![];
+                    loop {
+                        cols.push(self.eat_ident()?);
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    group_by = cols;
+                }
+                Some(Token::Having) => {
+                    self.advance();
+                    having = Some(self.parse_dataset_filter()?);
+                }
+                Some(Token::Order) => {
+                    self.advance();
+                    self.eat(&Token::By)?;
+                    let column = self.eat_ident()?;
+                    let ascending = !self.at_ident("DESC");
+                    if !ascending {
+                        self.advance();
+                    }
+                    order_by = Some(OrderByClause { column, ascending });
+                }
+                Some(Token::Limit) => {
+                    self.advance();
+                    limit = Some(self.eat_usize()?);
+                }
+                _ => break,
+            }
+        }
+
+        Ok(DatasetFromClause {
+            source,
+            filter,
+            select,
+            group_by,
+            having,
+            order_by,
+            limit,
+        })
+    }
+
     // DATASET <name> COLUMNS (...) | DATASET <name> FROM <src>
     fn parse_create_dataset(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Dataset)?;
@@ -497,81 +575,11 @@ impl Parser {
             Some(Token::From) => {
                 self.advance();
                 let source = self.eat_ident()?;
-
-                let mut filter = None;
-                let mut select = None;
-                let mut group_by = vec![];
-                let mut having = None;
-                let mut order_by = None;
-                let mut limit = None;
-
-                loop {
-                    match self.peek() {
-                        Some(Token::Filter) | Some(Token::Where) => {
-                            self.advance();
-                            filter = Some(self.parse_dataset_filter()?);
-                        }
-                        Some(Token::Select) => {
-                            self.advance();
-                            let mut exprs = vec![];
-                            loop {
-                                exprs.push(self.parse_select_expr()?);
-                                if self.at(&Token::Comma) {
-                                    self.advance();
-                                } else {
-                                    break;
-                                }
-                            }
-                            select = Some(exprs);
-                        }
-                        Some(Token::Group) => {
-                            self.advance();
-                            self.eat(&Token::By)?;
-                            let mut cols = vec![];
-                            loop {
-                                cols.push(self.eat_ident()?);
-                                if self.at(&Token::Comma) {
-                                    self.advance();
-                                } else {
-                                    break;
-                                }
-                            }
-                            group_by = cols;
-                        }
-                        Some(Token::Having) => {
-                            self.advance();
-                            having = Some(self.parse_dataset_filter()?);
-                        }
-                        Some(Token::Order) => {
-                            self.advance();
-                            self.eat(&Token::By)?;
-                            let column = self.eat_ident()?;
-                            let ascending = !self.at_ident("DESC");
-                            if !ascending {
-                                self.advance();
-                            }
-                            order_by = Some(OrderByClause { column, ascending });
-                        }
-                        Some(Token::Limit) => {
-                            self.advance();
-                            limit = Some(self.eat_usize()?);
-                        }
-                        _ => break,
-                    }
-                }
-
+                let from = self.parse_dataset_from_clause(source)?;
                 Ok(Statement::CreateDataset(CreateDatasetStmt {
                     name,
                     columns: vec![],
-                    from: Some(DatasetFromClause {
-                        source,
-                        filter,
-                        select,
-                        group_by,
-                        having,
-                        order_by,
-                        limit,
-                    }),
+                    from: Some(from),
                 }))
             }
             Some(Token::Add) => {
@@ -995,18 +1003,27 @@ impl Parser {
 
     // EXPLAIN [PLAN] DATASET <name>
     // EXPLAIN [PLAN] SEARCH <ds> ON <col> QUERY <q> LIMIT <k>
-    // EXPLAIN [PLAN] SELECT …
+    // EXPLAIN [PLAN] DATASET <name> [FROM <src> ...]
+    // EXPLAIN [PLAN] SEARCH ...
+    // EXPLAIN [PLAN] SELECT ...
     // EXPLAIN <bare_ident>   — treated as a simple dataset scan
     fn parse_explain(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Explain)?;
-        // Optional PLAN keyword (not a lexer keyword, so arrives as Ident)
         if self.at_ident("PLAN") {
             self.advance();
         }
         let target = match self.peek().cloned() {
             Some(Token::Dataset) => {
                 self.advance();
-                ExplainTarget::Dataset(self.eat_ident()?)
+                let name = self.eat_ident()?;
+                if self.at(&Token::From) {
+                    self.advance();
+                    let source = self.eat_ident()?;
+                    let from = self.parse_dataset_from_clause(source)?;
+                    ExplainTarget::DatasetQuery { name, from }
+                } else {
+                    ExplainTarget::Dataset(name)
+                }
             }
             Some(Token::Search) => {
                 let stmt = self.parse_search()?;
@@ -1119,8 +1136,21 @@ impl Parser {
     }
 
     // IMPORT DATASET FROM <path> [AS <name>]
+    // IMPORT CSV FROM <path> [AS <name>]
     fn parse_import(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Import)?;
+        if self.at_ident("CSV") {
+            self.advance();
+            self.eat(&Token::From)?;
+            let path = self.eat_str()?;
+            let name = if self.at(&Token::As) {
+                self.advance();
+                Some(self.eat_ident()?)
+            } else {
+                None
+            };
+            return Ok(Statement::ImportCsv(ImportCsvStmt { path, name }));
+        }
         self.eat(&Token::Dataset)?;
         self.eat(&Token::From)?;
         let path = self.eat_str()?;
@@ -1137,9 +1167,13 @@ impl Parser {
         }))
     }
 
-    // EXPORT <name> TO <path>
+    // EXPORT [CSV] <name> TO <path>
     fn parse_export(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Export)?;
+        // Accept optional CSV keyword (all exports are CSV; the keyword is a legacy alias)
+        if self.at_ident("CSV") {
+            self.advance();
+        }
         let name = self.eat_ident()?;
         self.eat(&Token::To)?;
         let path = self.eat_str()?;
@@ -1272,10 +1306,15 @@ impl Parser {
     }
 
     // SET DATASET <name> <key> = <value>
+    // SET DATASET <name> [METADATA] <key> = <value>
     fn parse_set(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Set)?;
         self.eat(&Token::Dataset)?;
         let dataset = self.eat_ident()?;
+        // Optional METADATA keyword (keyword token, not ident)
+        if self.at(&Token::Metadata) {
+            self.advance();
+        }
         let key = self.eat_ident()?;
         self.eat(&Token::Eq)?;
         let value = self.eat_str()?;

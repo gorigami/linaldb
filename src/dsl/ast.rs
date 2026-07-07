@@ -56,7 +56,9 @@ pub enum Statement {
     List(ListStmt),
     /// `IMPORT DATASET FROM <path>` (durable) or `USE DATASET FROM <path>` (ephemeral)
     Import(ImportStmt),
-    /// `EXPORT <name> TO <path>`
+    /// `IMPORT CSV FROM <path> [AS <name>]`
+    ImportCsv(ImportCsvStmt),
+    /// `EXPORT [CSV] <name> TO <path>`
     Export(ExportStmt),
 
     // ─── Database management ─────────────────────────────────────────────────
@@ -320,8 +322,13 @@ pub enum ShowTarget {
 /// What `EXPLAIN` should show a query plan for.
 #[derive(Debug, Clone)]
 pub enum ExplainTarget {
-    /// `EXPLAIN [PLAN] DATASET <name>` — simple dataset scan
+    /// `EXPLAIN [PLAN] DATASET <name>` — simple full-scan plan
     Dataset(String),
+    /// `EXPLAIN [PLAN] DATASET <name> FROM <source> [FILTER …] [SELECT …] …`
+    DatasetQuery {
+        name: String,
+        from: DatasetFromClause,
+    },
     /// `EXPLAIN [PLAN] SEARCH <ds> ON <col> QUERY <q> LIMIT <k>`
     Search(SearchStmt),
     /// `EXPLAIN [PLAN] SELECT …`
@@ -384,6 +391,12 @@ pub struct ImportStmt {
 pub struct ExportStmt {
     pub name: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportCsvStmt {
+    pub path: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone)]

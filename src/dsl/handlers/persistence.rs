@@ -627,6 +627,43 @@ pub fn export_typed(
     export_csv_core(db, name, path, line_no)
 }
 
+/// `IMPORT CSV FROM path [AS name]` — typed entry point called from executor.
+pub fn import_csv_typed(
+    db: &mut TensorDb,
+    path: &str,
+    name_override: Option<&str>,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let resolved_path = resolve_persistence_path(db, path);
+    let csv_storage = CsvStorage::new(&resolved_path);
+    let dataset = csv_storage
+        .import_dataset(&resolved_path)
+        .map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to import CSV: {}", e),
+        })?;
+    let final_name =
+        name_override.unwrap_or(dataset.metadata.name.as_deref().unwrap_or("imported_csv"));
+    let schema = dataset.schema.clone();
+    db.create_dataset(final_name.to_string(), schema)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+    let row_count = dataset.len();
+    for row in dataset.rows {
+        db.insert_row(final_name, row)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+    }
+    Ok(DslOutput::Message(format!(
+        "Imported {} rows from '{}' into dataset '{}'",
+        row_count, path, final_name
+    )))
+}
+
 // ─── String-based wrappers (legacy fallback chain in mod.rs) ─────────────────
 
 /// Handle SAVE command (string-based, for the legacy fallback chain).

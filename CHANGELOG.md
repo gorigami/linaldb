@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.22] - 2026-07-07
+
+### Changed — final legacy handler cleanup; explain.rs deleted
+
+**Dead fallbacks removed from `execute_line_with_context`:**
+- Removed `handle_save`, `handle_load`, `handle_set_metadata`, `handle_import` (DATASET form), `handle_export` string-based fallback branches — all were unreachable because the typed parser already handled every form they covered
+- Only remaining legacy fallback: `.add_column(` method-call syntax
+
+**EXPLAIN fully ported — `explain.rs` deleted:**
+- Added `ExplainTarget::DatasetQuery { name, from: DatasetFromClause }` to `ast.rs`; handles `EXPLAIN [PLAN] DATASET name FROM source [FILTER …] [SELECT …] [GROUP BY …] [ORDER BY …] [LIMIT …]`
+- Extracted `parse_dataset_from_clause(source)` helper from `parse_create_dataset`; reused in both `parse_create_dataset` and `parse_explain`
+- `execute_explain` signature changed from `&mut TensorDb` to `&TensorDb` (function is read-only); now `pub` so `execute_line_shared` can call it directly
+- `ExplainTarget::DatasetQuery` arm in `execute_explain` builds the full logical plan (Scan → Filter → Aggregate/Project → Sort → Limit) without any string reconstruction
+- `handlers/explain.rs` deleted; `handlers/mod.rs` entry removed
+
+**`execute_line_shared` (server read-only path) ported to typed parser:**
+- Now tries `parser::parse(line)` first; dispatches `Statement::Explain` → `execute_explain`, `Statement::Audit` → inline logic, `Statement::List` → `list_typed`
+- Removed calls to `handle_explain` and `handle_list_datasets` from this path
+- DELIVER remains as a stub in the minimal fallback
+
+**`IMPORT CSV FROM path [AS name]` ported:**
+- Added `Statement::ImportCsv(ImportCsvStmt)` to AST
+- `parse_import` detects `IMPORT CSV` vs `IMPORT DATASET` and emits the appropriate statement
+- `import_csv_typed` added to `persistence.rs`; executor dispatches `Statement::ImportCsv` to it
+
+**`EXPORT [CSV] name TO path` ported:**
+- `parse_export` now accepts an optional `CSV` keyword (all exports produce CSV; the keyword is redundant but accepted for backward compat)
+
+**`SET DATASET name [METADATA] key = value` fixed:**
+- `parse_set` now consumes the optional `Token::Metadata` keyword before reading the key; previously `METADATA` as a keyword token caused `eat_ident()` to fail
+
+---
+
 ## [0.1.21] - 2026-07-06
 
 ### Changed — dataset.rs and search.rs ported; parser extended

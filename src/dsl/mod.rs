@@ -170,40 +170,47 @@ pub fn is_read_only(line: &str) -> bool {
 }
 
 /// Execute a single DSL line with an immutable reference to the DB (shared/read-lock path).
+///
+/// Tries the typed parser first. Only EXPLAIN, AUDIT, LIST, and DELIVER are supported here
+/// (all are read-only by definition).
 pub fn execute_line_shared(
     db: &TensorDb,
     line: &str,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    if line.starts_with("EXPLAIN ") {
-        handlers::explain::handle_explain(db, line, line_no)
-    } else if line.starts_with("AUDIT ") {
-        let rest = line.strip_prefix("AUDIT ").unwrap().trim();
-        let ds_name = if rest.starts_with("DATASET ") {
-            rest.strip_prefix("DATASET ").unwrap().trim()
-        } else {
-            rest
-        };
-        let issues = db
-            .verify_tensor_dataset(ds_name)
-            .map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?;
-        if issues.is_empty() {
-            Ok(DslOutput::Message(format!(
-                "Audit PASSED for dataset '{}'. All column references are valid.",
-                ds_name
-            )))
-        } else {
-            Ok(DslOutput::Message(format!(
-                "Audit FAILED for dataset '{}'. The following columns point to missing or invalid tensors: {:?}",
-                ds_name, issues
-            )))
+    if let Ok(stmt) = crate::dsl::parser::parse(line) {
+        match stmt {
+            crate::dsl::ast::Statement::Explain(s) => {
+                return executor::execute_explain(db, s.target, line_no);
+            }
+            crate::dsl::ast::Statement::Audit(s) => {
+                let issues = db
+                    .verify_tensor_dataset(&s.target)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                return if issues.is_empty() {
+                    Ok(DslOutput::Message(format!(
+                        "Audit PASSED for dataset '{}'. All column references are valid.",
+                        s.target
+                    )))
+                } else {
+                    Ok(DslOutput::Message(format!(
+                        "Audit FAILED for dataset '{}'. The following columns point to missing or invalid tensors: {:?}",
+                        s.target, issues
+                    )))
+                };
+            }
+            crate::dsl::ast::Statement::List(s) => {
+                return handlers::persistence::list_typed(db, &s.target, line_no);
+            }
+            _ => {}
         }
-    } else if line.starts_with("LIST ") {
-        handlers::persistence::handle_list_datasets(db, line, line_no)
-    } else if line.starts_with("DELIVER ") {
+    }
+
+    // Minimal fallback for DELIVER (stub) and unsupported commands
+    if line.starts_with("DELIVER ") {
         let dataset = line
             .strip_prefix("DELIVER ")
             .unwrap()
@@ -232,34 +239,14 @@ pub fn execute_line_with_context(
     line_no: usize,
     ctx: Option<&mut crate::engine::context::ExecutionContext>,
 ) -> Result<DslOutput, DslError> {
-    // Try the new typed parser first; fall through to the legacy chain on parse error.
+    // Try the typed parser first; on parse error fall through to the minimal legacy chain.
     if let Ok(stmt) = crate::dsl::parser::parse(line) {
         return executor::execute_statement(db, stmt, line_no, ctx);
     }
 
-    if line.starts_with("EXPLAIN ") {
-        handlers::explain::handle_explain(db, line, line_no)
-    } else if line.contains(".add_column(") {
+    // Remaining legacy fallbacks — only syntax the typed parser cannot yet represent.
+    if line.contains(".add_column(") {
         handlers::dataset::handle_add_tensor_column(db, line, line_no)
-    } else if line.starts_with("SET ") {
-        if line.starts_with("SET DATASET ") {
-            handlers::metadata::handle_set_metadata(db, line, line_no)
-        } else {
-            Err(DslError::Parse {
-                line: line_no,
-                msg: format!("Unsupported SET command: {}", line),
-            })
-        }
-    } else if line.starts_with("SAVE ") {
-        handlers::persistence::handle_save(db, line, line_no)
-    } else if line.starts_with("LOAD ") {
-        handlers::persistence::handle_load(db, line, line_no)
-    } else if line.starts_with("LIST ") {
-        handlers::persistence::handle_list_datasets(db, line, line_no)
-    } else if line.starts_with("IMPORT ") {
-        handlers::persistence::handle_import(db, line, line_no)
-    } else if line.starts_with("EXPORT ") {
-        handlers::persistence::handle_export(db, line, line_no)
     } else {
         if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
             return Ok(DslOutput::None);
