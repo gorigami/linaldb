@@ -195,6 +195,8 @@ pub enum Token {
     LtEq,
     #[token("!=")]
     NotEq,
+    #[token("~=")]
+    ApproxEq,
     #[token(">")]
     Gt,
     #[token("<")]
@@ -207,6 +209,8 @@ pub enum Token {
     Star,
     #[token("/")]
     Slash,
+    #[token("?")]
+    Question,
 
     // ─── Literals ─────────────────────────────────────────────────────────────
     /// Float literal: `3.14`, `1.0e-5`. Requires a leading digit (`0.5`, not `.5`).

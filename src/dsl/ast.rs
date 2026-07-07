@@ -185,12 +185,13 @@ pub enum CmpOp {
     LtEq,
 }
 
-/// Scalar value on the right-hand side of a FILTER predicate.
+/// Scalar value on the right-hand side of a FILTER predicate or DEFAULT clause.
 #[derive(Debug, Clone)]
 pub enum FilterValue {
     Int(i64),
     Float(f64),
     Str(String),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -202,12 +203,20 @@ pub struct AlterDatasetStmt {
 #[derive(Debug, Clone)]
 pub enum AlterOp {
     AddColumn(ColumnDef),
+    AddComputedColumn { name: String, expr: Box<Expr>, lazy: bool },
 }
 
 #[derive(Debug, Clone)]
 pub struct InsertIntoStmt {
     pub dataset: String,
-    pub row: Vec<(String, InsertValue)>,
+    pub row: InsertRow,
+}
+
+/// Named (`INSERT INTO ds (col=val, ...)`) or positional (`INSERT INTO ds VALUES (v1, v2, ...)`) form.
+#[derive(Debug, Clone)]
+pub enum InsertRow {
+    Named(Vec<(String, InsertValue)>),
+    Positional(Vec<InsertValue>),
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +225,9 @@ pub enum InsertValue {
     Text(String),
     TensorRef(String),
     Null,
+    Bool(bool),
+    Vector(Vec<f64>),
+    Matrix(Vec<Vec<f64>>),
 }
 
 #[derive(Debug, Clone)]
@@ -258,10 +270,10 @@ pub struct ShowStmt {
 }
 
 /// A single item in a SELECT column list — either a plain column or an aggregate call.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum SelectExpr {
     Column(String),
-    Aggregate { func: AggFuncAst, column: String },
+    Aggregate { func: AggFuncAst, expr: Box<Expr> },
 }
 
 /// Aggregate functions recognised in SELECT columns.
@@ -434,12 +446,14 @@ pub struct SearchStmt {
 
 // ─── Shared sub-types ─────────────────────────────────────────────────────────
 
-/// A column definition in `DATASET ... COLUMNS (...)`.
+/// A column definition in `DATASET ... COLUMNS (...)` or `ADD COLUMN`.
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
     pub name: String,
     pub col_type: ColType,
     pub nullable: bool,
+    /// Explicit `DEFAULT <val>` from the DDL statement; `None` means use type-appropriate zero.
+    pub default_val: Option<FilterValue>,
 }
 
 /// Column types as parsed from the DSL.
@@ -473,7 +487,9 @@ pub enum TensorKindAst {
 pub enum Expr {
     /// A named tensor or variable: `a`, `my_tensor`
     Ref(String),
-    /// A numeric literal: `3.14`, `42`
+    /// An integer literal: `42`, `-7`
+    Int(i64),
+    /// A float literal: `3.14`, `1.0e-5`
     Scalar(f64),
     /// A string literal: `"hello"`
     StringLit(String),
@@ -503,6 +519,12 @@ pub enum InfixOp {
     Subtract,
     Multiply,
     Divide,
+    Eq,
+    NotEq,
+    Gt,
+    Lt,
+    GtEq,
+    LtEq,
 }
 
 /// Named operation calls used in `LET` and `DERIVE` expressions.

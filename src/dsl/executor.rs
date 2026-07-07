@@ -208,10 +208,10 @@ pub fn execute_statement(
                             exprs
                                 .iter()
                                 .filter_map(|e| match e {
-                                    SelectExpr::Aggregate { func, column } => {
+                                    SelectExpr::Aggregate { func, expr } => {
                                         Some(LogicalExpr::AggregateExpr {
                                             func: agg_func_to_logical(func),
-                                            expr: Box::new(LogicalExpr::Column(column.clone())),
+                                            expr: Box::new(dsl_expr_to_logical_expr(expr)),
                                         })
                                     }
                                     SelectExpr::Column(_) => None,
@@ -232,10 +232,10 @@ pub fn execute_statement(
                         let aggr_exprs: Vec<LogicalExpr> = exprs
                             .into_iter()
                             .filter_map(|e| match e {
-                                SelectExpr::Aggregate { func, column } => {
+                                SelectExpr::Aggregate { func, expr } => {
                                     Some(LogicalExpr::AggregateExpr {
                                         func: agg_func_to_logical(&func),
-                                        expr: Box::new(LogicalExpr::Column(column)),
+                                        expr: Box::new(dsl_expr_to_logical_expr(&expr)),
                                     })
                                 }
                                 SelectExpr::Column(_) => None,
@@ -329,11 +329,28 @@ pub fn execute_statement(
 
         Statement::AlterDataset(s) => match s.operation {
             AlterOp::AddColumn(col_def) => {
+                let vtype = col_type_to_value_type(&col_def.col_type);
+                let default_value = match col_def.default_val {
+                    Some(FilterValue::Int(n)) => Value::Int(n),
+                    Some(FilterValue::Float(f)) => Value::Float(f as f32),
+                    Some(FilterValue::Str(s)) => Value::String(s),
+                    Some(FilterValue::Bool(b)) => Value::Bool(b),
+                    None if col_def.nullable => Value::Null,
+                    None => match &vtype {
+                        ValueType::Int => Value::Int(0),
+                        ValueType::Float => Value::Float(0.0),
+                        ValueType::String => Value::String(String::new()),
+                        ValueType::Bool => Value::Bool(false),
+                        ValueType::Vector(dim) => Value::Vector(vec![0.0; *dim]),
+                        ValueType::Matrix(r, c) => Value::Matrix(vec![vec![0.0; *c]; *r]),
+                        ValueType::Null => Value::Null,
+                    },
+                };
                 db.alter_dataset_add_column(
                     &s.dataset,
                     col_def.name.clone(),
-                    col_type_to_value_type(&col_def.col_type),
-                    Value::Null,
+                    vtype,
+                    default_value,
                     col_def.nullable,
                 )
                 .map_err(|e| DslError::Engine {
@@ -344,6 +361,9 @@ pub fn execute_statement(
                     "Added column '{}' to dataset '{}'",
                     col_def.name, s.dataset
                 )))
+            }
+            AlterOp::AddComputedColumn { name, expr, lazy } => {
+                execute_add_computed_column(db, &s.dataset, &name, &expr, lazy, line_no)
             }
         },
 
@@ -356,20 +376,56 @@ pub fn execute_statement(
                 })?
                 .schema
                 .clone();
-            let col_map: std::collections::HashMap<&str, &InsertValue> =
-                s.row.iter().map(|(k, v)| (k.as_str(), v)).collect();
-            let values: Vec<Value> = schema
-                .fields
-                .iter()
-                .map(|f| match col_map.get(f.name.as_str()) {
-                    Some(InsertValue::Scalar(n)) => match f.value_type {
-                        ValueType::Int => Value::Int(*n as i64),
-                        _ => Value::Float(*n as f32),
-                    },
-                    Some(InsertValue::Text(t)) => Value::String(t.clone()),
-                    Some(InsertValue::TensorRef(_)) | Some(InsertValue::Null) | None => Value::Null,
-                })
-                .collect();
+            let values: Vec<Value> = match s.row {
+                InsertRow::Named(named) => {
+                    let col_map: std::collections::HashMap<&str, &InsertValue> =
+                        named.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                    schema
+                        .fields
+                        .iter()
+                        .map(|f| match col_map.get(f.name.as_str()) {
+                            Some(InsertValue::Scalar(n)) => match f.value_type {
+                                ValueType::Int => Value::Int(*n as i64),
+                                _ => Value::Float(*n as f32),
+                            },
+                            Some(InsertValue::Text(t)) => Value::String(t.clone()),
+                            Some(InsertValue::Vector(v)) => {
+                                Value::Vector(v.iter().map(|&x| x as f32).collect())
+                            }
+                            Some(InsertValue::Matrix(m)) => Value::Matrix(
+                                m.iter()
+                                    .map(|row| row.iter().map(|&x| x as f32).collect())
+                                    .collect(),
+                            ),
+                            Some(InsertValue::Bool(b)) => Value::Bool(*b),
+                            Some(InsertValue::TensorRef(_))
+                            | Some(InsertValue::Null)
+                            | None => Value::Null,
+                        })
+                        .collect()
+                }
+                InsertRow::Positional(vals) => vals
+                    .into_iter()
+                    .zip(schema.fields.iter())
+                    .map(|(v, f)| match v {
+                        InsertValue::Scalar(n) => match f.value_type {
+                            ValueType::Int => Value::Int(n as i64),
+                            _ => Value::Float(n as f32),
+                        },
+                        InsertValue::Text(t) => Value::String(t),
+                        InsertValue::Vector(v) => {
+                            Value::Vector(v.into_iter().map(|x| x as f32).collect())
+                        }
+                        InsertValue::Matrix(m) => Value::Matrix(
+                            m.into_iter()
+                                .map(|row| row.into_iter().map(|x| x as f32).collect())
+                                .collect(),
+                        ),
+                        InsertValue::Bool(b) => Value::Bool(b),
+                        InsertValue::TensorRef(_) | InsertValue::Null => Value::Null,
+                    })
+                    .collect(),
+            };
             let tuple = Tuple::new(schema.clone(), values).map_err(|e| DslError::Parse {
                 line: line_no,
                 msg: e,
@@ -412,10 +468,10 @@ pub fn execute_statement(
                     SelectColumns::Named(exprs) => exprs
                         .iter()
                         .filter_map(|e| match e {
-                            SelectExpr::Aggregate { func, column } => {
+                            SelectExpr::Aggregate { func, expr } => {
                                 Some(LogicalExpr::AggregateExpr {
                                     func: agg_func_to_logical(func),
-                                    expr: Box::new(LogicalExpr::Column(column.clone())),
+                                    expr: Box::new(dsl_expr_to_logical_expr(expr)),
                                 })
                             }
                             SelectExpr::Column(_) => None,
@@ -705,6 +761,11 @@ fn eval_expr_to_name(
         Expr::Ref(name) => Ok(name.clone()),
 
         // Numeric literal — materialize as a scalar tensor
+        Expr::Int(n) => {
+            db.insert_named(desired_name, Shape::new(vec![]), vec![*n as f32])
+                .map_err(eng)?;
+            Ok(desired_name.to_string())
+        }
         Expr::Scalar(n) => {
             db.insert_named(desired_name, Shape::new(vec![]), vec![*n as f32])
                 .map_err(eng)?;
@@ -997,6 +1058,7 @@ fn infix_to_binary_op(op: InfixOp) -> BinaryOp {
         InfixOp::Subtract => BinaryOp::Subtract,
         InfixOp::Multiply => BinaryOp::Multiply,
         InfixOp::Divide => BinaryOp::Divide,
+        _ => unreachable!("comparison operators cannot appear in tensor expressions"),
     }
 }
 
@@ -1407,10 +1469,10 @@ fn execute_explain(
                     SelectColumns::Named(exprs) => exprs
                         .iter()
                         .filter_map(|e| match e {
-                            SelectExpr::Aggregate { func, column } => {
+                            SelectExpr::Aggregate { func, expr } => {
                                 Some(LogicalExpr::AggregateExpr {
                                     func: agg_func_to_logical(func),
-                                    expr: Box::new(LogicalExpr::Column(column.clone())),
+                                    expr: Box::new(dsl_expr_to_logical_expr(expr)),
                                 })
                             }
                             SelectExpr::Column(_) => None,
@@ -1519,6 +1581,163 @@ fn agg_func_to_logical(f: &AggFuncAst) -> crate::query::logical::AggregateFuncti
 }
 
 /// Convert a DSL `ColType` to the engine's `ValueType` without a string round-trip.
+fn execute_add_computed_column(
+    db: &mut TensorDb,
+    dataset: &str,
+    col_name: &str,
+    expr: &Expr,
+    lazy: bool,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let ds = db.get_dataset(dataset).map_err(|e| DslError::Engine {
+        line: line_no,
+        source: e,
+    })?;
+
+    // Reject duplicate column names
+    if ds.schema.fields.iter().any(|f| f.name == col_name) {
+        return Err(DslError::Parse {
+            line: line_no,
+            msg: format!("Column '{}' already exists in dataset '{}'", col_name, dataset),
+        });
+    }
+
+    let logical_expr = dsl_expr_to_logical_expr(expr);
+
+    if lazy {
+        // Infer type by evaluating on the first row — required even for lazy columns
+        let first_row = ds.rows.first().ok_or_else(|| DslError::Parse {
+            line: line_no,
+            msg: format!(
+                "Cannot infer type for computed column '{}' from empty dataset",
+                col_name
+            ),
+        })?;
+        let field_names: Vec<String> = ds.schema.fields.iter().map(|f| f.name.clone()).collect();
+        let env: std::collections::HashMap<&str, &Value> = field_names
+            .iter()
+            .zip(first_row.values.iter())
+            .map(|(k, v)| (k.as_str(), v))
+            .collect();
+        let vtype = match eval_row_expr(expr, &env) {
+            Value::Int(_) => ValueType::Int,
+            Value::Float(_) => ValueType::Float,
+            Value::String(_) => ValueType::String,
+            Value::Bool(_) => ValueType::Bool,
+            Value::Vector(v) => ValueType::Vector(v.len()),
+            Value::Matrix(m) => {
+                let r = m.len();
+                let c = m.first().map_or(0, |row| row.len());
+                ValueType::Matrix(r, c)
+            }
+            Value::Null => ValueType::Float,
+        };
+
+        // Lazy: add placeholder NULL column; engine evaluates on access
+        db.alter_dataset_add_computed_column(
+            dataset,
+            col_name.to_string(),
+            vtype,
+            vec![Value::Null; ds.rows.len()],
+            logical_expr,
+            true,
+        )
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+    } else {
+        if ds.rows.is_empty() {
+            return Err(DslError::Parse {
+                line: line_no,
+                msg: format!(
+                    "Cannot infer type for computed column '{}' from empty dataset",
+                    col_name
+                ),
+            });
+        }
+
+        // Evaluate expression for every row
+        let field_names: Vec<String> = ds.schema.fields.iter().map(|f| f.name.clone()).collect();
+        let computed: Vec<Value> = ds
+            .rows
+            .iter()
+            .map(|row| {
+                let env: std::collections::HashMap<&str, &Value> = field_names
+                    .iter()
+                    .zip(row.values.iter())
+                    .map(|(k, v)| (k.as_str(), v))
+                    .collect();
+                eval_row_expr(expr, &env)
+            })
+            .collect();
+
+        // Infer type from first computed value
+        let vtype = match &computed[0] {
+            Value::Int(_) => ValueType::Int,
+            Value::Float(_) => ValueType::Float,
+            Value::String(_) => ValueType::String,
+            Value::Bool(_) => ValueType::Bool,
+            Value::Vector(v) => ValueType::Vector(v.len()),
+            Value::Matrix(m) => ValueType::Matrix(m.len(), m.first().map_or(0, |r| r.len())),
+            Value::Null => ValueType::Null,
+        };
+
+        db.alter_dataset_add_computed_column(
+            dataset,
+            col_name.to_string(),
+            vtype,
+            computed,
+            logical_expr,
+            false,
+        )
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+    }
+
+    Ok(DslOutput::Message(format!(
+        "Added computed column '{}' to dataset '{}'",
+        col_name, dataset
+    )))
+}
+
+/// Evaluate a typed `Expr` against a row's field values.
+/// Returns `Value::Null` for unrecognised expressions.
+fn eval_row_expr(expr: &Expr, env: &std::collections::HashMap<&str, &Value>) -> Value {
+    match expr {
+        Expr::Ref(name) => env.get(name.as_str()).map_or(Value::Null, |v| (*v).clone()),
+        Expr::Int(n) => Value::Int(*n),
+        Expr::Scalar(f) => Value::Float(*f as f32),
+        Expr::StringLit(s) => Value::String(s.clone()),
+        Expr::Infix { op, lhs, rhs } => {
+            let l = eval_row_expr(lhs, env);
+            let r = eval_row_expr(rhs, env);
+            match (op, l, r) {
+                (InfixOp::Add, Value::Int(a), Value::Int(b)) => Value::Int(a + b),
+                (InfixOp::Add, Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+                (InfixOp::Add, Value::Int(a), Value::Float(b)) => Value::Float(a as f32 + b),
+                (InfixOp::Add, Value::Float(a), Value::Int(b)) => Value::Float(a + b as f32),
+                (InfixOp::Subtract, Value::Int(a), Value::Int(b)) => Value::Int(a - b),
+                (InfixOp::Subtract, Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+                (InfixOp::Subtract, Value::Int(a), Value::Float(b)) => Value::Float(a as f32 - b),
+                (InfixOp::Subtract, Value::Float(a), Value::Int(b)) => Value::Float(a - b as f32),
+                (InfixOp::Multiply, Value::Int(a), Value::Int(b)) => Value::Int(a * b),
+                (InfixOp::Multiply, Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+                (InfixOp::Multiply, Value::Int(a), Value::Float(b)) => Value::Float(a as f32 * b),
+                (InfixOp::Multiply, Value::Float(a), Value::Int(b)) => Value::Float(a * b as f32),
+                (InfixOp::Divide, Value::Int(a), Value::Int(b)) if b != 0 => Value::Int(a / b),
+                (InfixOp::Divide, Value::Float(a), Value::Float(b)) => Value::Float(a / b),
+                (InfixOp::Divide, Value::Int(a), Value::Float(b)) => Value::Float(a as f32 / b),
+                (InfixOp::Divide, Value::Float(a), Value::Int(b)) => Value::Float(a / b as f32),
+                _ => Value::Null,
+            }
+        }
+        _ => Value::Null,
+    }
+}
+
 fn col_type_to_value_type(ct: &ColType) -> ValueType {
     match ct {
         ColType::Int => ValueType::Int,
@@ -1545,6 +1764,7 @@ fn dataset_filter_to_logical(f: &DatasetFilter) -> LogicalExpr {
         FilterValue::Int(n) => Value::Int(*n),
         FilterValue::Float(f) => Value::Float(*f as f32),
         FilterValue::Str(s) => Value::String(s.clone()),
+        FilterValue::Bool(b) => Value::Bool(*b),
     };
     LogicalExpr::BinaryExpr {
         left: Box::new(LogicalExpr::Column(f.column.clone())),
@@ -1559,6 +1779,7 @@ fn dataset_filter_to_logical(f: &DatasetFilter) -> LogicalExpr {
 fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
     match e {
         Expr::Ref(name) => LogicalExpr::Column(name.clone()),
+        Expr::Int(n) => LogicalExpr::Literal(Value::Int(*n)),
         Expr::Scalar(f) => LogicalExpr::Literal(Value::Float(*f as f32)),
         Expr::StringLit(s) => LogicalExpr::Literal(Value::String(s.clone())),
         Expr::Infix { op, lhs, rhs } => {
@@ -1567,6 +1788,12 @@ fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 InfixOp::Subtract => "-",
                 InfixOp::Multiply => "*",
                 InfixOp::Divide => "/",
+                InfixOp::Eq => "=",
+                InfixOp::NotEq => "!=",
+                InfixOp::Gt => ">",
+                InfixOp::Lt => "<",
+                InfixOp::GtEq => ">=",
+                InfixOp::LtEq => "<=",
             };
             LogicalExpr::BinaryExpr {
                 left: Box::new(dsl_expr_to_logical_expr(lhs)),
@@ -1583,6 +1810,7 @@ fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
 pub fn expr_to_string(expr: &Expr) -> String {
     match expr {
         Expr::Ref(n) => n.clone(),
+        Expr::Int(n) => format!("{}", n),
         Expr::Scalar(n) => format!("{}", n),
         Expr::StringLit(s) => format!("\"{}\"", s),
         Expr::Infix { op, lhs, rhs } => {
@@ -1591,6 +1819,12 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 InfixOp::Subtract => "-",
                 InfixOp::Multiply => "*",
                 InfixOp::Divide => "/",
+                InfixOp::Eq => "=",
+                InfixOp::NotEq => "!=",
+                InfixOp::Gt => ">",
+                InfixOp::Lt => "<",
+                InfixOp::GtEq => ">=",
+                InfixOp::LtEq => "<=",
             };
             format!("{} {} {}", expr_to_string(lhs), sym, expr_to_string(rhs))
         }

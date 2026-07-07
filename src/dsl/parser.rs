@@ -574,7 +574,66 @@ impl Parser {
                     }),
                 }))
             }
-            _ => Err(self.unexpected("COLUMNS or FROM after DATASET name")),
+            Some(Token::Add) => {
+                // DATASET <name> ADD COLUMN <coldef>  — DDL form: col: TYPE
+                // DATASET <name> ADD COLUMN <col> = <expr>  — computed form
+                self.advance();
+                self.eat(&Token::Column)?;
+                let col_name = self.eat_ident()?;
+                if self.at(&Token::Eq) {
+                    // Computed column: DATASET name ADD COLUMN col = expr [LAZY]
+                    self.advance();
+                    let expr = self.parse_expr()?;
+                    let lazy = if self.at(&Token::Lazy) {
+                        self.advance();
+                        true
+                    } else {
+                        false
+                    };
+                    Ok(Statement::AlterDataset(AlterDatasetStmt {
+                        dataset: name,
+                        operation: AlterOp::AddComputedColumn {
+                            name: col_name,
+                            expr: Box::new(expr),
+                            lazy,
+                        },
+                    }))
+                } else {
+                    // DDL column: DATASET name ADD COLUMN col: TYPE [DEFAULT val]
+                    // The ident was already consumed; push it back via a sub-parse
+                    self.eat(&Token::Colon)?;
+                    let col_type = self.parse_col_type()?;
+                    let nullable = if self.at(&Token::Question) {
+                        self.advance();
+                        true
+                    } else if self.at(&Token::Not) {
+                        self.advance();
+                        self.eat(&Token::Nullable)?;
+                        false
+                    } else if self.at(&Token::Nullable) {
+                        self.advance();
+                        true
+                    } else {
+                        false
+                    };
+                    let default_val = if self.at_ident("DEFAULT") {
+                        self.advance();
+                        Some(self.parse_filter_value()?)
+                    } else {
+                        None
+                    };
+                    Ok(Statement::AlterDataset(AlterDatasetStmt {
+                        dataset: name,
+                        operation: AlterOp::AddColumn(ColumnDef {
+                            name: col_name,
+                            col_type,
+                            nullable,
+                            default_val,
+                        }),
+                    }))
+                }
+            }
+            _ => Err(self.unexpected("COLUMNS, FROM, or ADD COLUMN after DATASET name")),
         }
     }
 
@@ -653,7 +712,18 @@ impl Parser {
                     _ => Err(self.unexpected("number after `-`")),
                 }
             }
-            _ => Err(self.unexpected("filter value (integer, float, or string)")),
+            Some(Token::Ident(_)) => {
+                if self.at_ident("true") {
+                    self.advance();
+                    Ok(FilterValue::Bool(true))
+                } else if self.at_ident("false") {
+                    self.advance();
+                    Ok(FilterValue::Bool(false))
+                } else {
+                    Err(self.unexpected("filter value (integer, float, string, or boolean)"))
+                }
+            }
+            _ => Err(self.unexpected("filter value (integer, float, string, or boolean)")),
         }
     }
 
@@ -671,24 +741,40 @@ impl Parser {
         }))
     }
 
+    // INSERT INTO <dataset> VALUES (v1, v2, ...)
     // INSERT INTO <dataset> (col = val, ...)
     fn parse_insert_into(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Insert)?;
         self.eat(&Token::Into)?;
         let dataset = self.eat_ident()?;
 
-        self.eat(&Token::LParen)?;
-        let mut row = Vec::new();
-        while !self.at(&Token::RParen) && !self.eof() {
-            let col = self.eat_ident()?;
-            self.eat(&Token::Eq)?;
-            let val = self.parse_insert_value()?;
-            row.push((col, val));
-            if self.at(&Token::Comma) {
-                self.advance();
+        let row = if self.at(&Token::Values) {
+            self.advance();
+            self.eat(&Token::LParen)?;
+            let mut vals = Vec::new();
+            while !self.at(&Token::RParen) && !self.eof() {
+                vals.push(self.parse_insert_value()?);
+                if self.at(&Token::Comma) {
+                    self.advance();
+                }
             }
-        }
-        self.eat(&Token::RParen)?;
+            self.eat(&Token::RParen)?;
+            InsertRow::Positional(vals)
+        } else {
+            self.eat(&Token::LParen)?;
+            let mut named = Vec::new();
+            while !self.at(&Token::RParen) && !self.eof() {
+                let col = self.eat_ident()?;
+                self.eat(&Token::Eq)?;
+                let val = self.parse_insert_value()?;
+                named.push((col, val));
+                if self.at(&Token::Comma) {
+                    self.advance();
+                }
+            }
+            self.eat(&Token::RParen)?;
+            InsertRow::Named(named)
+        };
 
         Ok(Statement::InsertInto(InsertIntoStmt { dataset, row }))
     }
@@ -703,8 +789,47 @@ impl Parser {
             Some(Token::Float(_)) | Some(Token::Int(_)) | Some(Token::Minus) => {
                 Ok(InsertValue::Scalar(self.eat_number()?))
             }
-            Some(Token::Ident(_)) => Ok(InsertValue::TensorRef(self.eat_ident()?)),
-            _ => Err(self.unexpected("a value (number, string, identifier, or NULL)")),
+            Some(Token::Ident(_)) => {
+                if self.at_ident("true") {
+                    self.advance();
+                    Ok(InsertValue::Bool(true))
+                } else if self.at_ident("false") {
+                    self.advance();
+                    Ok(InsertValue::Bool(false))
+                } else {
+                    Ok(InsertValue::TensorRef(self.eat_ident()?))
+                }
+            }
+            Some(Token::LBracket) => {
+                self.advance();
+                if self.at(&Token::LBracket) {
+                    // Matrix literal: [[r0c0, r0c1, ...], [r1c0, ...], ...]
+                    let mut rows: Vec<Vec<f64>> = Vec::new();
+                    while !self.at(&Token::RBracket) && !self.eof() {
+                        self.eat(&Token::LBracket)?;
+                        let mut row: Vec<f64> = Vec::new();
+                        while !self.at(&Token::RBracket) && !self.eof() {
+                            row.push(self.eat_number()?);
+                            if self.at(&Token::Comma) { self.advance(); }
+                        }
+                        self.eat(&Token::RBracket)?;
+                        rows.push(row);
+                        if self.at(&Token::Comma) { self.advance(); }
+                    }
+                    self.eat(&Token::RBracket)?;
+                    Ok(InsertValue::Matrix(rows))
+                } else {
+                    // Vector literal: [v0, v1, ...]
+                    let mut vals: Vec<f64> = Vec::new();
+                    while !self.at(&Token::RBracket) && !self.eof() {
+                        vals.push(self.eat_number()?);
+                        if self.at(&Token::Comma) { self.advance(); }
+                    }
+                    self.eat(&Token::RBracket)?;
+                    Ok(InsertValue::Vector(vals))
+                }
+            }
+            _ => Err(self.unexpected("a value (number, string, identifier, NULL, or vector/matrix literal)")),
         }
     }
 
@@ -1136,55 +1261,99 @@ impl Parser {
 
     fn parse_agg_call(&mut self, func: AggFuncAst) -> Result<SelectExpr, ParseError> {
         self.eat(&Token::LParen)?;
-        let column = if self.at(&Token::Star) {
+        let expr = if self.at(&Token::Star) {
             self.advance();
-            "*".to_string()
+            Expr::Ref("*".to_string())
         } else {
-            self.eat_ident()?
+            self.parse_expr()?
         };
         self.eat(&Token::RParen)?;
-        Ok(SelectExpr::Aggregate { func, column })
+        Ok(SelectExpr::Aggregate { func, expr: Box::new(expr) })
     }
 
     // SEARCH <dataset> ON <column> QUERY <tensor_name|[vector]> LIMIT <k> [INTO <target>]
+    // SEARCH <ds> ON <col> QUERY <[...]|name> LIMIT <k> [INTO <target>]
+    // SEARCH <target> FROM <source> QUERY <[...]|name> ON <col> K=<k>
+    // SEARCH <source> WHERE <col> ~= <[...]> LIMIT <k>
     fn parse_search(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Search)?;
-        let dataset = self.eat_ident()?;
+        let first = self.eat_ident()?;
 
-        if !self.at_ident("ON") {
-            return Err(self.error("Expected ON after dataset name in SEARCH"));
-        }
-        self.advance();
-        let column = self.eat_ident()?;
-
-        if !self.at_ident("QUERY") {
-            return Err(self.error("Expected QUERY after column name in SEARCH"));
-        }
-        self.advance();
-
-        let query = if self.at(&Token::LBracket) {
-            SearchQuery::Inline(self.parse_f64_list()?)
-        } else {
-            SearchQuery::TensorRef(self.eat_ident()?)
-        };
-
-        self.eat(&Token::Limit)?;
-        let top_k = self.eat_usize()?;
-
-        let target = if self.at(&Token::Into) {
+        if self.at(&Token::From) {
+            // Legacy syntax: SEARCH target FROM source QUERY [...] ON col K=k
             self.advance();
-            Some(self.eat_ident()?)
+            let source = self.eat_ident()?;
+            if !self.at_ident("QUERY") {
+                return Err(self.error("Expected QUERY after source in SEARCH ... FROM"));
+            }
+            self.advance();
+            let query = if self.at(&Token::LBracket) {
+                SearchQuery::Inline(self.parse_f64_list()?)
+            } else {
+                SearchQuery::TensorRef(self.eat_ident()?)
+            };
+            if !self.at_ident("ON") {
+                return Err(self.error("Expected ON after query vector in SEARCH ... FROM"));
+            }
+            self.advance();
+            let column = self.eat_ident()?;
+            self.eat_ident()?; // consume "K"
+            self.eat(&Token::Eq)?;
+            let top_k = self.eat_usize()?;
+            Ok(Statement::Search(SearchStmt {
+                dataset: source,
+                column,
+                query,
+                top_k,
+                target: Some(first),
+            }))
+        } else if self.at(&Token::Where) {
+            // WHERE syntax: SEARCH source WHERE col ~= [...] LIMIT k
+            self.advance();
+            let column = self.eat_ident()?;
+            self.eat(&Token::ApproxEq)?;
+            let query = SearchQuery::Inline(self.parse_f64_list()?);
+            self.eat(&Token::Limit)?;
+            let top_k = self.eat_usize()?;
+            Ok(Statement::Search(SearchStmt {
+                dataset: first,
+                column,
+                query,
+                top_k,
+                target: None,
+            }))
         } else {
-            None
-        };
-
-        Ok(Statement::Search(SearchStmt {
-            dataset,
-            column,
-            query,
-            top_k,
-            target,
-        }))
+            // Modern syntax: SEARCH dataset ON col QUERY [...|name] LIMIT k [INTO target]
+            if !self.at_ident("ON") {
+                return Err(self.error("Expected FROM, ON, or WHERE after dataset name in SEARCH"));
+            }
+            self.advance();
+            let column = self.eat_ident()?;
+            if !self.at_ident("QUERY") {
+                return Err(self.error("Expected QUERY after column name in SEARCH"));
+            }
+            self.advance();
+            let query = if self.at(&Token::LBracket) {
+                SearchQuery::Inline(self.parse_f64_list()?)
+            } else {
+                SearchQuery::TensorRef(self.eat_ident()?)
+            };
+            self.eat(&Token::Limit)?;
+            let top_k = self.eat_usize()?;
+            let target = if self.at(&Token::Into) {
+                self.advance();
+                Some(self.eat_ident()?)
+            } else {
+                None
+            };
+            Ok(Statement::Search(SearchStmt {
+                dataset: first,
+                column,
+                query,
+                top_k,
+                target,
+            }))
+        }
     }
 }
 
@@ -1224,12 +1393,20 @@ impl Parser {
                 _ => {}
             }
 
-            // Infix operators with precedence
+            // Infix operators with precedence (comparison < arithmetic)
             let (left_bp, right_bp, op) = match self.peek() {
-                Some(Token::Plus) => (1u8, 2u8, InfixOp::Add),
-                Some(Token::Minus) => (1, 2, InfixOp::Subtract),
-                Some(Token::Star) => (3, 4, InfixOp::Multiply),
-                Some(Token::Slash) => (3, 4, InfixOp::Divide),
+                // Comparisons: lowest precedence, non-associative (left=0 so they bind
+                // after arithmetic; right=1 so right side admits arithmetic but not another cmp)
+                Some(Token::Eq) => (0u8, 1u8, InfixOp::Eq),
+                Some(Token::NotEq) => (0, 1, InfixOp::NotEq),
+                Some(Token::Gt) => (0, 1, InfixOp::Gt),
+                Some(Token::Lt) => (0, 1, InfixOp::Lt),
+                Some(Token::GtEq) => (0, 1, InfixOp::GtEq),
+                Some(Token::LtEq) => (0, 1, InfixOp::LtEq),
+                Some(Token::Plus) => (2u8, 3u8, InfixOp::Add),
+                Some(Token::Minus) => (2, 3, InfixOp::Subtract),
+                Some(Token::Star) => (4, 5, InfixOp::Multiply),
+                Some(Token::Slash) => (4, 5, InfixOp::Divide),
                 _ => break,
             };
 
@@ -1259,7 +1436,7 @@ impl Parser {
             }
             Some(Token::Int(_)) => {
                 if let Some(Token::Int(n)) = self.advance() {
-                    return Ok(Expr::Scalar(n as f64));
+                    return Ok(Expr::Int(n));
                 }
                 unreachable!()
             }
@@ -1271,6 +1448,7 @@ impl Parser {
                 self.advance();
                 let inner = self.parse_pratt(5)?; // high bp so - binds tightly
                 return Ok(match inner {
+                    Expr::Int(n) => Expr::Int(-n),
                     Expr::Scalar(n) => Expr::Scalar(-n),
                     other => Expr::Call(CallExpr::Scale {
                         input: Box::new(other),
@@ -1312,6 +1490,22 @@ impl Parser {
                     let ds = self.eat_str()?;
                     self.eat(&Token::RParen)?;
                     return Ok(Expr::DatasetRef(ds));
+                }
+                // Aggregate function call in expression context (e.g. HAVING COUNT(id) > 1)
+                // Represent as Expr::Ref("COUNT(id)") to match post-aggregation column names
+                let upper = name.to_uppercase();
+                if matches!(upper.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
+                    && self.at(&Token::LParen)
+                {
+                    self.advance();
+                    let arg = if self.at(&Token::Star) {
+                        self.advance();
+                        "*".to_string()
+                    } else {
+                        self.eat_ident()?
+                    };
+                    self.eat(&Token::RParen)?;
+                    return Ok(Expr::Ref(format!("{}({})", upper, arg)));
                 }
                 return Ok(Expr::Ref(name));
             }
@@ -1423,7 +1617,7 @@ impl Parser {
             }
             Some(Token::Int(_)) => {
                 if let Some(Token::Int(n)) = self.advance() {
-                    Expr::Scalar(n as f64)
+                    Expr::Int(n)
                 } else {
                     unreachable!()
                 }
@@ -1539,15 +1733,25 @@ impl Parser {
 
     /// `(colname: coltype [NOT NULLABLE], ...)` for DATASET COLUMNS
     fn parse_column_list(&mut self) -> Result<Vec<ColumnDef>, ParseError> {
-        self.eat(&Token::LParen)?;
+        let has_parens = self.at(&Token::LParen);
+        if has_parens {
+            self.advance();
+        }
         let mut cols = Vec::new();
-        while !self.at(&Token::RParen) && !self.eof() {
+        loop {
+            // Stop at `)` or EOF or a keyword that signals the end of column defs
+            if self.eof() { break; }
+            if has_parens && self.at(&Token::RParen) { break; }
+            // Without parens, stop when next token is a non-ident (i.e. not a column def start)
+            if !has_parens && !matches!(self.peek(), Some(Token::Ident(_))) { break; }
             cols.push(self.parse_column_def()?);
             if self.at(&Token::Comma) {
                 self.advance();
             }
         }
-        self.eat(&Token::RParen)?;
+        if has_parens {
+            self.eat(&Token::RParen)?;
+        }
         Ok(cols)
     }
 
@@ -1556,7 +1760,11 @@ impl Parser {
         self.eat(&Token::Colon)?;
         let col_type = self.parse_col_type()?;
 
-        let nullable = if self.at(&Token::Not) {
+        // `?` suffix or NULLABLE/NOT NULLABLE keywords
+        let nullable = if self.at(&Token::Question) {
+            self.advance();
+            true
+        } else if self.at(&Token::Not) {
             self.advance();
             self.eat(&Token::Nullable)?;
             false
@@ -1564,13 +1772,22 @@ impl Parser {
             self.advance();
             true
         } else {
-            true // default
+            false // no explicit marker — executor uses type-appropriate zero default
+        };
+
+        // Optional DEFAULT <value>
+        let default_val = if self.at_ident("DEFAULT") {
+            self.advance();
+            Some(self.parse_filter_value()?)
+        } else {
+            None
         };
 
         Ok(ColumnDef {
             name,
             col_type,
             nullable,
+            default_val,
         })
     }
 
@@ -2158,10 +2375,10 @@ mod tests {
             panic!()
         };
         assert!(
-            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Sum, column } if column == "price")
+            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Sum, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "price"))
         );
         assert!(
-            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Avg, column } if column == "qty")
+            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Avg, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "qty"))
         );
     }
 
@@ -2173,7 +2390,7 @@ mod tests {
             panic!()
         };
         assert!(
-            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Count, column } if column == "*")
+            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Count, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "*"))
         );
     }
 
@@ -2186,7 +2403,7 @@ mod tests {
         };
         assert!(matches!(&cols[0], SelectExpr::Column(c) if c == "category"));
         assert!(
-            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Max, column } if column == "price")
+            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Max, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "price"))
         );
     }
 
