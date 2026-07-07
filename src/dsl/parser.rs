@@ -727,18 +727,64 @@ impl Parser {
         }
     }
 
-    // ALTER DATASET <name> ADD COLUMN <coldef>
+    // ALTER DATASET <name> ADD COLUMN <col> = <expr> [LAZY]
+    // ALTER DATASET <name> ADD COLUMN <col>: TYPE [DEFAULT val]
     fn parse_alter(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Alter)?;
         self.eat(&Token::Dataset)?;
         let dataset = self.eat_ident()?;
         self.eat(&Token::Add)?;
         self.eat(&Token::Column)?;
-        let col = self.parse_column_def()?;
-        Ok(Statement::AlterDataset(AlterDatasetStmt {
-            dataset,
-            operation: AlterOp::AddColumn(col),
-        }))
+        let col_name = self.eat_ident()?;
+        if self.at(&Token::Eq) {
+            self.advance();
+            let expr = self.parse_expr()?;
+            let lazy = if self.at(&Token::Lazy) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            Ok(Statement::AlterDataset(AlterDatasetStmt {
+                dataset,
+                operation: AlterOp::AddComputedColumn {
+                    name: col_name,
+                    expr: Box::new(expr),
+                    lazy,
+                },
+            }))
+        } else {
+            self.eat(&Token::Colon)?;
+            let col_type = self.parse_col_type()?;
+            let nullable = if self.at(&Token::Question) {
+                self.advance();
+                true
+            } else if self.at(&Token::Not) {
+                self.advance();
+                self.eat(&Token::Nullable)?;
+                false
+            } else if self.at(&Token::Nullable) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let default_val = if self.at_ident("DEFAULT") {
+                self.advance();
+                Some(self.parse_filter_value()?)
+            } else {
+                None
+            };
+            Ok(Statement::AlterDataset(AlterDatasetStmt {
+                dataset,
+                operation: AlterOp::AddColumn(ColumnDef {
+                    name: col_name,
+                    col_type,
+                    nullable,
+                    default_val,
+                }),
+            }))
+        }
     }
 
     // INSERT INTO <dataset> VALUES (v1, v2, ...)
