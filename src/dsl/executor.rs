@@ -149,7 +149,7 @@ pub fn execute_statement(
         // ── Introspection ───────────────────────────────────────────────────
         Statement::Show(s) => execute_show(db, s.target, line_no),
 
-        Statement::Explain(s) => execute_explain(db, s.target, line_no),
+        Statement::Explain(s) => execute_explain(db as &TensorDb, s.target, line_no),
 
         Statement::Audit(s) => {
             let issues = db
@@ -596,6 +596,10 @@ pub fn execute_statement(
             s.name.as_deref(),
             line_no,
         ),
+
+        Statement::ImportCsv(s) => {
+            handlers::persistence::import_csv_typed(db, &s.path, s.name.as_deref(), line_no)
+        }
 
         Statement::Export(s) => handlers::persistence::export_typed(db, &s.name, &s.path, line_no),
 
@@ -1379,8 +1383,8 @@ fn execute_show(
 
 // ─── Explain — typed dispatch ──────────────────────────────────────────────────
 
-fn execute_explain(
-    db: &mut TensorDb,
+pub fn execute_explain(
+    db: &TensorDb,
     target: ExplainTarget,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
@@ -1395,6 +1399,88 @@ fn execute_explain(
                 dataset_name: name,
                 schema,
             }
+        }
+
+        ExplainTarget::DatasetQuery { name: _, from } => {
+            let source_ds = db.get_dataset(&from.source).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let source_schema = source_ds.schema.clone();
+            let mut plan = LogicalPlan::Scan {
+                dataset_name: from.source.clone(),
+                schema: source_schema,
+            };
+            if let Some(f) = from.filter {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: dataset_filter_to_logical(&f),
+                };
+            }
+            if !from.group_by.is_empty() {
+                let group_exprs: Vec<LogicalExpr> = from
+                    .group_by
+                    .iter()
+                    .map(|c| LogicalExpr::Column(c.clone()))
+                    .collect();
+                let aggr_exprs: Vec<LogicalExpr> = from
+                    .select
+                    .as_ref()
+                    .map(|exprs| {
+                        exprs
+                            .iter()
+                            .filter_map(|e| match e {
+                                SelectExpr::Aggregate { func, expr } => {
+                                    Some(LogicalExpr::AggregateExpr {
+                                        func: agg_func_to_logical(func),
+                                        expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                    })
+                                }
+                                SelectExpr::Column(_) => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                plan = LogicalPlan::Aggregate {
+                    input: Box::new(plan),
+                    group_expr: group_exprs,
+                    aggr_expr: aggr_exprs,
+                };
+            } else if let Some(exprs) = from.select {
+                let cols: Vec<String> = exprs
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        SelectExpr::Column(c) => Some(c),
+                        SelectExpr::Aggregate { .. } => None,
+                    })
+                    .collect();
+                if !cols.is_empty() {
+                    plan = LogicalPlan::Project {
+                        input: Box::new(plan),
+                        columns: cols,
+                    };
+                }
+            }
+            if let Some(f) = from.having {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: dataset_filter_to_logical(&f),
+                };
+            }
+            if let Some(ord) = from.order_by {
+                plan = LogicalPlan::Sort {
+                    input: Box::new(plan),
+                    column: ord.column,
+                    ascending: ord.ascending,
+                };
+            }
+            if let Some(n) = from.limit {
+                plan = LogicalPlan::Limit {
+                    input: Box::new(plan),
+                    n,
+                };
+            }
+            plan
         }
 
         ExplainTarget::Search(s) => {
