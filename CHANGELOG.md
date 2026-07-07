@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.21] - 2026-07-06
+
+### Changed — dataset.rs and search.rs ported; parser extended
+
+**Legacy handlers dataset.rs and search.rs fully ported:**
+- Removed all string-based handler functions (`handle_dataset`, `handle_dataset_creation`, `handle_dataset_query`, `handle_select`, `handle_insert`, `handle_deliver`, `handle_materialize`, `handle_add_column`, `handle_search`) — all replaced by typed parser + executor paths
+- `handlers/dataset.rs` retains only `handle_add_tensor_column` (for `.add_column()` method fallback) and `build_select_query_plan` / `build_dataset_query_plan` (still used by `explain.rs`)
+- `handlers/search.rs` retains only `build_search_query_plan` / `build_search_plan_internal` (used by `explain.rs`)
+- Fallback chain in `mod.rs` trimmed: removed SELECT, DATASET, INSERT INTO, SEARCH, MATERIALIZE, ALTER branches
+
+**Parser extensions:**
+- **`INSERT INTO VALUES`**: `parse_insert_value` now handles vector literals `[v1, v2]` and matrix literals `[[r0c0, r0c1], ...]` → new `InsertValue::Vector` / `InsertValue::Matrix` variants; also handles boolean literals `true` / `false` → `InsertValue::Bool`
+- **SEARCH**: `parse_search` rewrote to handle all three syntaxes: `SEARCH ds ON col QUERY [...] LIMIT k [INTO target]`, `SEARCH target FROM source QUERY [...] ON col K=k`, `SEARCH source WHERE col ~= [...] LIMIT k`
+- **Comparison operators in expressions**: `InfixOp` extended with `Eq`, `NotEq`, `Gt`, `Lt`, `GtEq`, `LtEq`; Pratt parser precedence table updated; `dsl_expr_to_logical_expr` and `expr_to_string` handle all six
+- **Integer literals**: `Expr::Int(i64)` variant added to preserve Int vs Float distinction through the expression pipeline; integer literals in computed expressions now produce `Value::Int` results
+- **Aggregate functions in HAVING**: `COUNT(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)` in WHERE/HAVING clauses are parsed as `Expr::Ref("COUNT(col)")`, matching the post-aggregation column names the physical plan emits
+- **`DATASET name ADD COLUMN col = expr [LAZY]`**: new computed-column form; `AlterOp::AddComputedColumn { name, expr, lazy }` added to AST; executor evaluates expression per row and calls `alter_dataset_add_computed_column`
+- **`DATASET name COLUMNS`**: parentheses around column list now optional (both `COLUMNS (a: INT)` and `COLUMNS a: INT` accepted)
+- **`parse_agg_call`**: now parses a full `Expr` inside aggregate calls, enabling `SUM(price * qty)` and other computed aggregate expressions
+- **Column definition**: `nullable` defaults to `false` when no explicit `?` / `NULLABLE` marker — columns without a marker now use type-appropriate zero defaults instead of `Null`
+
+**New AST nodes:**
+- `InsertValue::Bool(bool)`, `InsertValue::Vector(Vec<f64>)`, `InsertValue::Matrix(Vec<Vec<f64>>)`
+- `FilterValue::Bool(bool)`
+- `AlterOp::AddComputedColumn { name: String, expr: Box<Expr>, lazy: bool }`
+- `SelectExpr::Aggregate { expr: Box<Expr> }` — field renamed from `column: String` to `expr: Box<Expr>`
+- `Expr::Int(i64)`
+- `InfixOp::Eq / NotEq / Gt / Lt / GtEq / LtEq`
+
+**New lexer tokens:**
+- `Token::ApproxEq` (`~=`) — for vector similarity WHERE clauses
+- `Token::Question` (`?`) — for nullable column syntax
+
+---
+
 ## [0.1.20] - 2026-07-06
 
 ### Changed — Explain typed, five dead handlers deleted, parser hardened

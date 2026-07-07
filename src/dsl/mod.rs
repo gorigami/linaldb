@@ -237,30 +237,10 @@ pub fn execute_line_with_context(
         return executor::execute_statement(db, stmt, line_no, ctx);
     }
 
-    if line.starts_with("SELECT ") {
-        handlers::dataset::handle_select(db, line, line_no)
-    } else if line.starts_with("DATASET ") {
-        handlers::dataset::handle_dataset(db, line, line_no)
-    } else if line.starts_with("INSERT INTO ") {
-        handlers::dataset::handle_insert(db, line, line_no)
-    } else if line.starts_with("SEARCH ") {
-        handlers::search::handle_search(db, line, line_no)
-    } else if line.starts_with("EXPLAIN ") {
+    if line.starts_with("EXPLAIN ") {
         handlers::explain::handle_explain(db, line, line_no)
-    } else if line.starts_with("MATERIALIZE ") {
-        handlers::dataset::handle_materialize(db, line, line_no)
     } else if line.contains(".add_column(") {
         handlers::dataset::handle_add_tensor_column(db, line, line_no)
-    } else if line.starts_with("ALTER ") {
-        let rest = line.strip_prefix("ALTER ").unwrap();
-        if rest.starts_with("DATASET ") {
-            handlers::dataset::handle_dataset(db, rest, line_no)
-        } else {
-            Err(DslError::Parse {
-                line: line_no,
-                msg: format!("Unsupported ALTER command: {}", line),
-            })
-        }
     } else if line.starts_with("SET ") {
         if line.starts_with("SET DATASET ") {
             handlers::metadata::handle_set_metadata(db, line, line_no)
