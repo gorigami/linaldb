@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
-/// Resolve a user-supplied path to an absolute storage directory.
 fn resolve_persistence_path(db: &TensorDb, path: &str) -> String {
     let path_buf = PathBuf::from(path);
     if path_buf.is_absolute() {
@@ -30,31 +29,16 @@ fn resolve_persistence_path(db: &TensorDb, path: &str) -> String {
     resolved.to_string_lossy().into_owned()
 }
 
-/// Parse `"name [TO \"path\"]"` → `(name, Option<path>)`.
-fn parse_name_with_to(rest: &str) -> (&str, Option<&str>) {
-    if let Some(idx) = rest.find(" TO ") {
-        (
-            rest[..idx].trim(),
-            Some(rest[idx + 4..].trim().trim_matches('"')),
-        )
-    } else {
-        (rest, None)
-    }
+pub fn get_connector_registry() -> ConnectorRegistry {
+    let mut registry = ConnectorRegistry::new();
+    registry.register(Box::new(CsvConnector::new()));
+    registry.register(Box::new(NumpyConnector));
+    registry.register(Box::new(Hdf5Connector));
+    registry.register(Box::new(ZarrConnector));
+    registry
 }
 
-/// Parse `"name [FROM \"path\"]"` → `(name, Option<path>)`.
-fn parse_name_with_from(rest: &str) -> (&str, Option<&str>) {
-    if let Some(idx) = rest.find(" FROM ") {
-        (
-            rest[..idx].trim(),
-            Some(rest[idx + 6..].trim().trim_matches('"')),
-        )
-    } else {
-        (rest, None)
-    }
-}
-
-// ─── Save — typed core ────────────────────────────────────────────────────────
+// ─── Save ─────────────────────────────────────────────────────────────────────
 
 fn save_dataset_core(
     db: &mut TensorDb,
@@ -162,7 +146,7 @@ fn save_tensor_core(
     )))
 }
 
-// ─── Load — typed core ────────────────────────────────────────────────────────
+// ─── Load ─────────────────────────────────────────────────────────────────────
 
 fn load_dataset_core(
     db: &mut TensorDb,
@@ -312,7 +296,7 @@ fn load_tensor_core(
     )))
 }
 
-// ─── List — typed cores ───────────────────────────────────────────────────────
+// ─── List ─────────────────────────────────────────────────────────────────────
 
 fn list_versions_core(
     db: &TensorDb,
@@ -410,7 +394,7 @@ fn list_tensors_core(
     Ok(DslOutput::Message(message))
 }
 
-// ─── Import / Export — typed cores ───────────────────────────────────────────
+// ─── Import / Export ──────────────────────────────────────────────────────────
 
 fn use_dataset_core(
     db: &mut TensorDb,
@@ -558,9 +542,8 @@ fn export_csv_core(
     )))
 }
 
-// ─── Typed public dispatchers (called from executor) ─────────────────────────
+// ─── Typed public API (called from executor) ──────────────────────────────────
 
-/// `SAVE TENSOR/DATASET name [TO path]` — direct typed dispatch from the executor.
 pub fn save_typed(
     db: &mut TensorDb,
     kind: PersistKind,
@@ -574,7 +557,6 @@ pub fn save_typed(
     }
 }
 
-/// `LOAD TENSOR/DATASET name [FROM path]` — direct typed dispatch from the executor.
 pub fn load_typed(
     db: &mut TensorDb,
     kind: PersistKind,
@@ -588,7 +570,6 @@ pub fn load_typed(
     }
 }
 
-/// `LIST TENSORS/DATASETS/DATASET VERSIONS/DATASET PACKAGES` — direct typed dispatch.
 pub fn list_typed(
     db: &TensorDb,
     target: &ListTarget,
@@ -602,7 +583,6 @@ pub fn list_typed(
     }
 }
 
-/// `IMPORT DATASET FROM path [AS name]` or `USE DATASET FROM path [AS name]`.
 pub fn import_typed(
     db: &mut TensorDb,
     ephemeral: bool,
@@ -617,7 +597,6 @@ pub fn import_typed(
     }
 }
 
-/// `EXPORT CSV name TO path` — direct typed dispatch from the executor.
 pub fn export_typed(
     db: &mut TensorDb,
     name: &str,
@@ -627,7 +606,6 @@ pub fn export_typed(
     export_csv_core(db, name, path, line_no)
 }
 
-/// `IMPORT CSV FROM path [AS name]` — typed entry point called from executor.
 pub fn import_csv_typed(
     db: &mut TensorDb,
     path: &str,
@@ -662,218 +640,4 @@ pub fn import_csv_typed(
         "Imported {} rows from '{}' into dataset '{}'",
         row_count, path, final_name
     )))
-}
-
-// ─── String-based wrappers (legacy fallback chain in mod.rs) ─────────────────
-
-/// Handle SAVE command (string-based, for the legacy fallback chain).
-pub fn handle_save(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("SAVE ").unwrap().trim();
-    if rest.starts_with("DATASET ") {
-        let rest = rest.strip_prefix("DATASET ").unwrap().trim();
-        let (name, path) = parse_name_with_to(rest);
-        save_dataset_core(db, name, path, line_no)
-    } else if rest.starts_with("TENSOR ") {
-        let rest = rest.strip_prefix("TENSOR ").unwrap().trim();
-        let (name, path) = parse_name_with_to(rest);
-        save_tensor_core(db, name, path, line_no)
-    } else {
-        Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected 'DATASET' or 'TENSOR' after 'SAVE'".to_string(),
-        })
-    }
-}
-
-/// Handle LOAD command (string-based, for the legacy fallback chain).
-pub fn handle_load(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("LOAD ").unwrap().trim();
-    if rest.starts_with("DATASET ") {
-        let rest = rest.strip_prefix("DATASET ").unwrap().trim();
-        let (name, path) = parse_name_with_from(rest);
-        load_dataset_core(db, name, path, line_no)
-    } else if rest.starts_with("TENSOR ") {
-        let rest = rest.strip_prefix("TENSOR ").unwrap().trim();
-        let (name, path) = parse_name_with_from(rest);
-        load_tensor_core(db, name, path, line_no)
-    } else {
-        Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected 'DATASET' or 'TENSOR' after 'LOAD'".to_string(),
-        })
-    }
-}
-
-/// Handle LIST command (string-based, for the legacy fallback chain).
-pub fn handle_list_datasets(
-    db: &TensorDb,
-    line: &str,
-    line_no: usize,
-) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("LIST ").unwrap().trim();
-    if rest.starts_with("DATASETS") {
-        let rest = rest.strip_prefix("DATASETS").unwrap().trim();
-        let from_path = if rest.starts_with("FROM ") {
-            Some(rest.strip_prefix("FROM ").unwrap().trim().trim_matches('"'))
-        } else {
-            None
-        };
-        list_datasets_core(db, from_path, line_no)
-    } else if rest.starts_with("TENSORS") {
-        let rest = rest.strip_prefix("TENSORS").unwrap().trim();
-        let from_path = if rest.starts_with("FROM ") {
-            Some(rest.strip_prefix("FROM ").unwrap().trim().trim_matches('"'))
-        } else {
-            None
-        };
-        list_tensors_core(db, from_path, line_no)
-    } else if rest.starts_with("DATASET VERSIONS ") {
-        let name = rest.strip_prefix("DATASET VERSIONS ").unwrap().trim();
-        list_versions_core(db, name, line_no)
-    } else {
-        Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected 'DATASETS', 'TENSORS', or 'DATASET VERSIONS' after 'LIST'".to_string(),
-        })
-    }
-}
-
-/// Helper to get a connector registry with default connectors.
-pub fn get_connector_registry() -> ConnectorRegistry {
-    let mut registry = ConnectorRegistry::new();
-    registry.register(Box::new(CsvConnector::new()));
-    registry.register(Box::new(NumpyConnector));
-    registry.register(Box::new(Hdf5Connector));
-    registry.register(Box::new(ZarrConnector));
-    registry
-}
-
-/// Handle USE DATASET FROM command (string-based, for the legacy fallback chain).
-pub fn handle_use_dataset(
-    db: &mut TensorDb,
-    line: &str,
-    line_no: usize,
-) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("USE DATASET FROM ").unwrap().trim();
-    let (path_str, name_override) = if let Some(as_idx) = rest.find(" AS ") {
-        let path = rest[..as_idx].trim().trim_matches('"');
-        let name = rest[as_idx + 4..].trim();
-        (path, Some(name))
-    } else {
-        (rest.trim_matches('"'), None)
-    };
-    use_dataset_core(db, path_str, name_override, line_no)
-}
-
-/// Handle IMPORT DATASET FROM command (string-based, for the legacy fallback chain).
-pub fn handle_import_dataset(
-    db: &mut TensorDb,
-    line: &str,
-    line_no: usize,
-) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("IMPORT DATASET FROM ").unwrap().trim();
-    let (path_str, name_override) = if let Some(as_idx) = rest.find(" AS ") {
-        let path = rest[..as_idx].trim().trim_matches('"');
-        let name = rest[as_idx + 4..].trim();
-        (path, Some(name))
-    } else {
-        (rest.trim_matches('"'), None)
-    };
-    import_dataset_core(db, path_str, name_override, line_no)
-}
-
-/// Handle IMPORT CSV command (Legacy).
-pub fn handle_import_csv(
-    db: &mut TensorDb,
-    line: &str,
-    line_no: usize,
-) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("IMPORT ").unwrap().trim();
-    let rest = rest.strip_prefix("CSV ").unwrap().trim();
-
-    let (path, dataset_name_override) = if rest.starts_with("FROM ") {
-        let rest = rest.strip_prefix("FROM ").unwrap().trim();
-        if let Some(as_idx) = rest.find(" AS ") {
-            let path = rest[..as_idx].trim().trim_matches('"');
-            let name = rest[as_idx + 4..].trim();
-            (path, Some(name))
-        } else {
-            (rest.trim_matches('"'), None)
-        }
-    } else {
-        return Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected 'FROM \"path\"' in IMPORT CSV command".to_string(),
-        });
-    };
-
-    let resolved_path = resolve_persistence_path(db, path);
-    let csv_storage = CsvStorage::new(&resolved_path);
-
-    let dataset = csv_storage
-        .import_dataset(&resolved_path)
-        .map_err(|e| DslError::Parse {
-            line: line_no,
-            msg: format!("Failed to import CSV: {}", e),
-        })?;
-
-    let final_name =
-        dataset_name_override.unwrap_or(dataset.metadata.name.as_deref().unwrap_or("imported_csv"));
-
-    let schema = dataset.schema.clone();
-    db.create_dataset(final_name.to_string(), schema)
-        .map_err(|e| DslError::Engine {
-            line: line_no,
-            source: e,
-        })?;
-
-    let row_count = dataset.len();
-    for row in dataset.rows {
-        db.insert_row(final_name, row)
-            .map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?;
-    }
-
-    Ok(DslOutput::Message(format!(
-        "Imported {} rows from '{}' into dataset '{}'",
-        row_count, path, final_name
-    )))
-}
-
-/// Handle IMPORT command (string-based, for the legacy fallback chain).
-pub fn handle_import(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("IMPORT ").unwrap().trim();
-    if rest.starts_with("CSV ") {
-        handle_import_csv(db, line, line_no)
-    } else if rest.starts_with("DATASET FROM ") {
-        handle_import_dataset(db, line, line_no)
-    } else {
-        Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected 'CSV' or 'DATASET FROM' after 'IMPORT'".to_string(),
-        })
-    }
-}
-
-/// Handle EXPORT CSV command (string-based, for the legacy fallback chain).
-pub fn handle_export(db: &mut TensorDb, line: &str, line_no: usize) -> Result<DslOutput, DslError> {
-    let rest = line.strip_prefix("EXPORT ").unwrap().trim();
-    if !rest.starts_with("CSV ") {
-        return Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected 'CSV' after 'EXPORT'".to_string(),
-        });
-    }
-    let rest = rest.strip_prefix("CSV ").unwrap().trim();
-    let (dataset_name, path) = if let Some(idx) = rest.find(" TO ") {
-        (rest[..idx].trim(), rest[idx + 4..].trim().trim_matches('"'))
-    } else {
-        return Err(DslError::Parse {
-            line: line_no,
-            msg: "Expected 'TO \"path\"' in EXPORT CSV command".to_string(),
-        });
-    };
-    export_csv_core(db, dataset_name, path, line_no)
 }

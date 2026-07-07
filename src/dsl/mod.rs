@@ -2,9 +2,9 @@ pub mod ast;
 pub mod delivery_dsl;
 pub mod error;
 pub mod executor;
-pub mod handlers;
 pub mod lexer;
 pub mod parser;
+pub mod persistence;
 
 pub use error::DslError;
 
@@ -203,7 +203,7 @@ pub fn execute_line_shared(
                 };
             }
             crate::dsl::ast::Statement::List(s) => {
-                return handlers::persistence::list_typed(db, &s.target, line_no);
+                return persistence::list_typed(db, &s.target, line_no);
             }
             _ => {}
         }
@@ -244,16 +244,11 @@ pub fn execute_line_with_context(
         return executor::execute_statement(db, stmt, line_no, ctx);
     }
 
-    // Remaining legacy fallbacks — only syntax the typed parser cannot yet represent.
-    if line.contains(".add_column(") {
-        handlers::dataset::handle_add_tensor_column(db, line, line_no)
-    } else {
-        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
-            return Ok(DslOutput::None);
-        }
-        Err(DslError::Parse {
-            line: line_no,
-            msg: format!("Unknown command: {}", line),
-        })
+    if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+        return Ok(DslOutput::None);
     }
+    Err(DslError::Parse {
+        line: line_no,
+        msg: format!("Unknown command: {}", line),
+    })
 }
