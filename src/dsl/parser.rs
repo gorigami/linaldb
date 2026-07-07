@@ -810,7 +810,7 @@ impl Parser {
         self.eat(&Token::Dot)?;
         let method = self.eat_ident()?;
         if method != "add_column" {
-            return Err(self.error(&format!("Unknown method '{}'", method)));
+            return Err(self.error(format!("Unknown method '{}'", method)));
         }
         self.eat(&Token::LParen)?;
         // Column name: double/single-quoted string or bare ident
