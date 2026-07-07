@@ -129,8 +129,12 @@ fn parse_query_vector(
             use crate::core::tensor::{Shape, Tensor, TensorId, TensorMetadata};
             let id = TensorId::new();
             let metadata = TensorMetadata::new(id, None);
-            Tensor::new(id, Shape::new(vec![data.len()]), data, metadata)
-                .map_err(|e| DslError::Parse { line: line_no, msg: e })
+            Tensor::new(id, Shape::new(vec![data.len()]), data, metadata).map_err(|e| {
+                DslError::Parse {
+                    line: line_no,
+                    msg: e,
+                }
+            })
         }
         _ => Err(DslError::Parse {
             line: line_no,

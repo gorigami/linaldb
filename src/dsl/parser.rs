@@ -810,11 +810,15 @@ impl Parser {
                         let mut row: Vec<f64> = Vec::new();
                         while !self.at(&Token::RBracket) && !self.eof() {
                             row.push(self.eat_number()?);
-                            if self.at(&Token::Comma) { self.advance(); }
+                            if self.at(&Token::Comma) {
+                                self.advance();
+                            }
                         }
                         self.eat(&Token::RBracket)?;
                         rows.push(row);
-                        if self.at(&Token::Comma) { self.advance(); }
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        }
                     }
                     self.eat(&Token::RBracket)?;
                     Ok(InsertValue::Matrix(rows))
@@ -823,13 +827,17 @@ impl Parser {
                     let mut vals: Vec<f64> = Vec::new();
                     while !self.at(&Token::RBracket) && !self.eof() {
                         vals.push(self.eat_number()?);
-                        if self.at(&Token::Comma) { self.advance(); }
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        }
                     }
                     self.eat(&Token::RBracket)?;
                     Ok(InsertValue::Vector(vals))
                 }
             }
-            _ => Err(self.unexpected("a value (number, string, identifier, NULL, or vector/matrix literal)")),
+            _ => Err(self.unexpected(
+                "a value (number, string, identifier, NULL, or vector/matrix literal)",
+            )),
         }
     }
 
@@ -1268,7 +1276,10 @@ impl Parser {
             self.parse_expr()?
         };
         self.eat(&Token::RParen)?;
-        Ok(SelectExpr::Aggregate { func, expr: Box::new(expr) })
+        Ok(SelectExpr::Aggregate {
+            func,
+            expr: Box::new(expr),
+        })
     }
 
     // SEARCH <dataset> ON <column> QUERY <tensor_name|[vector]> LIMIT <k> [INTO <target>]
@@ -1740,10 +1751,16 @@ impl Parser {
         let mut cols = Vec::new();
         loop {
             // Stop at `)` or EOF or a keyword that signals the end of column defs
-            if self.eof() { break; }
-            if has_parens && self.at(&Token::RParen) { break; }
+            if self.eof() {
+                break;
+            }
+            if has_parens && self.at(&Token::RParen) {
+                break;
+            }
             // Without parens, stop when next token is a non-ident (i.e. not a column def start)
-            if !has_parens && !matches!(self.peek(), Some(Token::Ident(_))) { break; }
+            if !has_parens && !matches!(self.peek(), Some(Token::Ident(_))) {
+                break;
+            }
             cols.push(self.parse_column_def()?);
             if self.at(&Token::Comma) {
                 self.advance();

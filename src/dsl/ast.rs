@@ -203,7 +203,11 @@ pub struct AlterDatasetStmt {
 #[derive(Debug, Clone)]
 pub enum AlterOp {
     AddColumn(ColumnDef),
-    AddComputedColumn { name: String, expr: Box<Expr>, lazy: bool },
+    AddComputedColumn {
+        name: String,
+        expr: Box<Expr>,
+        lazy: bool,
+    },
 }
 
 #[derive(Debug, Clone)]

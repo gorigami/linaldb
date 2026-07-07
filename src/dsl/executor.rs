@@ -398,9 +398,9 @@ pub fn execute_statement(
                                     .collect(),
                             ),
                             Some(InsertValue::Bool(b)) => Value::Bool(*b),
-                            Some(InsertValue::TensorRef(_))
-                            | Some(InsertValue::Null)
-                            | None => Value::Null,
+                            Some(InsertValue::TensorRef(_)) | Some(InsertValue::Null) | None => {
+                                Value::Null
+                            }
                         })
                         .collect()
                 }
@@ -1598,7 +1598,10 @@ fn execute_add_computed_column(
     if ds.schema.fields.iter().any(|f| f.name == col_name) {
         return Err(DslError::Parse {
             line: line_no,
-            msg: format!("Column '{}' already exists in dataset '{}'", col_name, dataset),
+            msg: format!(
+                "Column '{}' already exists in dataset '{}'",
+                col_name, dataset
+            ),
         });
     }
 

@@ -638,10 +638,12 @@ pub fn parse_single_value(s: &str, line_no: usize) -> Result<Value, DslError> {
         }
         return Ok(Value::Vector(floats));
     }
-    s.parse::<i64>().map(Value::Int).map_err(|_| DslError::Parse {
-        line: line_no,
-        msg: format!("Invalid value: {}", s),
-    })
+    s.parse::<i64>()
+        .map(Value::Int)
+        .map_err(|_| DslError::Parse {
+            line: line_no,
+            msg: format!("Invalid value: {}", s),
+        })
 }
 
 // Used by explain.rs via `build_dataset_query_plan` — executes the plan and creates the target dataset.
