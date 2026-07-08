@@ -41,12 +41,8 @@ impl Parser {
             let (left_bp, right_bp) = match self.peek() {
                 Some(Token::Or) => (1u8, 2u8),
                 Some(Token::And) => (3, 4),
-                Some(Token::Eq)
-                | Some(Token::NotEq)
-                | Some(Token::Gt)
-                | Some(Token::Lt)
-                | Some(Token::GtEq)
-                | Some(Token::LtEq) => (5, 6),
+                Some(Token::Eq) | Some(Token::NotEq) | Some(Token::Gt) | Some(Token::Lt)
+                | Some(Token::GtEq) | Some(Token::LtEq) => (5, 6),
                 Some(Token::Plus) | Some(Token::Minus) => (7, 8),
                 Some(Token::Star) | Some(Token::Slash) => (9, 10),
                 _ => break,

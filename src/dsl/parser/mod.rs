@@ -1330,8 +1330,7 @@ mod tests {
 
     #[test]
     fn select_where_compound_three_and() {
-        let stmt =
-            parse_ok("SELECT * FROM t WHERE a > 1 AND b > 2 AND c > 3");
+        let stmt = parse_ok("SELECT * FROM t WHERE a > 1 AND b > 2 AND c > 3");
         let Statement::Select(s) = stmt else {
             panic!("expected Select")
         };
