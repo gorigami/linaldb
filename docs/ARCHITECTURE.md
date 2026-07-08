@@ -50,7 +50,7 @@ The engine is built in Rust with a modular architecture that separates concerns 
         │  └───────────┘  └───────┬────────┘  │
         │  ┌────────────────────────────────┐ │
         │  │  Executor (typed AST → engine) │ │
-        │  │  Legacy handlers  (fallback)   │ │
+        │  │  (zero string round-trips)     │ │
         │  └────────────────────────────────┘ │
         └──────────────────┬──────────────────┘
                            │
@@ -229,73 +229,43 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 - `CreateDatabaseStmt.if_not_exists` / `DropDatabaseStmt.if_exists` — boolean flags enabling idempotent DDL (`CREATE DATABASE IF NOT EXISTS`, `DROP DATABASE IF EXISTS`)
 - `IndexKindAst::Vector` — variant added for `CREATE VECTOR INDEX`; previously absent, causing all vector index creation to fall through to the legacy handler
 
-#### `parser.rs` — Recursive-Descent + Pratt Parser
+#### `parser/` — Recursive-Descent + Pratt Parser (sub-module directory, v0.1.25)
 
-- `parse(source) -> Result<Statement, ParseError>` — main entry point
-- One `parse_*` function per statement type; dispatches on first token
-- Pratt parser for the expression sub-language with correct infix precedence (`*`/`/` > `+`/`-`) and postfix `.field` / `[...]` binding
+Split from a single 2581-line `parser.rs` into five focused files. All files share the same `impl Parser` block pattern — Rust allows multiple `impl` blocks per type across files within a module.
+
+- **`parser/mod.rs`** — `Parser` struct, all cursor/consuming primitives (`peek`, `eat`, `eat_ident`, etc.), `parse_statement` dispatch, small statement parsers (`parse_define_tensor`, `parse_let`, `parse_create`, `parse_drop`, etc.), full test suite (58 tests)
+- **`parser/dataset.rs`** — `parse_create_dataset`, `parse_dataset_from_clause`, `parse_select`, `parse_alter`, `parse_insert_into`, `parse_search`, `parse_materialize`, and related helpers (`parse_cmp_op`, `parse_filter_value`, `parse_agg_call`, `parse_select_expr`)
+- **`parser/expr.rs`** — `parse_expr`, `parse_pratt` (Pratt precedence climber), `parse_expr_atom`, `parse_call_expr`, `parse_simple_expr`, `can_start_simple_expr`
+- **`parser/introspection.rs`** — `parse_show`, `parse_explain`, `parse_audit`, `parse_deliver`
+- **`parser/persistence.rs`** — `parse_save`, `parse_load`, `parse_list`, `parse_import`, `parse_export`, `parse_use`
+
+Public API (unchanged): `parse(source) -> Result<Statement, ParseError>` — entry point in `mod.rs`.
+
+Key properties:
+- Pratt parser for the expression sub-language with correct infix precedence (`*`/`/` > `+`/`-` > comparisons) and postfix `.field` / `[...]` binding
 - `ParseError { offset: usize, msg: String }` with `into_dsl_error(line)` for integration
-- **Hardened forms (v0.1.20)**:
-  - `CREATE DATABASE IF NOT EXISTS <name>` — `IF`/`NOT`/`EXISTS` tokens consumed in `parse_create()`
-  - `DROP DATABASE IF EXISTS <name>` — same pattern in `parse_drop()`
-  - `CREATE VECTOR INDEX` — fixed from broken `Token::Ident("VECTOR")` guard (never fired) to correct `Token::Vector` match arm
-  - `RESET SESSION` — optional `SESSION` ident consumed in `parse_reset()` before falling through to `Token::Reset` handling
-  - `AUDIT DATASET <name>` — optional `Token::Dataset` consumed in `parse_audit()` so both `AUDIT ds` and `AUDIT DATASET ds` parse cleanly
-  - `USE/IMPORT DATASET FROM "path" AS <alias>` — optional `AS <name>` clause added to `parse_use()` and `parse_import()`, enabling named ephemeral and persistent imports
-- **Extended forms (v0.1.21)**:
-  - `INSERT INTO VALUES` — `parse_insert_value` handles vector `[v1,v2]` / matrix `[[r0c0,…],…]` / boolean `true|false` literals; `InsertRow::Positional` stores them in new `InsertValue::Vector / Matrix / Bool` variants
-  - `SEARCH` — all three syntax forms handled: `ON col QUERY [...] LIMIT k [INTO target]`, `target FROM source QUERY [...] ON col K=k`, `source WHERE col ~= [...] LIMIT k`
-  - `DATASET name ADD COLUMN col = expr [LAZY]` — computed-column form; parsed into `AlterOp::AddComputedColumn { name, expr, lazy }`; executor evaluates per-row via `eval_row_expr`
-  - `DATASET name COLUMNS col: TYPE …` — parentheses around column list now optional
-  - `DEFAULT <bool>` / `INSERT … true|false` — `FilterValue::Bool` and `InsertValue::Bool` added; `parse_filter_value` handles `true`/`false` idents
-  - **Comparison operators in expressions**: `InfixOp` extended with `Eq / NotEq / Gt / Lt / GtEq / LtEq`; Pratt parser precedence set below arithmetic; `dsl_expr_to_logical_expr` emits `LogicalExpr::BinaryExpr` with correct op strings
-  - **Aggregate functions in WHERE/HAVING**: `COUNT(col)`, `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)` in expression context parsed as `Expr::Ref("FUNC(col)")` — matching post-aggregation column names
-  - **`Expr::Int(i64)`**: integer literals now distinguished from float literals through the full expression pipeline; eliminates Int→Float promotion in computed expressions
-  - **`parse_agg_call`**: now parses a full `Expr` inside aggregate calls, enabling `SUM(price * qty)` and other computed aggregate expressions
+- All statement forms from v0.1.20–v0.1.21 (hardened `IF NOT EXISTS`, SEARCH, computed columns, `Expr::Int`, aggregate expressions) preserved unchanged
 
-#### `executor.rs` — Typed Dispatch Layer
+#### `executor/` — Typed Dispatch Layer (sub-module directory, v0.1.25)
 
-- `execute_statement(db, stmt, line_no, ctx)` — single `match` on `Statement`, routes every variant directly to the engine API; **zero string round-trips** in the typed path as of v0.1.21 (all 27+ variants)
-- `execute_show(db, ShowTarget, line_no)` — private function that matches on the `ShowTarget` enum and calls engine APIs directly (no string reconstruction)
-- `execute_explain(db, ExplainTarget, line_no)` — private function that builds a `LogicalPlan` directly from the typed `ExplainTarget` (Dataset/Search/Select) and runs it through the `Planner`; produces a formatted logical + physical plan string with zero string reconstruction
-- `execute_add_computed_column()` — evaluates a DSL `Expr` per row via `eval_row_expr` to compute derived column values; infers the value type from the first row; calls `alter_dataset_add_computed_column` with `lazy=true/false`
-- `eval_row_expr()` — pure per-row evaluator: walks `Expr::Infix` trees with column lookup from a `HashMap<&str, &Value>`, returning `Value`; handles Int/Float promotion correctly for mixed arithmetic
-- `eval_expr_to_name()` — recursive `Expr` → engine call evaluator; generates temporary tensor names via an atomic counter for sub-expressions
-- `eval_call()` — maps all 18 `CallExpr` variants to `eval_binary` / `eval_unary` / `eval_matmul` / etc., with lazy/eager branching
-- `col_type_to_value_type()` — converts `ColType` → `ValueType` without a string round-trip
-- `dsl_expr_to_logical_expr()` — converts `ast::Expr` → `query::logical::Expr` for WHERE/HAVING clauses; handles all `InfixOp` variants including comparison operators (`>`, `<`, `=`, etc.); `Expr::Int` → `Value::Int` (preserves integer type)
-- `dataset_filter_to_logical()` — converts `DatasetFilter` → `query::logical::Expr` for FILTER/HAVING in `DATASET … FROM` queries
-- `expr_to_string()` — converts `Expr` back to DSL text; dead code in the main statement path (used only for tracing/debug)
+Split from a single 2014-line `executor.rs` into five focused files, each with a single responsibility.
+
+- **`executor/mod.rs`** — `execute_statement` (single `match` on `Statement`, all 27+ variants; zero string round-trips); `to_engine_kind`, `col_type_to_value_type` (small helpers); Search and InsertInto arms remain inline
+- **`executor/eval.rs`** — `eval_let` (entry point for Let/Derive arms); `eval_expr_to_name` (recursive `Expr` → engine call, generates temp names via atomic counter); `eval_call` (maps all 18 `CallExpr` variants to engine ops); `apply_index` (subscript operations); `fresh_temp`; `infix_to_binary_op`; `expr_to_string` (debug/tracing only)
+- **`executor/show.rs`** — `execute_show` (all `ShowTarget` variants; calls engine APIs directly); `format_lineage_tree` (private)
+- **`executor/explain.rs`** — `execute_explain`; builds `LogicalPlan` directly from typed `ExplainTarget` (Dataset/Search/Select) through the `Planner`; reuses shared helpers from `query.rs` via `use super::query::...` to avoid duplication
+- **`executor/query.rs`** — `execute_select`, `execute_create_dataset_from`, `execute_add_computed_column`; shared logical-plan helpers (`agg_func_to_logical`, `dataset_filter_to_logical`, `dsl_expr_to_logical_expr`); `eval_row_expr` (pure per-row evaluator for computed columns, walks `Expr::Infix` with column lookup)
 
 #### `mod.rs` — Dispatch Entry Point
 
-- **`execute_line_with_context()`**: tries `parser::parse` first; on success dispatches through `execute_statement`; on parse error falls through to the legacy `if/else if starts_with()` chain
+- **`execute_line_with_context()`**: calls `parser::parse`, then dispatches through `execute_statement`; all 27+ `Statement` variants are handled in the typed path — no string fallback remains
 - **`execute_line()`**: convenience wrapper (no context)
 - **`execute_script()`**: multi-line runner with paren-balance tracking
 - **`DslOutput`**: structured output enum (`None`, `Message`, `Table`, `TensorTable`, `Tensor`, `LazyTensor`)
 
-#### `handlers/`
+#### ~~`handlers/`~~ — Deleted (v0.1.23)
 
-Minimal handler files retained for plan-building helpers used by `explain.rs`, and a single legacy fallback for non-standard syntax. All `Statement` variants dispatch exclusively through the typed executor:
-
-- **dataset.rs**: `build_dataset_query_plan` / `build_select_query_plan` — used by `explain.rs` for legacy multi-clause EXPLAIN forms; `handle_add_tensor_column` — retained for `.add_column("col", var)` method-call syntax (no typed AST equivalent)
-- **explain.rs**: Legacy `EXPLAIN` fallback — handles old multi-clause forms like `EXPLAIN DATASET x FROM y FILTER …`; real plan-building logic lives in `build_dataset_query_plan`, `build_select_query_plan`, `build_search_query_plan`; typed EXPLAIN forms use `execute_explain()` in the executor
-- **persistence.rs**: `save_typed`, `load_typed`, `list_typed`, `import_typed`, `export_typed` — typed entry points called from the executor
-- **search.rs**: `build_search_query_plan` / `build_search_plan_internal` — used by `explain.rs`
-- **metadata.rs**: `set_metadata_typed` — typed entry point; `handle_set_metadata` parses the string and delegates
-
-The following handlers were **deleted** (fully superseded by the typed executor):
-
-- ~~**tensor.rs**~~: DEFINE, VECTOR, MATRIX
-- ~~**operations.rs**~~: LET, binary/unary operations
-- ~~**semantics.rs**~~: BIND, ATTACH, DERIVE
-- ~~**audit.rs**~~: AUDIT DATASET (now calls `db.verify_tensor_dataset()` directly)
-- ~~**session.rs**~~: RESET (now calls `db.reset_session()` directly)
-- ~~**index.rs**~~: CREATE INDEX (now calls `db.create_index()` / `db.create_vector_index()` directly)
-- ~~**instance.rs**~~: CREATE DATABASE, USE, DROP DATABASE (now calls engine methods directly)
-- ~~**introspection.rs**~~: SHOW (now handled by `executor::execute_show`)
-- ~~**dataset.rs `handle_*`**~~: SELECT, INSERT, DATASET queries, MATERIALIZE, ADD COLUMN (all ported to typed path as of v0.1.21)
-- ~~**search.rs `handle_search`**~~: all three SEARCH syntax forms now parsed and dispatched by the typed executor
+The `handlers/` directory was fully eliminated in v0.1.23. All logic was either ported to the typed executor or discarded (string-based wrappers with no live callers). The typed executor (`executor/`) is now the sole dispatch layer with zero string round-trips across all 27+ `Statement` variants.
 
 #### `error.rs`
 
@@ -362,7 +332,7 @@ DSL source
   → executor::execute_statement()  — typed match, calls engine API directly
 ```
 
-If `parser::parse()` returns an error (unrecognized syntax), `execute_line_with_context` falls through to the legacy `if/else if starts_with()` chain for backward compatibility.
+All 27+ `Statement` variants are handled in the typed path — `execute_line_with_context` contains no string fallback.
 
 Example: `SELECT * FROM users WHERE id > 10`
 
@@ -772,7 +742,7 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 |-----------|----------------|-----------|
 | `Tensor` / `Shape` | **Semantic Core** | Frozen (v1) |
 | `ReferenceGraph` (TF Datasets) | **Semantic Core** | Frozen (v1) |
-| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.21) |
+| `DslParser` / `Lexer` / `Executor` | **Semantic Core** | Stable (v0.1.25) |
 | `SimdBackend` (NEON/AVX) | **Engine Extension** | Evolving |
 | `ParquetPersistence` | **Engine Extension** | Evolving |
 | `HttpServer` / `REST API` | **Application Layer** | Flexible |
