@@ -36,18 +36,15 @@ impl Parser {
                 _ => {}
             }
 
-            // Infix operators with precedence (comparison < arithmetic)
-            let (left_bp, right_bp, op) = match self.peek() {
-                Some(Token::Eq) => (0u8, 1u8, InfixOp::Eq),
-                Some(Token::NotEq) => (0, 1, InfixOp::NotEq),
-                Some(Token::Gt) => (0, 1, InfixOp::Gt),
-                Some(Token::Lt) => (0, 1, InfixOp::Lt),
-                Some(Token::GtEq) => (0, 1, InfixOp::GtEq),
-                Some(Token::LtEq) => (0, 1, InfixOp::LtEq),
-                Some(Token::Plus) => (2u8, 3u8, InfixOp::Add),
-                Some(Token::Minus) => (2, 3, InfixOp::Subtract),
-                Some(Token::Star) => (4, 5, InfixOp::Multiply),
-                Some(Token::Slash) => (4, 5, InfixOp::Divide),
+            // Infix operators with precedence (lowest → highest):
+            // OR(1) < AND(3) < comparison(5) < +/-(7) < *//,(9)
+            let (left_bp, right_bp) = match self.peek() {
+                Some(Token::Or) => (1u8, 2u8),
+                Some(Token::And) => (3, 4),
+                Some(Token::Eq) | Some(Token::NotEq) | Some(Token::Gt) | Some(Token::Lt)
+                | Some(Token::GtEq) | Some(Token::LtEq) => (5, 6),
+                Some(Token::Plus) | Some(Token::Minus) => (7, 8),
+                Some(Token::Star) | Some(Token::Slash) => (9, 10),
                 _ => break,
             };
 
@@ -55,12 +52,38 @@ impl Parser {
                 break;
             }
 
-            self.advance();
-            let rhs = self.parse_pratt(right_bp)?;
-            lhs = Expr::Infix {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            let tok = self.advance();
+            match tok {
+                Some(Token::Or) => {
+                    let rhs = self.parse_pratt(right_bp)?;
+                    lhs = Expr::Or(Box::new(lhs), Box::new(rhs));
+                }
+                Some(Token::And) => {
+                    let rhs = self.parse_pratt(right_bp)?;
+                    lhs = Expr::And(Box::new(lhs), Box::new(rhs));
+                }
+                Some(tok) => {
+                    let op = match &tok {
+                        Token::Eq => InfixOp::Eq,
+                        Token::NotEq => InfixOp::NotEq,
+                        Token::Gt => InfixOp::Gt,
+                        Token::Lt => InfixOp::Lt,
+                        Token::GtEq => InfixOp::GtEq,
+                        Token::LtEq => InfixOp::LtEq,
+                        Token::Plus => InfixOp::Add,
+                        Token::Minus => InfixOp::Subtract,
+                        Token::Star => InfixOp::Multiply,
+                        Token::Slash => InfixOp::Divide,
+                        _ => unreachable!(),
+                    };
+                    let rhs = self.parse_pratt(right_bp)?;
+                    lhs = Expr::Infix {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    };
+                }
+                None => break,
             };
         }
 
@@ -86,7 +109,7 @@ impl Parser {
             }
             Some(Token::Minus) => {
                 self.advance();
-                let inner = self.parse_pratt(5)?;
+                let inner = self.parse_pratt(11)?;
                 return Ok(match inner {
                     Expr::Int(n) => Expr::Int(-n),
                     Expr::Scalar(n) => Expr::Scalar(-n),
@@ -95,6 +118,11 @@ impl Parser {
                         factor: -1.0,
                     }),
                 });
+            }
+            Some(Token::Not) => {
+                self.advance();
+                let inner = self.parse_pratt(11)?;
+                return Ok(Expr::Not(Box::new(inner)));
             }
             Some(Token::LParen) => {
                 self.advance();

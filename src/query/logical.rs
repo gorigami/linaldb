@@ -20,6 +20,8 @@ pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     /// Logical OR of two predicates
     Or(Box<Expr>, Box<Expr>),
+    /// Logical NOT of a predicate
+    Not(Box<Expr>),
     /// Aggregation function
     AggregateExpr {
         func: AggregateFunction,
@@ -170,7 +172,7 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                 _ => ValueType::Int,
             }
         }
-        Expr::And(_, _) | Expr::Or(_, _) => ValueType::Bool,
+        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) => ValueType::Bool,
         Expr::AggregateExpr { .. } => ValueType::Int,
     }
 }

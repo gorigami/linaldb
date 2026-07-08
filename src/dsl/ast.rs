@@ -519,6 +519,12 @@ pub enum Expr {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
+    /// Logical AND: `a > 5 AND b < 10`
+    And(Box<Expr>, Box<Expr>),
+    /// Logical OR: `a = 1 OR b = 2`
+    Or(Box<Expr>, Box<Expr>),
+    /// Logical NOT: `NOT active`
+    Not(Box<Expr>),
     /// Prefix named operation: `ADD a b`, `CORRELATE a WITH b`
     Call(CallExpr),
     /// Subscript: `t[0, 1]`, `t[0:5, *]`
