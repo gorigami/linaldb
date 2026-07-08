@@ -35,7 +35,7 @@ Parse error at line 3, offset 14: expected `=`, found identifier `FROM`
 - **Example**: `DEFINE t AS TENSOR(2,2) VALUES [...]` (old paren syntax; use brackets: `TENSOR [2, 2]`)
 - **Fix**: Refer to [DSL_REFERENCE.md](DSL_REFERENCE.md) for correct syntax and type keywords.
 
-If the new parser does not recognize a command, the engine falls back to the legacy string-dispatch chain before raising an error.
+As of v0.1.24 all 27+ statement variants are handled in the typed pipeline — there is no legacy string-dispatch fallback. An unrecognized command returns a `ParseError` directly.
 
 ### Engine Error (from DSL)
 

@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.25] - 2026-07-08
+
+### Changed — executor and parser split into sub-module directories
+
+**`src/dsl/executor/` (was `executor.rs`, 2014 lines):**
+- `mod.rs` — `execute_statement` dispatch, `to_engine_kind`, `col_type_to_value_type`; Search and InsertInto arms remain inline
+- `eval.rs` — `eval_let`, `eval_expr_to_name`, `eval_call`, `apply_index`, `fresh_temp`, `expr_to_string`, `infix_to_binary_op`
+- `show.rs` — `execute_show` (all ShowTarget variants), `format_lineage_tree`
+- `explain.rs` — `execute_explain`; reuses shared helpers from `query.rs` via `use super::query::...`
+- `query.rs` — `execute_select`, `execute_create_dataset_from`, `execute_add_computed_column`, plus shared logical-plan helpers (`agg_func_to_logical`, `dataset_filter_to_logical`, `dsl_expr_to_logical_expr`)
+
+**`src/dsl/parser/` (was `parser.rs`, 2581 lines):**
+- `mod.rs` — `Parser` struct, all cursor/consuming primitives, `parse_statement` dispatch, small statement parsers, full test suite (58 tests)
+- `dataset.rs` — `parse_create_dataset`, `parse_dataset_from_clause`, `parse_select`, `parse_alter`, `parse_insert_into`, `parse_search`, and related helpers
+- `expr.rs` — `parse_expr`, `parse_pratt` (Pratt parser), `parse_expr_atom`, `parse_call_expr`, `parse_simple_expr`
+- `introspection.rs` — `parse_show`, `parse_explain`, `parse_audit`, `parse_deliver`
+- `persistence.rs` — `parse_save`, `parse_load`, `parse_list`, `parse_import`, `parse_export`, `parse_use`
+
+No behavioral changes; all 108+ tests pass.
+
+---
+
 ## [0.1.24] - 2026-07-07
 
 ### Changed — DELIVER ported to typed pipeline; delivery_dsl.rs deleted
