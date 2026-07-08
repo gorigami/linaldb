@@ -12,7 +12,7 @@ impl Parser {
         let mut lhs = self.parse_expr_atom()?;
 
         loop {
-            // Postfix: field access and subscript — always bind tighter than infix
+            // Postfix: field access, subscript, IS NULL / IS NOT NULL
             match self.peek() {
                 Some(Token::Dot) => {
                     self.advance();
@@ -31,6 +31,18 @@ impl Parser {
                         base: Box::new(lhs),
                         indices,
                     };
+                    continue;
+                }
+                Some(Token::Is) => {
+                    self.advance();
+                    if self.at(&Token::Not) {
+                        self.advance();
+                        self.eat(&Token::Null)?;
+                        lhs = Expr::IsNotNull(Box::new(lhs));
+                    } else {
+                        self.eat(&Token::Null)?;
+                        lhs = Expr::IsNull(Box::new(lhs));
+                    }
                     continue;
                 }
                 _ => {}

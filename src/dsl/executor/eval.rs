@@ -102,10 +102,12 @@ fn eval_expr_to_name(
             Ok(desired_name.to_string())
         }
 
-        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) => Err(DslError::Parse {
-            line: line_no,
-            msg: "AND/OR/NOT are not valid tensor expressions".into(),
-        }),
+        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) | Expr::IsNull(_) | Expr::IsNotNull(_) => {
+            Err(DslError::Parse {
+                line: line_no,
+                msg: "boolean predicates are not valid tensor expressions".into(),
+            })
+        }
     }
 }
 
@@ -367,6 +369,8 @@ pub fn expr_to_string(expr: &Expr) -> String {
         Expr::And(l, r) => format!("({} AND {})", expr_to_string(l), expr_to_string(r)),
         Expr::Or(l, r) => format!("({} OR {})", expr_to_string(l), expr_to_string(r)),
         Expr::Not(inner) => format!("(NOT {})", expr_to_string(inner)),
+        Expr::IsNull(inner) => format!("({} IS NULL)", expr_to_string(inner)),
+        Expr::IsNotNull(inner) => format!("({} IS NOT NULL)", expr_to_string(inner)),
     }
 }
 

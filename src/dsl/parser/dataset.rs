@@ -431,6 +431,15 @@ impl Parser {
         self.eat(&Token::From)?;
         let dataset = self.eat_ident()?;
 
+        // Parse zero or more JOIN clauses
+        let mut joins = Vec::new();
+        while matches!(
+            self.peek(),
+            Some(Token::Join) | Some(Token::Inner) | Some(Token::Left)
+        ) {
+            joins.push(self.parse_join_clause()?);
+        }
+
         let mut filter = None;
         let mut group_by = Vec::new();
         let mut having = None;
@@ -480,6 +489,7 @@ impl Parser {
 
         Ok(Statement::Select(SelectStmt {
             dataset,
+            joins,
             columns,
             filter,
             group_by,
@@ -487,6 +497,97 @@ impl Parser {
             order_by,
             limit,
         }))
+    }
+
+    // [INNER | LEFT] JOIN <dataset> ON <col> = <col>
+    fn parse_join_clause(&mut self) -> Result<JoinClause, ParseError> {
+        let kind = if self.at(&Token::Left) {
+            self.advance();
+            self.eat(&Token::Join)?;
+            JoinKind::Left
+        } else {
+            if self.at(&Token::Inner) {
+                self.advance();
+            }
+            self.eat(&Token::Join)?;
+            JoinKind::Inner
+        };
+
+        let right_dataset = self.eat_ident()?;
+        self.eat(&Token::On)?;
+
+        // ON <left_ref> = <right_ref>
+        // Each ref is either `col` or `table.col`
+        let left_col = self.parse_join_col_ref()?;
+        self.eat(&Token::Eq)?;
+        let right_col = self.parse_join_col_ref()?;
+
+        Ok(JoinClause {
+            kind,
+            dataset: right_dataset,
+            left_col,
+            right_col,
+        })
+    }
+
+    // Parse `col` or `table.col`, returning only the column part.
+    fn parse_join_col_ref(&mut self) -> Result<String, ParseError> {
+        let first = self.eat_ident()?;
+        if self.at(&Token::Dot) {
+            self.advance();
+            Ok(self.eat_ident()?)
+        } else {
+            Ok(first)
+        }
+    }
+
+    // UPDATE <dataset> SET col = expr [, col = expr]* [WHERE expr]
+    pub(super) fn parse_update(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::Update)?;
+        let dataset = self.eat_ident()?;
+        self.eat(&Token::Set)?;
+
+        let mut assignments = Vec::new();
+        loop {
+            let col = self.eat_ident()?;
+            self.eat(&Token::Eq)?;
+            let expr = self.parse_expr()?;
+            assignments.push((col, expr));
+            if self.at(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        let filter = if matches!(self.peek(), Some(Token::Where) | Some(Token::Filter)) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        Ok(Statement::Update(UpdateStmt {
+            dataset,
+            assignments,
+            filter,
+        }))
+    }
+
+    // DELETE FROM <dataset> [WHERE expr]
+    pub(super) fn parse_delete(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::Delete)?;
+        self.eat(&Token::From)?;
+        let dataset = self.eat_ident()?;
+
+        let filter = if matches!(self.peek(), Some(Token::Where) | Some(Token::Filter)) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        Ok(Statement::Delete(DeleteStmt { dataset, filter }))
     }
 
     // MATERIALIZE <name> | MATERIALIZE <dataset>.<column>
@@ -563,7 +664,7 @@ impl Parser {
             } else {
                 SearchQuery::TensorRef(self.eat_ident()?)
             };
-            if !self.at_ident("ON") {
+            if !self.at(&Token::On) {
                 return Err(self.error("Expected ON after query vector in SEARCH ... FROM"));
             }
             self.advance();
@@ -595,7 +696,7 @@ impl Parser {
             }))
         } else {
             // Modern syntax: SEARCH dataset ON col QUERY [...|name] LIMIT k [INTO target]
-            if !self.at_ident("ON") {
+            if !self.at(&Token::On) {
                 return Err(self.error("Expected FROM, ON, or WHERE after dataset name in SEARCH"));
             }
             self.advance();

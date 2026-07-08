@@ -687,6 +687,123 @@ pub fn evaluate_expression(
                 _ => Value::Null,
             }
         }
+        crate::query::logical::Expr::Not(inner) => match evaluate_expression(inner, row) {
+            Value::Bool(b) => Value::Bool(!b),
+            _ => Value::Null,
+        },
+        crate::query::logical::Expr::IsNull(inner) => match evaluate_expression(inner, row) {
+            Value::Null => Value::Bool(true),
+            _ => Value::Bool(false),
+        },
+        crate::query::logical::Expr::IsNotNull(inner) => match evaluate_expression(inner, row) {
+            Value::Null => Value::Bool(false),
+            _ => Value::Bool(true),
+        },
         _ => Value::Null,
     }
+}
+
+/// Nested-loop join executor — INNER or LEFT join on an equi-condition.
+#[derive(Debug)]
+pub struct NestedLoopJoinExec {
+    pub left: Box<dyn PhysicalPlan>,
+    pub right: Box<dyn PhysicalPlan>,
+    pub left_col: String,
+    pub right_col: String,
+    pub join_type: crate::query::logical::JoinType,
+    pub output_schema: Arc<Schema>,
+}
+
+impl PhysicalPlan for NestedLoopJoinExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.output_schema.clone()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        use crate::query::logical::JoinType;
+        let left_rows = self.left.execute(db)?;
+        let right_rows = self.right.execute(db)?;
+        let out_schema = self.output_schema.clone();
+
+        let left_schema = self.left.schema();
+        let right_schema = self.right.schema();
+        let left_col_idx = left_schema.get_field_index(&self.left_col).ok_or_else(|| {
+            EngineError::InvalidOp(format!(
+                "Join column '{}' not found in left dataset",
+                self.left_col
+            ))
+        })?;
+        let right_col_idx = right_schema
+            .get_field_index(&self.right_col)
+            .ok_or_else(|| {
+                EngineError::InvalidOp(format!(
+                    "Join column '{}' not found in right dataset",
+                    self.right_col
+                ))
+            })?;
+
+        // Build a simple hash map from right join-key → list of right rows
+        use std::collections::HashMap;
+        let mut right_map: HashMap<String, Vec<&Tuple>> = HashMap::new();
+        for row in &right_rows {
+            let key = format!("{:?}", row.values[right_col_idx]);
+            right_map.entry(key).or_default().push(row);
+        }
+
+        let right_null_values: Vec<crate::core::value::Value> = right_schema
+            .fields
+            .iter()
+            .map(|_| crate::core::value::Value::Null)
+            .collect();
+
+        let mut output = Vec::new();
+        for left_row in &left_rows {
+            let key = format!("{:?}", left_row.values[left_col_idx]);
+            let matches = right_map.get(&key);
+
+            match matches {
+                Some(right_matches) => {
+                    for right_row in right_matches {
+                        let combined =
+                            merge_row_values(left_row, right_row, &left_schema, &right_schema);
+                        output.push(
+                            Tuple::new(out_schema.clone(), combined)
+                                .map_err(EngineError::InvalidOp)?,
+                        );
+                    }
+                }
+                None if self.join_type == JoinType::Left => {
+                    // Emit left row with NULLs for right columns
+                    let mut combined = left_row.values.clone();
+                    combined.extend_from_slice(&right_null_values);
+                    output.push(
+                        Tuple::new(out_schema.clone(), combined).map_err(EngineError::InvalidOp)?,
+                    );
+                }
+                None => {} // INNER JOIN: skip unmatched left rows
+            }
+        }
+
+        Ok(output)
+    }
+}
+
+fn merge_row_values(
+    left: &Tuple,
+    right: &Tuple,
+    left_schema: &Schema,
+    right_schema: &Schema,
+) -> Vec<crate::core::value::Value> {
+    let left_names: std::collections::HashSet<&str> =
+        left_schema.fields.iter().map(|f| f.name.as_str()).collect();
+    let mut values = left.values.clone();
+    for (field, val) in right_schema.fields.iter().zip(right.values.iter()) {
+        // Use the same collision-renaming logic as the logical schema
+        if left_names.contains(field.name.as_str()) {
+            values.push(val.clone()); // renamed in schema as `r_<col>`
+        } else {
+            values.push(val.clone());
+        }
+    }
+    values
 }

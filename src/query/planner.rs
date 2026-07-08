@@ -2,8 +2,8 @@ use crate::core::tuple::Schema;
 use crate::engine::{EngineError, TensorDb};
 use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
-    AggregateExec, FilterExec, IndexScanExec, LimitExec, PhysicalPlan, ProjectionExec, SeqScanExec,
-    SortExec, VectorSearchExec,
+    AggregateExec, FilterExec, IndexScanExec, LimitExec, NestedLoopJoinExec, PhysicalPlan,
+    ProjectionExec, SeqScanExec, SortExec, VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -149,12 +149,31 @@ impl<'a> Planner<'a> {
                 aggr_expr,
             } => {
                 let input_plan = self.create_physical_plan(input)?;
-                let schema = logical_plan.schema(); // Get helper schema
+                let schema = logical_plan.schema();
                 Ok(Box::new(AggregateExec {
                     input: input_plan,
                     group_expr: group_expr.clone(),
                     aggr_expr: aggr_expr.clone(),
                     schema,
+                }))
+            }
+            LogicalPlan::Join {
+                left,
+                right,
+                left_col,
+                right_col,
+                join_type,
+            } => {
+                let left_plan = self.create_physical_plan(left)?;
+                let right_plan = self.create_physical_plan(right)?;
+                let output_schema = logical_plan.schema();
+                Ok(Box::new(NestedLoopJoinExec {
+                    left: left_plan,
+                    right: right_plan,
+                    left_col: left_col.clone(),
+                    right_col: right_col.clone(),
+                    join_type: *join_type,
+                    output_schema,
                 }))
             }
         }
@@ -193,11 +212,24 @@ impl<'a> Planner<'a> {
     }
 }
 
+/// Public entry point for evaluating a logical predicate against a row.
+pub fn evaluate_predicate(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
+    evaluate_expr(expr, row)
+}
+
 fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
     match expr {
         Expr::And(left, right) => evaluate_expr(left, row) && evaluate_expr(right, row),
         Expr::Or(left, right) => evaluate_expr(left, row) || evaluate_expr(right, row),
         Expr::Not(inner) => !evaluate_expr(inner, row),
+        Expr::IsNull(inner) => matches!(
+            eval_value(inner, row),
+            Some(crate::core::value::Value::Null) | None
+        ),
+        Expr::IsNotNull(inner) => !matches!(
+            eval_value(inner, row),
+            Some(crate::core::value::Value::Null) | None
+        ),
         Expr::BinaryExpr { left, op, right } => {
             let left_val = eval_value(left, row);
             let right_val = eval_value(right, row);

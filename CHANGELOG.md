@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.27] - 2026-07-08
+
+### Added — JOIN, UPDATE, DELETE, IS NULL / IS NOT NULL
+
+**IS NULL / IS NOT NULL (`src/dsl/lexer.rs`, `ast.rs`, `parser/expr.rs`, `query/logical.rs`, `query/planner.rs`):**
+- `Token::Is` added to lexer
+- `Expr::IsNull(Box<Expr>)` and `Expr::IsNotNull(Box<Expr>)` added to DSL AST
+- Parsed as postfix operators in the Pratt loop: `col IS NULL`, `col IS NOT NULL`
+- Mapped through `dsl_expr_to_logical_expr` → `LogicalExpr::IsNull/IsNotNull`
+- Evaluated in physical filter via `evaluate_expr` and `evaluate_predicate`
+
+**UPDATE (`UPDATE <ds> SET col = expr [, ...] [WHERE ...]`):**
+- `Token::Update` in lexer; `UpdateStmt` in AST
+- `parse_update` in `parser/dataset.rs`
+- `execute_update` in `executor/query.rs` — row-level expression evaluation, in-place mutation, returns updated count
+
+**DELETE (`DELETE FROM <ds> [WHERE ...]`):**
+- `Token::Delete` in lexer; `DeleteStmt` in AST
+- `parse_delete` in `parser/dataset.rs`
+- `execute_delete` in `executor/query.rs` — `rows.retain`, returns deleted count; `DELETE FROM ds` without WHERE clears all rows
+
+**JOIN (`SELECT ... FROM ds1 [INNER|LEFT] JOIN ds2 ON col = col`):**
+- `Token::Join`, `Token::On`, `Token::Inner`, `Token::Left` in lexer
+- `JoinClause`, `JoinKind` structs added to AST; `SelectStmt.joins: Vec<JoinClause>` field added
+- `parse_join_clause` and `parse_join_col_ref` in `parser/dataset.rs` — supports qualified (`t.col`) and unqualified column refs
+- `LogicalPlan::Join` and `JoinType` (Inner/Left) in `query/logical.rs` — schema merging prefixes colliding right-table columns with `r_`
+- `NestedLoopJoinExec` in `query/physical.rs` — hash-map on right side, nested loop probe; LEFT JOIN emits NULLs for unmatched left rows
+- Planner creates `NestedLoopJoinExec` from `LogicalPlan::Join`
+- `evaluate_predicate` public entry point added to `query/planner.rs` for reuse in UPDATE/DELETE
+
+**Bug fix:** `SEARCH ... ON col` and `CREATE INDEX ON` previously matched `ON` as `Token::Ident("ON")` — updated to `Token::On`.
+
+10 new parser unit tests.
+
+---
+
 ## [0.1.26] - 2026-07-08
 
 ### Added — compound WHERE clause support (AND / OR / NOT)
