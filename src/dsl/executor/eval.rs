@@ -51,9 +51,9 @@ fn eval_expr_to_name(
             Ok(desired_name.to_string())
         }
 
-        Expr::StringLit(_) => Err(DslError::Parse {
+        Expr::StringLit(_) | Expr::Bool(_) => Err(DslError::Parse {
             line: line_no,
-            msg: "string literal is not a valid tensor expression".into(),
+            msg: "string/boolean literal is not a valid tensor expression".into(),
         }),
 
         Expr::Infix { op, lhs, rhs } => {
@@ -102,12 +102,16 @@ fn eval_expr_to_name(
             Ok(desired_name.to_string())
         }
 
-        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) | Expr::IsNull(_) | Expr::IsNotNull(_) => {
-            Err(DslError::Parse {
-                line: line_no,
-                msg: "boolean predicates are not valid tensor expressions".into(),
-            })
-        }
+        Expr::And(_, _)
+        | Expr::Or(_, _)
+        | Expr::Not(_)
+        | Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::In { .. }
+        | Expr::Between { .. } => Err(DslError::Parse {
+            line: line_no,
+            msg: "boolean predicates are not valid tensor expressions".into(),
+        }),
     }
 }
 
@@ -337,6 +341,7 @@ pub fn expr_to_string(expr: &Expr) -> String {
         Expr::Int(n) => format!("{}", n),
         Expr::Scalar(n) => format!("{}", n),
         Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::Bool(b) => b.to_string(),
         Expr::Infix { op, lhs, rhs } => {
             let sym = match op {
                 InfixOp::Add => "+",
@@ -371,6 +376,16 @@ pub fn expr_to_string(expr: &Expr) -> String {
         Expr::Not(inner) => format!("(NOT {})", expr_to_string(inner)),
         Expr::IsNull(inner) => format!("({} IS NULL)", expr_to_string(inner)),
         Expr::IsNotNull(inner) => format!("({} IS NOT NULL)", expr_to_string(inner)),
+        Expr::In { expr, list } => {
+            let items: Vec<String> = list.iter().map(expr_to_string).collect();
+            format!("({} IN ({}))", expr_to_string(expr), items.join(", "))
+        }
+        Expr::Between { expr, low, high } => format!(
+            "({} BETWEEN {} AND {})",
+            expr_to_string(expr),
+            expr_to_string(low),
+            expr_to_string(high)
+        ),
     }
 }
 

@@ -81,6 +81,18 @@ pub enum Token {
     Inner,
     #[token("LEFT")]
     Left,
+    #[token("RIGHT")]
+    Right,
+    #[token("FULL")]
+    Full,
+    #[token("OUTER")]
+    Outer,
+    #[token("OFFSET")]
+    Offset,
+    #[token("IN")]
+    In,
+    #[token("BETWEEN")]
+    Between,
 
     // ─── Structural / sub-command keywords ───────────────────────────────────
     #[token("AS")]

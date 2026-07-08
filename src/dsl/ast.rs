@@ -169,34 +169,16 @@ pub struct CreateDatasetStmt {
 #[derive(Debug, Clone)]
 pub struct DatasetFromClause {
     pub source: String,
-    pub filter: Option<DatasetFilter>,
+    pub filter: Option<Expr>,
     pub select: Option<Vec<SelectExpr>>,
     pub group_by: Vec<String>,
-    pub having: Option<DatasetFilter>,
+    pub having: Option<Expr>,
     pub order_by: Option<OrderByClause>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
-/// A simple `col op value` predicate used in FILTER / HAVING clauses of `DATASET FROM`.
-#[derive(Debug, Clone)]
-pub struct DatasetFilter {
-    pub column: String,
-    pub op: CmpOp,
-    pub value: FilterValue,
-}
-
-/// Comparison operators supported in FILTER / HAVING predicates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CmpOp {
-    Eq,
-    NotEq,
-    Gt,
-    GtEq,
-    Lt,
-    LtEq,
-}
-
-/// Scalar value on the right-hand side of a FILTER predicate or DEFAULT clause.
+/// Scalar value on the right-hand side of a DEFAULT clause.
 #[derive(Debug, Clone)]
 pub enum FilterValue {
     Int(i64),
@@ -245,9 +227,19 @@ pub enum InsertValue {
     Matrix(Vec<Vec<f64>>),
 }
 
+/// The source of a SELECT — either a named dataset or a subquery.
+#[derive(Debug, Clone)]
+pub enum DatasetSource {
+    Named(String),
+    Subquery {
+        query: Box<SelectStmt>,
+        alias: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectStmt {
-    pub dataset: String,
+    pub source: DatasetSource,
     pub joins: Vec<JoinClause>,
     pub columns: SelectColumns,
     pub filter: Option<Expr>,
@@ -255,6 +247,7 @@ pub struct SelectStmt {
     pub having: Option<Expr>,
     pub order_by: Option<OrderByClause>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +263,8 @@ pub struct JoinClause {
 pub enum JoinKind {
     Inner,
     Left,
+    Right,
+    Full,
 }
 
 #[derive(Debug, Clone)]
@@ -280,8 +275,7 @@ pub enum SelectColumns {
 
 #[derive(Debug, Clone)]
 pub struct OrderByClause {
-    pub column: String,
-    pub ascending: bool,
+    pub columns: Vec<(String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -535,6 +529,8 @@ pub enum Expr {
     Scalar(f64),
     /// A string literal: `"hello"`
     StringLit(String),
+    /// A boolean literal: `true`, `false`
+    Bool(bool),
     /// Infix arithmetic: `a + b`, `x * 2.0`
     Infix {
         op: InfixOp,
@@ -551,6 +547,14 @@ pub enum Expr {
     IsNull(Box<Expr>),
     /// `col IS NOT NULL`
     IsNotNull(Box<Expr>),
+    /// `expr IN (v1, v2, ...)`
+    In { expr: Box<Expr>, list: Vec<Expr> },
+    /// `expr BETWEEN low AND high`
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+    },
     /// Prefix named operation: `ADD a b`, `CORRELATE a WITH b`
     Call(CallExpr),
     /// Subscript: `t[0, 1]`, `t[0:5, *]`

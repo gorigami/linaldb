@@ -124,23 +124,19 @@ impl<'a> Planner<'a> {
                     _ => unreachable!(),
                 }
             }
-            LogicalPlan::Limit { input, n } => {
+            LogicalPlan::Limit { input, n, offset } => {
                 let input_plan = self.create_physical_plan(input)?;
                 Ok(Box::new(LimitExec {
                     input: input_plan,
                     n: *n,
+                    offset: *offset,
                 }))
             }
-            LogicalPlan::Sort {
-                input,
-                column,
-                ascending,
-            } => {
+            LogicalPlan::Sort { input, columns } => {
                 let input_plan = self.create_physical_plan(input)?;
                 Ok(Box::new(SortExec {
                     input: input_plan,
-                    column: column.clone(),
-                    ascending: *ascending,
+                    columns: columns.clone(),
                 }))
             }
             LogicalPlan::Aggregate {
@@ -230,6 +226,35 @@ fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
             eval_value(inner, row),
             Some(crate::core::value::Value::Null) | None
         ),
+        Expr::In { expr, list } => {
+            if let Some(val) = eval_value(expr, row) {
+                list.iter().any(|item| {
+                    eval_value(item, row)
+                        .map(|v| val.compare(&v) == Some(std::cmp::Ordering::Equal))
+                        .unwrap_or(false)
+                })
+            } else {
+                false
+            }
+        }
+        Expr::Between { expr, low, high } => {
+            let val = eval_value(expr, row);
+            let lo = eval_value(low, row);
+            let hi = eval_value(high, row);
+            if let (Some(v), Some(l), Some(h)) = (val, lo, hi) {
+                let ge = matches!(
+                    v.compare(&l),
+                    Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
+                );
+                let le = matches!(
+                    v.compare(&h),
+                    Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
+                );
+                ge && le
+            } else {
+                false
+            }
+        }
         Expr::BinaryExpr { left, op, right } => {
             let left_val = eval_value(left, row);
             let right_val = eval_value(right, row);

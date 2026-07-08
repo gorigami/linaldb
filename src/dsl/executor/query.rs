@@ -33,7 +33,7 @@ pub(super) fn execute_create_dataset_from(
     if let Some(f) = clause.filter {
         plan = LogicalPlan::Filter {
             input: Box::new(plan),
-            predicate: dataset_filter_to_logical(&f),
+            predicate: dsl_expr_to_logical_expr(&f),
         };
     }
 
@@ -102,15 +102,14 @@ pub(super) fn execute_create_dataset_from(
     if let Some(f) = clause.having {
         plan = LogicalPlan::Filter {
             input: Box::new(plan),
-            predicate: dataset_filter_to_logical(&f),
+            predicate: dsl_expr_to_logical_expr(&f),
         };
     }
 
     if let Some(ord) = clause.order_by {
         plan = LogicalPlan::Sort {
             input: Box::new(plan),
-            column: ord.column,
-            ascending: ord.ascending,
+            columns: ord.columns,
         };
     }
 
@@ -118,6 +117,7 @@ pub(super) fn execute_create_dataset_from(
         plan = LogicalPlan::Limit {
             input: Box::new(plan),
             n,
+            offset: clause.offset.unwrap_or(0),
         };
     }
 
@@ -155,15 +155,45 @@ pub(super) fn execute_select(
     s: SelectStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
-        line: line_no,
-        source: e,
-    })?;
-    let source_schema = source_ds.schema.clone();
-
-    let mut plan = LogicalPlan::Scan {
-        dataset_name: s.dataset.clone(),
-        schema: source_schema.clone(),
+    // Resolve the FROM source — either a named dataset or an executed subquery.
+    let mut plan = match s.source {
+        DatasetSource::Named(ref name) => {
+            let source_ds = db.get_dataset(name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let schema = source_ds.schema.clone();
+            LogicalPlan::Scan {
+                dataset_name: name.clone(),
+                schema,
+            }
+        }
+        DatasetSource::Subquery { query, alias } => {
+            let inner = execute_select(db, *query, line_no)?;
+            if let DslOutput::Table(inner_ds) = inner {
+                let schema = inner_ds.schema.clone();
+                let rows = inner_ds.rows;
+                db.create_dataset(alias.clone(), schema.clone())
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                let target = db.get_dataset_mut(&alias).map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+                target.rows = rows;
+                LogicalPlan::Scan {
+                    dataset_name: alias,
+                    schema,
+                }
+            } else {
+                return Err(DslError::Parse {
+                    line: line_no,
+                    msg: "Subquery must produce a table result".into(),
+                });
+            }
+        }
     };
 
     // Build join nodes left-to-right
@@ -182,6 +212,8 @@ pub(super) fn execute_select(
         let join_type = match join.kind {
             JoinKind::Inner => JoinType::Inner,
             JoinKind::Left => JoinType::Left,
+            JoinKind::Right => JoinType::Right,
+            JoinKind::Full => JoinType::Full,
         };
         plan = LogicalPlan::Join {
             left: Box::new(plan),
@@ -229,6 +261,19 @@ pub(super) fn execute_select(
                 predicate: dsl_expr_to_logical_expr(having_expr),
             };
         }
+        if let Some(ord) = &s.order_by {
+            plan = LogicalPlan::Sort {
+                input: Box::new(plan),
+                columns: ord.columns.clone(),
+            };
+        }
+        if let Some(n) = s.limit {
+            plan = LogicalPlan::Limit {
+                input: Box::new(plan),
+                n,
+                offset: s.offset.unwrap_or(0),
+            };
+        }
     } else {
         if let Some(having_expr) = &s.having {
             plan = LogicalPlan::Filter {
@@ -239,14 +284,14 @@ pub(super) fn execute_select(
         if let Some(ord) = &s.order_by {
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
-                column: ord.column.clone(),
-                ascending: ord.ascending,
+                columns: ord.columns.clone(),
             };
         }
         if let Some(n) = s.limit {
             plan = LogicalPlan::Limit {
                 input: Box::new(plan),
                 n,
+                offset: s.offset.unwrap_or(0),
             };
         }
         let effective_schema = plan.schema();
@@ -427,34 +472,13 @@ pub(super) fn agg_func_to_logical(f: &AggFuncAst) -> AggregateFunction {
     }
 }
 
-pub(super) fn dataset_filter_to_logical(f: &DatasetFilter) -> LogicalExpr {
-    let op = match f.op {
-        CmpOp::Eq => "=",
-        CmpOp::NotEq => "!=",
-        CmpOp::Gt => ">",
-        CmpOp::GtEq => ">=",
-        CmpOp::Lt => "<",
-        CmpOp::LtEq => "<=",
-    };
-    let val = match &f.value {
-        FilterValue::Int(n) => Value::Int(*n),
-        FilterValue::Float(f) => Value::Float(*f as f32),
-        FilterValue::Str(s) => Value::String(s.clone()),
-        FilterValue::Bool(b) => Value::Bool(*b),
-    };
-    LogicalExpr::BinaryExpr {
-        left: Box::new(LogicalExpr::Column(f.column.clone())),
-        op: op.to_string(),
-        right: Box::new(LogicalExpr::Literal(val)),
-    }
-}
-
 pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
     match e {
         Expr::Ref(name) => LogicalExpr::Column(name.clone()),
         Expr::Int(n) => LogicalExpr::Literal(Value::Int(*n)),
         Expr::Scalar(f) => LogicalExpr::Literal(Value::Float(*f as f32)),
         Expr::StringLit(s) => LogicalExpr::Literal(Value::String(s.clone())),
+        Expr::Bool(b) => LogicalExpr::Literal(Value::Bool(*b)),
         Expr::Infix { op, lhs, rhs } => {
             let sym = match op {
                 InfixOp::Add => "+",
@@ -485,6 +509,15 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
         Expr::Not(inner) => LogicalExpr::Not(Box::new(dsl_expr_to_logical_expr(inner))),
         Expr::IsNull(inner) => LogicalExpr::IsNull(Box::new(dsl_expr_to_logical_expr(inner))),
         Expr::IsNotNull(inner) => LogicalExpr::IsNotNull(Box::new(dsl_expr_to_logical_expr(inner))),
+        Expr::In { expr, list } => LogicalExpr::In {
+            expr: Box::new(dsl_expr_to_logical_expr(expr)),
+            list: list.iter().map(dsl_expr_to_logical_expr).collect(),
+        },
+        Expr::Between { expr, low, high } => LogicalExpr::Between {
+            expr: Box::new(dsl_expr_to_logical_expr(expr)),
+            low: Box::new(dsl_expr_to_logical_expr(low)),
+            high: Box::new(dsl_expr_to_logical_expr(high)),
+        },
         _ => LogicalExpr::Literal(Value::Null),
     }
 }
@@ -584,6 +617,7 @@ fn eval_row_expr(expr: &Expr, env: &std::collections::HashMap<&str, &Value>) -> 
         Expr::Int(n) => Value::Int(*n),
         Expr::Scalar(f) => Value::Float(*f as f32),
         Expr::StringLit(s) => Value::String(s.clone()),
+        Expr::Bool(b) => Value::Bool(*b),
         Expr::Infix { op, lhs, rhs } => {
             let l = eval_row_expr(lhs, env);
             let r = eval_row_expr(rhs, env);

@@ -45,6 +45,38 @@ impl Parser {
                     }
                     continue;
                 }
+                Some(Token::In) => {
+                    self.advance();
+                    self.eat(&Token::LParen)?;
+                    let mut list = vec![];
+                    loop {
+                        list.push(self.parse_pratt(0)?);
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.eat(&Token::RParen)?;
+                    lhs = Expr::In {
+                        expr: Box::new(lhs),
+                        list,
+                    };
+                    continue;
+                }
+                Some(Token::Between) => {
+                    self.advance();
+                    // parse low: stop before AND (AND has left_bp=3, min_bp=4 prevents it)
+                    let low = self.parse_pratt(4)?;
+                    self.eat(&Token::And)?;
+                    let high = self.parse_pratt(4)?;
+                    lhs = Expr::Between {
+                        expr: Box::new(lhs),
+                        low: Box::new(low),
+                        high: Box::new(high),
+                    };
+                    continue;
+                }
                 _ => {}
             }
 
@@ -161,6 +193,12 @@ impl Parser {
             | Some(Token::Stack) => return self.parse_call_expr(),
             Some(Token::Ident(_)) => {
                 let name = self.eat_ident()?;
+                if name == "true" {
+                    return Ok(Expr::Bool(true));
+                }
+                if name == "false" {
+                    return Ok(Expr::Bool(false));
+                }
                 if name == "dataset" && self.at(&Token::LParen) {
                     self.advance();
                     let ds = self.eat_str()?;

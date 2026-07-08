@@ -14,12 +14,13 @@ impl Parser {
         let mut having = None;
         let mut order_by = None;
         let mut limit = None;
+        let mut offset = None;
 
         loop {
             match self.peek() {
                 Some(Token::Filter) | Some(Token::Where) => {
                     self.advance();
-                    filter = Some(self.parse_dataset_filter()?);
+                    filter = Some(self.parse_expr()?);
                 }
                 Some(Token::Select) => {
                     self.advance();
@@ -50,21 +51,43 @@ impl Parser {
                 }
                 Some(Token::Having) => {
                     self.advance();
-                    having = Some(self.parse_dataset_filter()?);
+                    having = Some(self.parse_expr()?);
                 }
                 Some(Token::Order) => {
                     self.advance();
                     self.eat(&Token::By)?;
-                    let column = self.eat_ident()?;
-                    let ascending = !self.at_ident("DESC");
-                    if !ascending {
-                        self.advance();
+                    let mut columns = vec![];
+                    loop {
+                        let col = self.eat_ident()?;
+                        let ascending = if self.at_ident("DESC") {
+                            self.advance();
+                            false
+                        } else {
+                            if self.at_ident("ASC") {
+                                self.advance();
+                            }
+                            true
+                        };
+                        columns.push((col, ascending));
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
-                    order_by = Some(OrderByClause { column, ascending });
+                    order_by = Some(OrderByClause { columns });
                 }
                 Some(Token::Limit) => {
                     self.advance();
                     limit = Some(self.eat_usize()?);
+                    if self.at(&Token::Offset) {
+                        self.advance();
+                        offset = Some(self.eat_usize()?);
+                    }
+                }
+                Some(Token::Offset) => {
+                    self.advance();
+                    offset = Some(self.eat_usize()?);
                 }
                 _ => break,
             }
@@ -78,6 +101,7 @@ impl Parser {
             having,
             order_by,
             limit,
+            offset,
         })
     }
 
@@ -161,43 +185,6 @@ impl Parser {
                 }
             }
             _ => Err(self.unexpected("COLUMNS, FROM, or ADD COLUMN after DATASET name")),
-        }
-    }
-
-    pub(super) fn parse_dataset_filter(&mut self) -> Result<DatasetFilter, ParseError> {
-        let column = self.eat_ident()?;
-        let op = self.parse_cmp_op()?;
-        let value = self.parse_filter_value()?;
-        Ok(DatasetFilter { column, op, value })
-    }
-
-    pub(super) fn parse_cmp_op(&mut self) -> Result<CmpOp, ParseError> {
-        match self.peek() {
-            Some(Token::GtEq) => {
-                self.advance();
-                Ok(CmpOp::GtEq)
-            }
-            Some(Token::LtEq) => {
-                self.advance();
-                Ok(CmpOp::LtEq)
-            }
-            Some(Token::NotEq) => {
-                self.advance();
-                Ok(CmpOp::NotEq)
-            }
-            Some(Token::Gt) => {
-                self.advance();
-                Ok(CmpOp::Gt)
-            }
-            Some(Token::Lt) => {
-                self.advance();
-                Ok(CmpOp::Lt)
-            }
-            Some(Token::Eq) => {
-                self.advance();
-                Ok(CmpOp::Eq)
-            }
-            _ => Err(self.unexpected("comparison operator (>, <, >=, <=, =, !=)")),
         }
     }
 
@@ -411,8 +398,8 @@ impl Parser {
         }
     }
 
-    // SELECT [* | col, ...] FROM <dataset> [WHERE expr] [GROUP BY ...] [HAVING expr]
-    //                                       [ORDER BY col [ASC|DESC]] [LIMIT n]
+    // SELECT [* | col, ...] FROM <dataset|subquery> [JOIN ...] [WHERE expr]
+    //        [GROUP BY ...] [HAVING expr] [ORDER BY col [ASC|DESC], ...] [LIMIT n [OFFSET m]]
     pub(super) fn parse_select(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Select)?;
 
@@ -429,13 +416,35 @@ impl Parser {
         };
 
         self.eat(&Token::From)?;
-        let dataset = self.eat_ident()?;
+
+        // FROM (SELECT ...) AS alias  OR  FROM dataset_name
+        let source = if self.at(&Token::LParen) {
+            self.advance();
+            let inner_stmt = self.parse_select()?;
+            self.eat(&Token::RParen)?;
+            self.eat(&Token::As)?;
+            let alias = self.eat_ident()?;
+            if let Statement::Select(inner) = inner_stmt {
+                DatasetSource::Subquery {
+                    query: Box::new(inner),
+                    alias,
+                }
+            } else {
+                return Err(self.error("Expected SELECT inside subquery"));
+            }
+        } else {
+            DatasetSource::Named(self.eat_ident()?)
+        };
 
         // Parse zero or more JOIN clauses
         let mut joins = Vec::new();
         while matches!(
             self.peek(),
-            Some(Token::Join) | Some(Token::Inner) | Some(Token::Left)
+            Some(Token::Join)
+                | Some(Token::Inner)
+                | Some(Token::Left)
+                | Some(Token::Right)
+                | Some(Token::Full)
         ) {
             joins.push(self.parse_join_clause()?);
         }
@@ -445,6 +454,7 @@ impl Parser {
         let mut having = None;
         let mut order_by = None;
         let mut limit = None;
+        let mut offset = None;
 
         loop {
             match self.peek() {
@@ -472,23 +482,45 @@ impl Parser {
                     if self.at(&Token::By) {
                         self.advance();
                     }
-                    let column = self.eat_ident()?;
-                    let ascending = !self.at_ident("DESC");
-                    if self.at_ident("ASC") || self.at_ident("DESC") {
-                        self.advance();
+                    let mut columns = vec![];
+                    loop {
+                        let col = self.eat_ident()?;
+                        let ascending = if self.at_ident("DESC") {
+                            self.advance();
+                            false
+                        } else {
+                            if self.at_ident("ASC") {
+                                self.advance();
+                            }
+                            true
+                        };
+                        columns.push((col, ascending));
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
-                    order_by = Some(OrderByClause { column, ascending });
+                    order_by = Some(OrderByClause { columns });
                 }
                 Some(Token::Limit) => {
                     self.advance();
                     limit = Some(self.eat_usize()?);
+                    if self.at(&Token::Offset) {
+                        self.advance();
+                        offset = Some(self.eat_usize()?);
+                    }
+                }
+                Some(Token::Offset) => {
+                    self.advance();
+                    offset = Some(self.eat_usize()?);
                 }
                 _ => break,
             }
         }
 
         Ok(Statement::Select(SelectStmt {
-            dataset,
+            source,
             joins,
             columns,
             filter,
@@ -496,15 +528,33 @@ impl Parser {
             having,
             order_by,
             limit,
+            offset,
         }))
     }
 
-    // [INNER | LEFT] JOIN <dataset> ON <col> = <col>
+    // [INNER | LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN <dataset> ON <col> = <col>
     fn parse_join_clause(&mut self) -> Result<JoinClause, ParseError> {
         let kind = if self.at(&Token::Left) {
             self.advance();
+            if self.at(&Token::Outer) {
+                self.advance();
+            }
             self.eat(&Token::Join)?;
             JoinKind::Left
+        } else if self.at(&Token::Right) {
+            self.advance();
+            if self.at(&Token::Outer) {
+                self.advance();
+            }
+            self.eat(&Token::Join)?;
+            JoinKind::Right
+        } else if self.at(&Token::Full) {
+            self.advance();
+            if self.at(&Token::Outer) {
+                self.advance();
+            }
+            self.eat(&Token::Join)?;
+            JoinKind::Full
         } else {
             if self.at(&Token::Inner) {
                 self.advance();

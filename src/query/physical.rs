@@ -197,6 +197,7 @@ impl PhysicalPlan for ProjectionExec {
 pub struct LimitExec {
     pub input: Box<dyn PhysicalPlan>,
     pub n: usize,
+    pub offset: usize,
 }
 
 impl PhysicalPlan for LimitExec {
@@ -206,16 +207,19 @@ impl PhysicalPlan for LimitExec {
 
     fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
         let input_rows = self.input.execute(db)?;
-        Ok(input_rows.into_iter().take(self.n).collect())
+        Ok(input_rows
+            .into_iter()
+            .skip(self.offset)
+            .take(self.n)
+            .collect())
     }
 }
 
-/// Sort Executor
+/// Sort Executor — supports multi-column sort with per-column direction.
 #[derive(Debug)]
 pub struct SortExec {
     pub input: Box<dyn PhysicalPlan>,
-    pub column: String,
-    pub ascending: bool,
+    pub columns: Vec<(String, bool)>,
 }
 
 impl PhysicalPlan for SortExec {
@@ -226,20 +230,33 @@ impl PhysicalPlan for SortExec {
     fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
         let rows = self.input.execute(db)?;
         let schema = self.schema();
-        let col_idx = schema.get_field_index(&self.column).ok_or_else(|| {
-            EngineError::InvalidOp(format!("Column not found for sorting: {}", self.column))
-        })?;
+
+        // Pre-resolve column indices so the sort closure is allocation-free.
+        let col_refs: Vec<(usize, bool)> = self
+            .columns
+            .iter()
+            .map(|(col, asc)| {
+                schema
+                    .get_field_index(col)
+                    .ok_or_else(|| {
+                        EngineError::InvalidOp(format!("Column not found for sorting: {}", col))
+                    })
+                    .map(|idx| (idx, *asc))
+            })
+            .collect::<Result<_, _>>()?;
 
         let mut sorted_rows = rows;
         sorted_rows.sort_by(|a, b| {
-            let val_a = &a.values[col_idx];
-            let val_b = &b.values[col_idx];
-            let cmp = val_a.compare(val_b).unwrap_or(std::cmp::Ordering::Equal);
-            if self.ascending {
-                cmp
-            } else {
-                cmp.reverse()
+            for &(col_idx, asc) in &col_refs {
+                let cmp = a.values[col_idx]
+                    .compare(&b.values[col_idx])
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                let ord = if asc { cmp } else { cmp.reverse() };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
             }
+            std::cmp::Ordering::Equal
         });
 
         Ok(sorted_rows)
@@ -699,6 +716,27 @@ pub fn evaluate_expression(
             Value::Null => Value::Bool(false),
             _ => Value::Bool(true),
         },
+        crate::query::logical::Expr::In { expr, list } => {
+            let val = evaluate_expression(expr, row);
+            let found = list.iter().any(|item| {
+                val.compare(&evaluate_expression(item, row)) == Some(std::cmp::Ordering::Equal)
+            });
+            Value::Bool(found)
+        }
+        crate::query::logical::Expr::Between { expr, low, high } => {
+            let val = evaluate_expression(expr, row);
+            let lo = evaluate_expression(low, row);
+            let hi = evaluate_expression(high, row);
+            let ge = matches!(
+                val.compare(&lo),
+                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
+            );
+            let le = matches!(
+                val.compare(&hi),
+                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
+            );
+            Value::Bool(ge && le)
+        }
         _ => Value::Null,
     }
 }
@@ -721,12 +759,15 @@ impl PhysicalPlan for NestedLoopJoinExec {
 
     fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
         use crate::query::logical::JoinType;
+        use std::collections::{HashMap, HashSet};
+
         let left_rows = self.left.execute(db)?;
         let right_rows = self.right.execute(db)?;
         let out_schema = self.output_schema.clone();
 
         let left_schema = self.left.schema();
         let right_schema = self.right.schema();
+
         let left_col_idx = left_schema.get_field_index(&self.left_col).ok_or_else(|| {
             EngineError::InvalidOp(format!(
                 "Join column '{}' not found in left dataset",
@@ -742,45 +783,112 @@ impl PhysicalPlan for NestedLoopJoinExec {
                 ))
             })?;
 
-        // Build a simple hash map from right join-key → list of right rows
-        use std::collections::HashMap;
-        let mut right_map: HashMap<String, Vec<&Tuple>> = HashMap::new();
-        for row in &right_rows {
-            let key = format!("{:?}", row.values[right_col_idx]);
-            right_map.entry(key).or_default().push(row);
-        }
-
-        let right_null_values: Vec<crate::core::value::Value> = right_schema
+        let left_nulls: Vec<crate::core::value::Value> = left_schema
+            .fields
+            .iter()
+            .map(|_| crate::core::value::Value::Null)
+            .collect();
+        let right_nulls: Vec<crate::core::value::Value> = right_schema
             .fields
             .iter()
             .map(|_| crate::core::value::Value::Null)
             .collect();
 
         let mut output = Vec::new();
-        for left_row in &left_rows {
-            let key = format!("{:?}", left_row.values[left_col_idx]);
-            let matches = right_map.get(&key);
 
-            match matches {
-                Some(right_matches) => {
-                    for right_row in right_matches {
-                        let combined =
-                            merge_row_values(left_row, right_row, &left_schema, &right_schema);
-                        output.push(
-                            Tuple::new(out_schema.clone(), combined)
-                                .map_err(EngineError::InvalidOp)?,
-                        );
+        match self.join_type {
+            JoinType::Inner | JoinType::Left | JoinType::Full => {
+                // Build hash map: right key → indices into right_rows
+                let mut right_map: HashMap<String, Vec<usize>> = HashMap::new();
+                for (i, row) in right_rows.iter().enumerate() {
+                    let key = format!("{:?}", row.values[right_col_idx]);
+                    right_map.entry(key).or_default().push(i);
+                }
+
+                let mut matched_right: HashSet<usize> = HashSet::new();
+
+                for left_row in &left_rows {
+                    let key = format!("{:?}", left_row.values[left_col_idx]);
+                    match right_map.get(&key) {
+                        Some(right_indices) => {
+                            for &ri in right_indices {
+                                let combined = merge_row_values(
+                                    left_row,
+                                    &right_rows[ri],
+                                    &left_schema,
+                                    &right_schema,
+                                );
+                                output.push(
+                                    Tuple::new(out_schema.clone(), combined)
+                                        .map_err(EngineError::InvalidOp)?,
+                                );
+                                if self.join_type == JoinType::Full {
+                                    matched_right.insert(ri);
+                                }
+                            }
+                        }
+                        None if matches!(self.join_type, JoinType::Left | JoinType::Full) => {
+                            let mut combined = left_row.values.clone();
+                            combined.extend_from_slice(&right_nulls);
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                        }
+                        None => {}
                     }
                 }
-                None if self.join_type == JoinType::Left => {
-                    // Emit left row with NULLs for right columns
-                    let mut combined = left_row.values.clone();
-                    combined.extend_from_slice(&right_null_values);
-                    output.push(
-                        Tuple::new(out_schema.clone(), combined).map_err(EngineError::InvalidOp)?,
-                    );
+
+                // FULL: emit unmatched right rows with NULL left values
+                if self.join_type == JoinType::Full {
+                    for (i, right_row) in right_rows.iter().enumerate() {
+                        if !matched_right.contains(&i) {
+                            let mut combined = left_nulls.clone();
+                            combined.extend_from_slice(&right_row.values);
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                        }
+                    }
                 }
-                None => {} // INNER JOIN: skip unmatched left rows
+            }
+            JoinType::Right => {
+                // Build hash map: left key → indices into left_rows
+                let mut left_map: HashMap<String, Vec<usize>> = HashMap::new();
+                for (i, row) in left_rows.iter().enumerate() {
+                    let key = format!("{:?}", row.values[left_col_idx]);
+                    left_map.entry(key).or_default().push(i);
+                }
+
+                for right_row in &right_rows {
+                    let key = format!("{:?}", right_row.values[right_col_idx]);
+                    match left_map.get(&key) {
+                        Some(left_indices) => {
+                            for &li in left_indices {
+                                let combined = merge_row_values(
+                                    &left_rows[li],
+                                    right_row,
+                                    &left_schema,
+                                    &right_schema,
+                                );
+                                output.push(
+                                    Tuple::new(out_schema.clone(), combined)
+                                        .map_err(EngineError::InvalidOp)?,
+                                );
+                            }
+                        }
+                        None => {
+                            // Unmatched right row: emit NULL left + right values
+                            let mut combined = left_nulls.clone();
+                            combined.extend_from_slice(&right_row.values);
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                        }
+                    }
+                }
             }
         }
 
