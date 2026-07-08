@@ -1,10 +1,13 @@
 use crate::core::dataset_legacy;
+use crate::core::tuple::Tuple;
 use crate::core::value::{Value, ValueType};
 use crate::dsl::ast::*;
 use crate::dsl::{DslError, DslOutput};
 use crate::engine::TensorDb;
 use crate::query::logical::{AggregateFunction, Expr as LogicalExpr, JoinType, LogicalPlan};
 use crate::query::planner::Planner;
+
+type RowPredicate = Box<dyn Fn(&Tuple) -> bool>;
 
 // ─── Dataset query execution ──────────────────────────────────────────────────
 
@@ -494,16 +497,13 @@ pub(super) fn execute_update(
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     // Build a filter predicate (if any) using the same physical evaluator
-    let predicate: Option<Box<dyn Fn(&crate::core::tuple::Tuple) -> bool>> =
-        s.filter
-            .as_ref()
-            .map(|f| -> Box<dyn Fn(&crate::core::tuple::Tuple) -> bool> {
-                let logical = dsl_expr_to_logical_expr(f);
-                Box::new(move |row| {
-                    use crate::query::planner::evaluate_predicate;
-                    evaluate_predicate(&logical, row)
-                })
-            });
+    let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
+        let logical = dsl_expr_to_logical_expr(f);
+        Box::new(move |row| {
+            use crate::query::planner::evaluate_predicate;
+            evaluate_predicate(&logical, row)
+        })
+    });
 
     let ds = db
         .get_dataset_mut(&s.dataset)
@@ -548,16 +548,13 @@ pub(super) fn execute_delete(
     s: DeleteStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    let predicate: Option<Box<dyn Fn(&crate::core::tuple::Tuple) -> bool>> =
-        s.filter
-            .as_ref()
-            .map(|f| -> Box<dyn Fn(&crate::core::tuple::Tuple) -> bool> {
-                let logical = dsl_expr_to_logical_expr(f);
-                Box::new(move |row| {
-                    use crate::query::planner::evaluate_predicate;
-                    evaluate_predicate(&logical, row)
-                })
-            });
+    let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
+        let logical = dsl_expr_to_logical_expr(f);
+        Box::new(move |row| {
+            use crate::query::planner::evaluate_predicate;
+            evaluate_predicate(&logical, row)
+        })
+    });
 
     let ds = db
         .get_dataset_mut(&s.dataset)
