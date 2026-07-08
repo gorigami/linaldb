@@ -69,6 +69,18 @@ pub enum Token {
     Export,
     #[token("RESET")]
     Reset,
+    #[token("UPDATE")]
+    Update,
+    #[token("DELETE")]
+    Delete,
+    #[token("JOIN")]
+    Join,
+    #[token("ON")]
+    On,
+    #[token("INNER")]
+    Inner,
+    #[token("LEFT")]
+    Left,
 
     // ─── Structural / sub-command keywords ───────────────────────────────────
     #[token("AS")]
@@ -135,6 +147,8 @@ pub enum Token {
     Null,
     #[token("NOT")]
     Not,
+    #[token("IS")]
+    Is,
     #[token("AND")]
     And,
     #[token("OR")]

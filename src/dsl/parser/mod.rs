@@ -249,6 +249,8 @@ impl Parser {
             Some(Token::Use) => self.parse_use(),
             Some(Token::Set) => self.parse_set(),
             Some(Token::Search) => self.parse_search(),
+            Some(Token::Update) => self.parse_update(),
+            Some(Token::Delete) => self.parse_delete(),
             Some(Token::Reset) => {
                 self.advance();
                 if self.at_ident("SESSION") {
@@ -482,13 +484,13 @@ impl Parser {
         &mut self,
         default_kind: IndexKindAst,
     ) -> Result<(String, String, IndexKindAst), ParseError> {
-        let _idx_name = if self.at_any_ident() && !self.at_ident("ON") {
+        let _idx_name = if self.at_any_ident() && !self.at(&Token::On) {
             Some(self.eat_ident()?)
         } else {
             None
         };
 
-        if self.at_ident("ON") {
+        if self.at(&Token::On) {
             self.advance();
         }
 
@@ -1335,5 +1337,98 @@ mod tests {
             panic!("expected Select")
         };
         assert!(matches!(s.filter, Some(Expr::And(..))));
+    }
+
+    #[test]
+    fn select_where_is_null() {
+        let stmt = parse_ok("SELECT * FROM users WHERE email IS NULL");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::IsNull(..))));
+    }
+
+    #[test]
+    fn select_where_is_not_null() {
+        let stmt = parse_ok("SELECT * FROM users WHERE email IS NOT NULL");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::IsNotNull(..))));
+    }
+
+    #[test]
+    fn select_inner_join() {
+        let stmt =
+            parse_ok("SELECT * FROM orders INNER JOIN users ON user_id = id WHERE total > 100");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.dataset, "orders");
+        assert_eq!(s.joins.len(), 1);
+        assert_eq!(s.joins[0].kind, JoinKind::Inner);
+        assert_eq!(s.joins[0].dataset, "users");
+        assert_eq!(s.joins[0].left_col, "user_id");
+        assert_eq!(s.joins[0].right_col, "id");
+        assert!(s.filter.is_some());
+    }
+
+    #[test]
+    fn select_left_join() {
+        let stmt = parse_ok("SELECT * FROM orders LEFT JOIN users ON orders.user_id = users.id");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.joins[0].kind, JoinKind::Left);
+    }
+
+    #[test]
+    fn select_bare_join() {
+        let stmt = parse_ok("SELECT * FROM a JOIN b ON a_id = b_id");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.joins[0].kind, JoinKind::Inner);
+    }
+
+    #[test]
+    fn update_statement() {
+        let stmt = parse_ok("UPDATE products SET price = 99 WHERE stock > 0");
+        let Statement::Update(s) = stmt else {
+            panic!("expected Update")
+        };
+        assert_eq!(s.dataset, "products");
+        assert_eq!(s.assignments.len(), 1);
+        assert_eq!(s.assignments[0].0, "price");
+        assert!(s.filter.is_some());
+    }
+
+    #[test]
+    fn update_multiple_cols() {
+        let stmt = parse_ok("UPDATE products SET price = 10, stock = 0");
+        let Statement::Update(s) = stmt else {
+            panic!("expected Update")
+        };
+        assert_eq!(s.assignments.len(), 2);
+        assert!(s.filter.is_none());
+    }
+
+    #[test]
+    fn delete_with_filter() {
+        let stmt = parse_ok("DELETE FROM orders WHERE status = 0");
+        let Statement::Delete(s) = stmt else {
+            panic!("expected Delete")
+        };
+        assert_eq!(s.dataset, "orders");
+        assert!(s.filter.is_some());
+    }
+
+    #[test]
+    fn delete_all() {
+        let stmt = parse_ok("DELETE FROM temp_data");
+        let Statement::Delete(s) = stmt else {
+            panic!("expected Delete")
+        };
+        assert!(s.filter.is_none());
     }
 }

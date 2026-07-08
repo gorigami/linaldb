@@ -499,6 +499,10 @@ pub fn execute_statement(
             )))
         }
 
+        // ── Data mutation ────────────────────────────────────────────────────
+        Statement::Update(s) => query::execute_update(db, s, line_no),
+        Statement::Delete(s) => query::execute_delete(db, s, line_no),
+
         // ── Session ─────────────────────────────────────────────────────────
         Statement::Reset => {
             db.reset_session();

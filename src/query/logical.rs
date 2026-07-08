@@ -22,11 +22,21 @@ pub enum Expr {
     Or(Box<Expr>, Box<Expr>),
     /// Logical NOT of a predicate
     Not(Box<Expr>),
+    /// `col IS NULL`
+    IsNull(Box<Expr>),
+    /// `col IS NOT NULL`
+    IsNotNull(Box<Expr>),
     /// Aggregation function
     AggregateExpr {
         func: AggregateFunction,
         expr: Box<Expr>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +80,14 @@ pub enum LogicalPlan {
     },
     /// Limit rows
     Limit { input: Box<LogicalPlan>, n: usize },
+    /// Join two datasets on an equi-join condition
+    Join {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        left_col: String,
+        right_col: String,
+        join_type: JoinType,
+    },
     /// Aggregate rows
     Aggregate {
         input: Box<LogicalPlan>,
@@ -96,6 +114,23 @@ impl LogicalPlan {
             LogicalPlan::VectorSearch { input, .. } => input.schema(),
             LogicalPlan::Sort { input, .. } => input.schema(),
             LogicalPlan::Limit { input, .. } => input.schema(),
+            LogicalPlan::Join { left, right, .. } => {
+                let left_schema = left.schema();
+                let right_schema = right.schema();
+                let left_names: std::collections::HashSet<&str> =
+                    left_schema.fields.iter().map(|f| f.name.as_str()).collect();
+                let mut fields = left_schema.fields.clone();
+                for f in &right_schema.fields {
+                    if left_names.contains(f.name.as_str()) {
+                        let mut renamed = f.clone();
+                        renamed.name = format!("r_{}", f.name);
+                        fields.push(renamed);
+                    } else {
+                        fields.push(f.clone());
+                    }
+                }
+                Arc::new(Schema::new(fields))
+            }
             LogicalPlan::Aggregate {
                 input,
                 group_expr,
@@ -172,7 +207,9 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                 _ => ValueType::Int,
             }
         }
-        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) => ValueType::Bool,
+        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) | Expr::IsNull(_) | Expr::IsNotNull(_) => {
+            ValueType::Bool
+        }
         Expr::AggregateExpr { .. } => ValueType::Int,
     }
 }

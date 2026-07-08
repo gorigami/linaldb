@@ -81,6 +81,12 @@ pub enum Statement {
     /// `SEARCH <tensor> [IN <dataset>] [TOP <k>]`
     Search(SearchStmt),
 
+    // ─── Data mutation ───────────────────────────────────────────────────────
+    /// `UPDATE <dataset> SET col = expr [, ...] [WHERE ...]`
+    Update(UpdateStmt),
+    /// `DELETE FROM <dataset> [WHERE ...]`
+    Delete(DeleteStmt),
+
     // ─── Session ─────────────────────────────────────────────────────────────
     /// `RESET`
     Reset,
@@ -242,12 +248,28 @@ pub enum InsertValue {
 #[derive(Debug, Clone)]
 pub struct SelectStmt {
     pub dataset: String,
+    pub joins: Vec<JoinClause>,
     pub columns: SelectColumns,
     pub filter: Option<Expr>,
     pub group_by: Vec<String>,
     pub having: Option<Expr>,
     pub order_by: Option<OrderByClause>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinClause {
+    pub kind: JoinKind,
+    pub dataset: String,
+    /// Equi-join condition: `left_col = right_col`
+    pub left_col: String,
+    pub right_col: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    Inner,
+    Left,
 }
 
 #[derive(Debug, Clone)]
@@ -525,6 +547,10 @@ pub enum Expr {
     Or(Box<Expr>, Box<Expr>),
     /// Logical NOT: `NOT active`
     Not(Box<Expr>),
+    /// `col IS NULL`
+    IsNull(Box<Expr>),
+    /// `col IS NOT NULL`
+    IsNotNull(Box<Expr>),
     /// Prefix named operation: `ADD a b`, `CORRELATE a WITH b`
     Call(CallExpr),
     /// Subscript: `t[0, 1]`, `t[0:5, *]`
@@ -596,6 +622,20 @@ pub enum CallExpr {
     // ── N-ary operations ────────────────────────────────────────────────────
     /// `STACK t1 t2 t3 ...`
     Stack(Vec<Expr>),
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateStmt {
+    pub dataset: String,
+    /// `(column_name, new_value_expr)` pairs
+    pub assignments: Vec<(String, Expr)>,
+    pub filter: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteStmt {
+    pub dataset: String,
+    pub filter: Option<Expr>,
 }
 
 /// A single dimension specifier inside a subscript expression `t[...]`.

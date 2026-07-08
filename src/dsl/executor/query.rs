@@ -1,10 +1,13 @@
 use crate::core::dataset_legacy;
+use crate::core::tuple::Tuple;
 use crate::core::value::{Value, ValueType};
 use crate::dsl::ast::*;
 use crate::dsl::{DslError, DslOutput};
 use crate::engine::TensorDb;
-use crate::query::logical::{AggregateFunction, Expr as LogicalExpr, LogicalPlan};
+use crate::query::logical::{AggregateFunction, Expr as LogicalExpr, JoinType, LogicalPlan};
 use crate::query::planner::Planner;
+
+type RowPredicate = Box<dyn Fn(&Tuple) -> bool>;
 
 // ─── Dataset query execution ──────────────────────────────────────────────────
 
@@ -163,6 +166,32 @@ pub(super) fn execute_select(
         schema: source_schema.clone(),
     };
 
+    // Build join nodes left-to-right
+    for join in &s.joins {
+        let right_ds = db
+            .get_dataset(&join.dataset)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+        let right_schema = right_ds.schema.clone();
+        let right_plan = LogicalPlan::Scan {
+            dataset_name: join.dataset.clone(),
+            schema: right_schema,
+        };
+        let join_type = match join.kind {
+            JoinKind::Inner => JoinType::Inner,
+            JoinKind::Left => JoinType::Left,
+        };
+        plan = LogicalPlan::Join {
+            left: Box::new(plan),
+            right: Box::new(right_plan),
+            left_col: join.left_col.clone(),
+            right_col: join.right_col.clone(),
+            join_type,
+        };
+    }
+
     if let Some(filter_expr) = &s.filter {
         plan = LogicalPlan::Filter {
             input: Box::new(plan),
@@ -220,8 +249,9 @@ pub(super) fn execute_select(
                 n,
             };
         }
+        let effective_schema = plan.schema();
         let cols: Vec<String> = match s.columns {
-            SelectColumns::All => source_schema
+            SelectColumns::All => effective_schema
                 .fields
                 .iter()
                 .map(|f| f.name.clone())
@@ -453,8 +483,97 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
             Box::new(dsl_expr_to_logical_expr(rhs)),
         ),
         Expr::Not(inner) => LogicalExpr::Not(Box::new(dsl_expr_to_logical_expr(inner))),
+        Expr::IsNull(inner) => LogicalExpr::IsNull(Box::new(dsl_expr_to_logical_expr(inner))),
+        Expr::IsNotNull(inner) => LogicalExpr::IsNotNull(Box::new(dsl_expr_to_logical_expr(inner))),
         _ => LogicalExpr::Literal(Value::Null),
     }
+}
+
+// ─── UPDATE ───────────────────────────────────────────────────────────────────
+
+pub(super) fn execute_update(
+    db: &mut TensorDb,
+    s: UpdateStmt,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    // Build a filter predicate (if any) using the same physical evaluator
+    let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
+        let logical = dsl_expr_to_logical_expr(f);
+        Box::new(move |row| {
+            use crate::query::planner::evaluate_predicate;
+            evaluate_predicate(&logical, row)
+        })
+    });
+
+    let ds = db
+        .get_dataset_mut(&s.dataset)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+
+    let field_names: Vec<String> = ds.schema.fields.iter().map(|f| f.name.clone()).collect();
+    let mut updated = 0usize;
+
+    for row in ds.rows.iter_mut() {
+        if let Some(ref pred) = predicate {
+            if !pred(row) {
+                continue;
+            }
+        }
+        for (col_name, expr) in &s.assignments {
+            let env: std::collections::HashMap<&str, &Value> = field_names
+                .iter()
+                .zip(row.values.iter())
+                .map(|(k, v)| (k.as_str(), v))
+                .collect();
+            let new_val = eval_row_expr(expr, &env);
+            if let Some(idx) = field_names.iter().position(|n| n == col_name) {
+                row.values[idx] = new_val;
+            }
+        }
+        updated += 1;
+    }
+
+    Ok(DslOutput::Message(format!(
+        "Updated {} row(s) in '{}'",
+        updated, s.dataset
+    )))
+}
+
+// ─── DELETE ───────────────────────────────────────────────────────────────────
+
+pub(super) fn execute_delete(
+    db: &mut TensorDb,
+    s: DeleteStmt,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
+        let logical = dsl_expr_to_logical_expr(f);
+        Box::new(move |row| {
+            use crate::query::planner::evaluate_predicate;
+            evaluate_predicate(&logical, row)
+        })
+    });
+
+    let ds = db
+        .get_dataset_mut(&s.dataset)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+
+    let before = ds.rows.len();
+    match predicate {
+        Some(pred) => ds.rows.retain(|row| !pred(row)),
+        None => ds.rows.clear(),
+    }
+    let deleted = before - ds.rows.len();
+
+    Ok(DslOutput::Message(format!(
+        "Deleted {} row(s) from '{}'",
+        deleted, s.dataset
+    )))
 }
 
 // ─── Row-level expression evaluation (for computed columns) ───────────────────
