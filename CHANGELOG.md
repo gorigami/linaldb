@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.24] - 2026-07-07
+
+### Changed — DELIVER ported to typed pipeline; delivery_dsl.rs deleted
+
+**`execute_line_shared` fully typed:**
+- Added `Statement::Deliver` arm — routes through the parsed AST instead of the string fallback
+- Removed the `if line.starts_with("DELIVER ")` string stub; `execute_line_shared` now contains zero string-based dispatch
+- Collapsed the `if let Ok(stmt) + match + string fallback` pattern into a single `match crate::dsl::parser::parse(line)` expression
+
+**`is_read_only` ported to typed parser:**
+- `mod.rs::is_read_only(line)` now calls `parser::parse(line).map(|s| s.is_read_only()).unwrap_or(false)`
+- `Statement::is_read_only()` in `ast.rs` extended to include `Statement::Deliver`
+- The previous four `starts_with` string checks are gone
+
+**Dead module deleted:**
+- `src/dsl/delivery_dsl.rs` deleted — `DeliveryProjection` struct was never referenced outside the file
+- `pub mod delivery_dsl` removed from `mod.rs`
+
+---
+
 ## [0.1.23] - 2026-07-07
 
 ### Changed — `handlers/` directory eliminated; zero fallback campaign complete

@@ -1,5 +1,4 @@
 pub mod ast;
-pub mod delivery_dsl;
 pub mod error;
 pub mod executor;
 pub mod lexer;
@@ -162,73 +161,54 @@ pub fn execute_line(db: &mut TensorDb, line: &str, line_no: usize) -> Result<Dsl
 
 /// Check if a command is read-only
 pub fn is_read_only(line: &str) -> bool {
-    let line = line.trim();
-    line.starts_with("EXPLAIN ")
-        || line.starts_with("AUDIT ")
-        || line.starts_with("LIST ")
-        || line.starts_with("DELIVER ")
+    crate::dsl::parser::parse(line)
+        .map(|s| s.is_read_only())
+        .unwrap_or(false)
 }
 
 /// Execute a single DSL line with an immutable reference to the DB (shared/read-lock path).
 ///
-/// Tries the typed parser first. Only EXPLAIN, AUDIT, LIST, and DELIVER are supported here
-/// (all are read-only by definition).
+/// Only read-only statements (EXPLAIN, AUDIT, LIST, DELIVER, SHOW) are dispatched here.
 pub fn execute_line_shared(
     db: &TensorDb,
     line: &str,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    if let Ok(stmt) = crate::dsl::parser::parse(line) {
-        match stmt {
-            crate::dsl::ast::Statement::Explain(s) => {
-                return executor::execute_explain(db, s.target, line_no);
-            }
-            crate::dsl::ast::Statement::Audit(s) => {
-                let issues = db
-                    .verify_tensor_dataset(&s.target)
-                    .map_err(|e| DslError::Engine {
-                        line: line_no,
-                        source: e,
-                    })?;
-                return if issues.is_empty() {
-                    Ok(DslOutput::Message(format!(
-                        "Audit PASSED for dataset '{}'. All column references are valid.",
-                        s.target
-                    )))
-                } else {
-                    Ok(DslOutput::Message(format!(
-                        "Audit FAILED for dataset '{}'. The following columns point to missing or invalid tensors: {:?}",
-                        s.target, issues
-                    )))
-                };
-            }
-            crate::dsl::ast::Statement::List(s) => {
-                return persistence::list_typed(db, &s.target, line_no);
-            }
-            _ => {}
+    match crate::dsl::parser::parse(line) {
+        Ok(crate::dsl::ast::Statement::Explain(s)) => {
+            executor::execute_explain(db, s.target, line_no)
         }
-    }
-
-    // Minimal fallback for DELIVER (stub) and unsupported commands
-    if line.starts_with("DELIVER ") {
-        let dataset = line
-            .strip_prefix("DELIVER ")
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap_or("?");
-        Ok(DslOutput::Message(format!(
+        Ok(crate::dsl::ast::Statement::Audit(s)) => {
+            let issues = db
+                .verify_tensor_dataset(&s.target)
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+            if issues.is_empty() {
+                Ok(DslOutput::Message(format!(
+                    "Audit PASSED for dataset '{}'. All column references are valid.",
+                    s.target
+                )))
+            } else {
+                Ok(DslOutput::Message(format!(
+                    "Audit FAILED for dataset '{}'. The following columns point to missing or invalid tensors: {:?}",
+                    s.target, issues
+                )))
+            }
+        }
+        Ok(crate::dsl::ast::Statement::List(s)) => persistence::list_typed(db, &s.target, line_no),
+        Ok(crate::dsl::ast::Statement::Deliver(s)) => Ok(DslOutput::Message(format!(
             "Delivery Projection for '{}' created. (Phase 1 Read-Only View)",
-            dataset
-        )))
-    } else {
-        Err(DslError::Parse {
+            s.dataset
+        ))),
+        _ => Err(DslError::Parse {
             line: line_no,
             msg: format!(
                 "Command is not supported in shared execution mode: {}",
                 line
             ),
-        })
+        }),
     }
 }
 
