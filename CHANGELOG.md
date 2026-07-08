@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.28] - 2026-07-08
+
+### Added — Subqueries, LIMIT/OFFSET, Multi-col ORDER BY, IN/BETWEEN, RIGHT/FULL JOIN, compound HAVING
+
+**Subqueries (`SELECT * FROM (SELECT ...) AS alias`):**
+- `DatasetSource` enum in AST replaces `SelectStmt.dataset: String` — variants `Named(String)` and `Subquery { query, alias }`
+- Parsed in `parser/dataset.rs`: `FROM (SELECT ...) AS name` routes into `DatasetSource::Subquery`
+- Executed by running the inner query recursively via `execute_select`, registering the result as a temp dataset under the alias, then scanning it in the outer query
+
+**LIMIT + OFFSET (`LIMIT n OFFSET m`):**
+- `Token::Offset` added to lexer
+- `SelectStmt.offset: Option<usize>` and `DatasetFromClause.offset: Option<usize>` added to AST
+- Parsed as `LIMIT n OFFSET m` or standalone `OFFSET m` after LIMIT
+- `LogicalPlan::Limit` gains `offset: usize`; `LimitExec.execute` uses `.skip(offset).take(n)`
+
+**Multi-column ORDER BY (`ORDER BY a ASC, b DESC`):**
+- `OrderByClause.columns: Vec<(String, bool)>` replaces single `column/ascending` fields
+- Parsed with a comma loop supporting any number of sort keys, each with optional `ASC`/`DESC`
+- `LogicalPlan::Sort.columns: Vec<(String, bool)>`; `SortExec` pre-resolves column indices once before the sort closure for efficiency
+
+**IN / BETWEEN predicates:**
+- `Token::In`, `Token::Between` added to lexer
+- `Expr::In { expr, list }` and `Expr::Between { expr, low, high }` added to DSL AST, logical plan, and physical evaluators
+- Parsed as postfix operators in the Pratt loop; BETWEEN uses `parse_pratt(4)` to stop before AND, then eats AND explicitly
+- Evaluated in `evaluate_expression` (physical) and `eval_value` (planner)
+
+**RIGHT JOIN and FULL OUTER JOIN:**
+- `Token::Right`, `Token::Full`, `Token::Outer` added to lexer
+- `JoinKind::Right` and `JoinKind::Full` added to AST and `JoinType` in logical plan
+- `parse_join_clause` handles `RIGHT [OUTER] JOIN` and `FULL [OUTER] JOIN`
+- `NestedLoopJoinExec` completely rewritten: RIGHT uses left-keyed hash map with right-row probe; FULL tracks matched right indices via `HashSet<usize>` and emits unmatched right rows with NULL left values
+
+**Compound HAVING / FILTER via Pratt parser:**
+- `DatasetFromClause.filter` and `having` changed from `Option<DatasetFilter>` to `Option<Expr>`
+- `parse_dataset_filter` and `parse_cmp_op` removed; FILTER/HAVING now use `parse_expr()` directly
+- `DatasetFilter` struct and `CmpOp` enum removed from AST (dead code)
+- `Expr::Bool(bool)` added to DSL AST to fix regression where `FILTER active = true` parsed `true` as a column reference — handled in `parse_expr_atom` before the general ident path
+
+**Tests:**
+- 11 new parser tests: `select_limit_offset`, `select_multi_col_order_by`, `select_where_in`, `select_where_between`, `select_right_join`, `select_right_outer_join`, `select_full_outer_join`, `select_full_join`, `select_subquery`, `select_order_by_single_no_direction`, `select_between_compound`
+- Updated existing tests for `DatasetSource::Named`, `Expr::Infix` (was `DatasetFilter`), multi-col `ord.columns[0]` field access
+
+---
+
 ## [0.1.27] - 2026-07-08
 
 ### Added — JOIN, UPDATE, DELETE, IS NULL / IS NOT NULL

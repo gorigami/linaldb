@@ -996,7 +996,7 @@ mod tests {
     fn select_basic() {
         let stmt = parse_ok("SELECT col1, col2 FROM my_ds");
         let Statement::Select(s) = stmt else { panic!() };
-        assert_eq!(s.dataset, "my_ds");
+        assert!(matches!(&s.source, DatasetSource::Named(n) if n == "my_ds"));
         let SelectColumns::Named(cols) = s.columns else {
             panic!()
         };
@@ -1194,9 +1194,13 @@ mod tests {
         let from = s.from.unwrap();
         assert_eq!(from.source, "employees");
         let f = from.filter.unwrap();
-        assert_eq!(f.column, "age");
-        assert_eq!(f.op, CmpOp::GtEq);
-        assert!(matches!(f.value, FilterValue::Int(60)));
+        assert!(matches!(
+            f,
+            Expr::Infix {
+                op: InfixOp::GtEq,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1208,8 +1212,9 @@ mod tests {
         let from = s.from.unwrap();
         assert_eq!(from.source, "orders");
         let ord = from.order_by.unwrap();
-        assert_eq!(ord.column, "total");
-        assert!(!ord.ascending);
+        assert_eq!(ord.columns.len(), 1);
+        assert_eq!(ord.columns[0].0, "total");
+        assert!(!ord.columns[0].1);
         assert_eq!(from.limit, Some(10));
     }
 
@@ -1364,7 +1369,7 @@ mod tests {
         let Statement::Select(s) = stmt else {
             panic!("expected Select")
         };
-        assert_eq!(s.dataset, "orders");
+        assert!(matches!(&s.source, DatasetSource::Named(n) if n == "orders"));
         assert_eq!(s.joins.len(), 1);
         assert_eq!(s.joins[0].kind, JoinKind::Inner);
         assert_eq!(s.joins[0].dataset, "users");
@@ -1430,5 +1435,121 @@ mod tests {
             panic!("expected Delete")
         };
         assert!(s.filter.is_none());
+    }
+
+    #[test]
+    fn select_limit_offset() {
+        let stmt = parse_ok("SELECT * FROM users LIMIT 10 OFFSET 5");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.limit, Some(10));
+        assert_eq!(s.offset, Some(5));
+    }
+
+    #[test]
+    fn select_multi_col_order_by() {
+        let stmt = parse_ok("SELECT * FROM users ORDER BY age DESC, name ASC");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        let ord = s.order_by.unwrap();
+        assert_eq!(ord.columns.len(), 2);
+        assert_eq!(ord.columns[0].0, "age");
+        assert!(!ord.columns[0].1);
+        assert_eq!(ord.columns[1].0, "name");
+        assert!(ord.columns[1].1);
+    }
+
+    #[test]
+    fn select_where_in() {
+        let stmt = parse_ok("SELECT * FROM users WHERE status IN (1, 2, 3)");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::In { .. })));
+    }
+
+    #[test]
+    fn select_where_between() {
+        let stmt = parse_ok("SELECT * FROM users WHERE age BETWEEN 18 AND 65");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::Between { .. })));
+    }
+
+    #[test]
+    fn select_right_join() {
+        let stmt = parse_ok("SELECT * FROM orders RIGHT JOIN users ON user_id = id");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.joins[0].kind, JoinKind::Right);
+    }
+
+    #[test]
+    fn select_right_outer_join() {
+        let stmt = parse_ok("SELECT * FROM orders RIGHT OUTER JOIN users ON user_id = id");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.joins[0].kind, JoinKind::Right);
+    }
+
+    #[test]
+    fn select_full_outer_join() {
+        let stmt = parse_ok("SELECT * FROM orders FULL OUTER JOIN users ON user_id = id");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.joins[0].kind, JoinKind::Full);
+    }
+
+    #[test]
+    fn select_full_join() {
+        let stmt = parse_ok("SELECT * FROM a FULL JOIN b ON a_id = b_id");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert_eq!(s.joins[0].kind, JoinKind::Full);
+    }
+
+    #[test]
+    fn select_subquery() {
+        let stmt =
+            parse_ok("SELECT * FROM (SELECT age, name FROM employees WHERE age > 30) AS sub");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        match s.source {
+            DatasetSource::Subquery { alias, .. } => assert_eq!(alias, "sub"),
+            _ => panic!("expected Subquery source"),
+        }
+    }
+
+    #[test]
+    fn select_order_by_single_no_direction() {
+        let stmt = parse_ok("SELECT * FROM orders ORDER BY total");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        let ord = s.order_by.unwrap();
+        assert_eq!(ord.columns.len(), 1);
+        assert_eq!(ord.columns[0].0, "total");
+        assert!(ord.columns[0].1); // ascending by default
+    }
+
+    #[test]
+    fn select_between_compound() {
+        let stmt = parse_ok("SELECT * FROM t WHERE age BETWEEN 18 AND 65 AND active = 1");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        // AND at top level with Between on left
+        assert!(matches!(s.filter, Some(Expr::And(..))));
+        if let Some(Expr::And(lhs, _)) = s.filter {
+            assert!(matches!(*lhs, Expr::Between { .. }));
+        }
     }
 }

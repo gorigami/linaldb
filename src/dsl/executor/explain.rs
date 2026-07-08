@@ -4,7 +4,7 @@ use crate::engine::TensorDb;
 use crate::query::logical::{Expr as LogicalExpr, LogicalPlan};
 use crate::query::planner::Planner;
 
-use super::query::{agg_func_to_logical, dataset_filter_to_logical, dsl_expr_to_logical_expr};
+use super::query::{agg_func_to_logical, dsl_expr_to_logical_expr};
 
 pub fn execute_explain(
     db: &TensorDb,
@@ -37,7 +37,7 @@ pub fn execute_explain(
             if let Some(f) = from.filter {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
-                    predicate: dataset_filter_to_logical(&f),
+                    predicate: dsl_expr_to_logical_expr(&f),
                 };
             }
             if !from.group_by.is_empty() {
@@ -87,20 +87,20 @@ pub fn execute_explain(
             if let Some(f) = from.having {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
-                    predicate: dataset_filter_to_logical(&f),
+                    predicate: dsl_expr_to_logical_expr(&f),
                 };
             }
             if let Some(ord) = from.order_by {
                 plan = LogicalPlan::Sort {
                     input: Box::new(plan),
-                    column: ord.column,
-                    ascending: ord.ascending,
+                    columns: ord.columns,
                 };
             }
             if let Some(n) = from.limit {
                 plan = LogicalPlan::Limit {
                     input: Box::new(plan),
                     n,
+                    offset: from.offset.unwrap_or(0),
                 };
             }
             plan
@@ -145,14 +145,19 @@ pub fn execute_explain(
         }
 
         ExplainTarget::Select(s) => {
-            let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+            // Resolve the FROM source for EXPLAIN
+            let source_name = match &s.source {
+                DatasetSource::Named(n) => n.clone(),
+                DatasetSource::Subquery { alias, .. } => alias.clone(),
+            };
+            let source_ds = db.get_dataset(&source_name).map_err(|e| DslError::Engine {
                 line: line_no,
                 source: e,
             })?;
             let source_schema = source_ds.schema.clone();
 
             let mut plan = LogicalPlan::Scan {
-                dataset_name: s.dataset.clone(),
+                dataset_name: source_name,
                 schema: source_schema.clone(),
             };
 
@@ -205,14 +210,14 @@ pub fn execute_explain(
                 if let Some(ord) = &s.order_by {
                     plan = LogicalPlan::Sort {
                         input: Box::new(plan),
-                        column: ord.column.clone(),
-                        ascending: ord.ascending,
+                        columns: ord.columns.clone(),
                     };
                 }
                 if let Some(n) = s.limit {
                     plan = LogicalPlan::Limit {
                         input: Box::new(plan),
                         n,
+                        offset: s.offset.unwrap_or(0),
                     };
                 }
                 let cols: Vec<String> = match s.columns {

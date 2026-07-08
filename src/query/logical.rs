@@ -26,6 +26,14 @@ pub enum Expr {
     IsNull(Box<Expr>),
     /// `col IS NOT NULL`
     IsNotNull(Box<Expr>),
+    /// `expr IN (v1, v2, ...)`
+    In { expr: Box<Expr>, list: Vec<Expr> },
+    /// `expr BETWEEN low AND high`
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+    },
     /// Aggregation function
     AggregateExpr {
         func: AggregateFunction,
@@ -37,6 +45,8 @@ pub enum Expr {
 pub enum JoinType {
     Inner,
     Left,
+    Right,
+    Full,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,14 +82,17 @@ pub enum LogicalPlan {
         query: Tensor,
         k: usize,
     },
-    /// Sort rows
+    /// Sort rows by one or more columns
     Sort {
         input: Box<LogicalPlan>,
-        column: String,
-        ascending: bool,
+        columns: Vec<(String, bool)>,
     },
-    /// Limit rows
-    Limit { input: Box<LogicalPlan>, n: usize },
+    /// Limit rows (with optional offset)
+    Limit {
+        input: Box<LogicalPlan>,
+        n: usize,
+        offset: usize,
+    },
     /// Join two datasets on an equi-join condition
     Join {
         left: Box<LogicalPlan>,
@@ -207,9 +220,13 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                 _ => ValueType::Int,
             }
         }
-        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) | Expr::IsNull(_) | Expr::IsNotNull(_) => {
-            ValueType::Bool
-        }
+        Expr::And(_, _)
+        | Expr::Or(_, _)
+        | Expr::Not(_)
+        | Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::In { .. }
+        | Expr::Between { .. } => ValueType::Bool,
         Expr::AggregateExpr { .. } => ValueType::Int,
     }
 }
