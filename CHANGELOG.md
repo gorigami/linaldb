@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.26] - 2026-07-08
+
+### Added — compound WHERE clause support (AND / OR / NOT)
+
+**Lexer (`src/dsl/lexer.rs`):**
+- `Token::And` (`AND`) and `Token::Or` (`OR`) added
+
+**AST (`src/dsl/ast.rs`):**
+- `Expr::And(Box<Expr>, Box<Expr>)` — logical AND
+- `Expr::Or(Box<Expr>, Box<Expr>)` — logical OR
+- `Expr::Not(Box<Expr>)` — logical NOT
+
+**Parser (`src/dsl/parser/expr.rs`):**
+- Pratt operator table updated with correct precedence: OR (1) < AND (3) < comparison (5) < +/- (7) < \*// (9)
+- `NOT` handled as unary prefix in `parse_expr_atom`
+
+**Query layer:**
+- `dsl_expr_to_logical_expr` in `executor/query.rs` maps `And`/`Or`/`Not` to logical plan nodes
+- `Not` variant added to `query::logical::Expr`
+- `evaluate_expr` in `query/planner.rs` handles `Not`
+
+**Effect:** `SELECT * FROM ds WHERE age > 30 AND city = "NYC"` now works correctly. Previously, `AND ...` was silently ignored (parsed as trailing tokens). Compound predicates with `OR` and `NOT` also work.
+
+5 new parser unit tests added.
+
+---
+
 ## [0.1.25] - 2026-07-08
 
 ### Changed — executor and parser split into sub-module directories

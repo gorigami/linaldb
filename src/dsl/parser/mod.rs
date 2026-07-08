@@ -1285,4 +1285,56 @@ mod tests {
         let e = parse_err("RESET RESET");
         assert!(e.msg.contains("unexpected token"));
     }
+
+    #[test]
+    fn select_where_and() {
+        let stmt = parse_ok("SELECT * FROM users WHERE age > 30 AND active = 1");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::And(..))));
+    }
+
+    #[test]
+    fn select_where_or() {
+        let stmt = parse_ok("SELECT * FROM users WHERE status = 1 OR role = 2");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::Or(..))));
+    }
+
+    #[test]
+    fn select_where_not() {
+        let stmt = parse_ok("SELECT * FROM users WHERE NOT active");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::Not(..))));
+    }
+
+    #[test]
+    fn select_where_and_or_precedence() {
+        // `a AND b OR c` should parse as `(a AND b) OR c`
+        let stmt = parse_ok("SELECT * FROM t WHERE x > 1 AND y > 2 OR z > 3");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        // OR at top level
+        assert!(matches!(s.filter, Some(Expr::Or(..))));
+        if let Some(Expr::Or(lhs, _)) = s.filter {
+            // AND on the left
+            assert!(matches!(*lhs, Expr::And(..)));
+        }
+    }
+
+    #[test]
+    fn select_where_compound_three_and() {
+        let stmt =
+            parse_ok("SELECT * FROM t WHERE a > 1 AND b > 2 AND c > 3");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        assert!(matches!(s.filter, Some(Expr::And(..))));
+    }
 }

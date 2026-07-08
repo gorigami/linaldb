@@ -444,6 +444,15 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 right: Box::new(dsl_expr_to_logical_expr(rhs)),
             }
         }
+        Expr::And(lhs, rhs) => LogicalExpr::And(
+            Box::new(dsl_expr_to_logical_expr(lhs)),
+            Box::new(dsl_expr_to_logical_expr(rhs)),
+        ),
+        Expr::Or(lhs, rhs) => LogicalExpr::Or(
+            Box::new(dsl_expr_to_logical_expr(lhs)),
+            Box::new(dsl_expr_to_logical_expr(rhs)),
+        ),
+        Expr::Not(inner) => LogicalExpr::Not(Box::new(dsl_expr_to_logical_expr(inner))),
         _ => LogicalExpr::Literal(Value::Null),
     }
 }

@@ -135,6 +135,10 @@ pub enum Token {
     Null,
     #[token("NOT")]
     Not,
+    #[token("AND")]
+    And,
+    #[token("OR")]
+    Or,
     #[token("NULLABLE")]
     Nullable,
 

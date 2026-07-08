@@ -101,6 +101,11 @@ fn eval_expr_to_name(
             db.register_dataset_var(desired_name.to_string(), name.clone());
             Ok(desired_name.to_string())
         }
+
+        Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) => Err(DslError::Parse {
+            line: line_no,
+            msg: "AND/OR/NOT are not valid tensor expressions".into(),
+        }),
     }
 }
 
@@ -359,6 +364,9 @@ pub fn expr_to_string(expr: &Expr) -> String {
         }
         Expr::Call(c) => call_to_string(c),
         Expr::DatasetRef(name) => format!("dataset(\"{}\")", name),
+        Expr::And(l, r) => format!("({} AND {})", expr_to_string(l), expr_to_string(r)),
+        Expr::Or(l, r) => format!("({} OR {})", expr_to_string(l), expr_to_string(r)),
+        Expr::Not(inner) => format!("(NOT {})", expr_to_string(inner)),
     }
 }
 

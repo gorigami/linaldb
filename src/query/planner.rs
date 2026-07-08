@@ -197,6 +197,7 @@ fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
     match expr {
         Expr::And(left, right) => evaluate_expr(left, row) && evaluate_expr(right, row),
         Expr::Or(left, right) => evaluate_expr(left, row) || evaluate_expr(right, row),
+        Expr::Not(inner) => !evaluate_expr(inner, row),
         Expr::BinaryExpr { left, op, right } => {
             let left_val = eval_value(left, row);
             let right_val = eval_value(right, row);
