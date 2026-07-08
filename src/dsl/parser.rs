@@ -2545,9 +2545,10 @@ mod tests {
 
     #[test]
     fn is_read_only() {
-        assert!(parse_ok("SHOW ALL").is_read_only());
+        assert!(!parse_ok("SHOW ALL").is_read_only()); // SHOW can trigger lazy eval (mutating)
         assert!(parse_ok("EXPLAIN foo").is_read_only());
         assert!(parse_ok("LIST TENSORS").is_read_only());
+        assert!(parse_ok("DELIVER users").is_read_only());
         assert!(!parse_ok("LET x = ADD a b").is_read_only());
         assert!(!parse_ok("VECTOR v = [1, 2]").is_read_only());
     }

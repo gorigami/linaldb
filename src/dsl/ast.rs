@@ -92,7 +92,10 @@ impl Statement {
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
-            Statement::Show(_) | Statement::Explain(_) | Statement::Audit(_) | Statement::List(_)
+            Statement::Explain(_)
+                | Statement::Audit(_)
+                | Statement::List(_)
+                | Statement::Deliver(_)
         )
     }
 }
