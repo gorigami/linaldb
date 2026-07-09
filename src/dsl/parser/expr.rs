@@ -136,6 +136,11 @@ impl Parser {
 
     pub(super) fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
         match self.peek() {
+            Some(Token::Case) => return self.parse_case_expr(),
+            Some(Token::Null) => {
+                self.advance();
+                return Ok(Expr::Ref("NULL".to_string()));
+            }
             Some(Token::Float(_)) => {
                 if let Some(Token::Float(f)) = self.advance() {
                     return Ok(Expr::Scalar(f));
@@ -218,6 +223,90 @@ impl Parser {
                     };
                     self.eat(&Token::RParen)?;
                     return Ok(Expr::Ref(format!("{}({})", upper, arg)));
+                }
+                // Scalar functions
+                match upper.as_str() {
+                    "UPPER" | "LOWER" | "LENGTH" | "TRIM" if self.at(&Token::LParen) => {
+                        self.advance();
+                        let arg = self.parse_expr()?;
+                        self.eat(&Token::RParen)?;
+                        let func = match upper.as_str() {
+                            "UPPER" => ScalarFnKind::Upper,
+                            "LOWER" => ScalarFnKind::Lower,
+                            "LENGTH" => ScalarFnKind::Length,
+                            "TRIM" => ScalarFnKind::Trim,
+                            _ => unreachable!(),
+                        };
+                        return Ok(Expr::ScalarFn {
+                            func,
+                            args: vec![arg],
+                        });
+                    }
+                    "CONCAT" if self.at(&Token::LParen) => {
+                        self.advance();
+                        let mut args = vec![self.parse_expr()?];
+                        while self.at(&Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expr()?);
+                        }
+                        self.eat(&Token::RParen)?;
+                        return Ok(Expr::ScalarFn {
+                            func: ScalarFnKind::Concat,
+                            args,
+                        });
+                    }
+                    "SUBSTR" if self.at(&Token::LParen) => {
+                        self.advance();
+                        let mut args = vec![self.parse_expr()?];
+                        while self.at(&Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expr()?);
+                        }
+                        self.eat(&Token::RParen)?;
+                        return Ok(Expr::ScalarFn {
+                            func: ScalarFnKind::Substr,
+                            args,
+                        });
+                    }
+                    "CAST" if self.at(&Token::LParen) => {
+                        self.advance();
+                        let expr = self.parse_expr()?;
+                        self.eat(&Token::As)?;
+                        let type_name = self.eat_ident()?;
+                        let to = match type_name.to_uppercase().as_str() {
+                            "INT" | "INTEGER" => CastTarget::Int,
+                            "FLOAT" | "DOUBLE" => CastTarget::Float,
+                            "TEXT" | "STRING" | "VARCHAR" => CastTarget::Text,
+                            "BOOL" | "BOOLEAN" => CastTarget::Bool,
+                            other => {
+                                return Err(self.error(format!("Unknown CAST target '{}'", other)))
+                            }
+                        };
+                        self.eat(&Token::RParen)?;
+                        return Ok(Expr::Cast {
+                            expr: Box::new(expr),
+                            to,
+                        });
+                    }
+                    "COALESCE" if self.at(&Token::LParen) => {
+                        self.advance();
+                        let mut args = vec![self.parse_expr()?];
+                        while self.at(&Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expr()?);
+                        }
+                        self.eat(&Token::RParen)?;
+                        return Ok(Expr::Coalesce(args));
+                    }
+                    "NULLIF" | "IFNULL" if self.at(&Token::LParen) => {
+                        self.advance();
+                        let a = self.parse_expr()?;
+                        self.eat(&Token::Comma)?;
+                        let b = self.parse_expr()?;
+                        self.eat(&Token::RParen)?;
+                        return Ok(Expr::Nullif(Box::new(a), Box::new(b)));
+                    }
+                    _ => {}
                 }
                 return Ok(Expr::Ref(name));
             }
@@ -362,6 +451,36 @@ impl Parser {
         }
 
         Ok(expr)
+    }
+
+    fn parse_case_expr(&mut self) -> Result<Expr, ParseError> {
+        self.eat(&Token::Case)?;
+        // Optional operand: CASE <expr> WHEN ...
+        let operand = if !self.at(&Token::When) {
+            Some(Box::new(self.parse_pratt(0)?))
+        } else {
+            None
+        };
+        let mut branches = vec![];
+        while self.at(&Token::When) {
+            self.advance();
+            let cond = self.parse_pratt(0)?;
+            self.eat(&Token::Then)?;
+            let result = self.parse_pratt(0)?;
+            branches.push((cond, result));
+        }
+        let else_expr = if self.at(&Token::Else) {
+            self.advance();
+            Some(Box::new(self.parse_pratt(0)?))
+        } else {
+            None
+        };
+        self.eat(&Token::End)?;
+        Ok(Expr::Case {
+            operand,
+            branches,
+            else_expr,
+        })
     }
 
     pub(super) fn can_start_simple_expr(&self) -> bool {

@@ -108,9 +108,14 @@ fn eval_expr_to_name(
         | Expr::IsNull(_)
         | Expr::IsNotNull(_)
         | Expr::In { .. }
-        | Expr::Between { .. } => Err(DslError::Parse {
+        | Expr::Between { .. }
+        | Expr::Case { .. }
+        | Expr::Coalesce(_)
+        | Expr::Nullif(_, _)
+        | Expr::ScalarFn { .. }
+        | Expr::Cast { .. } => Err(DslError::Parse {
             line: line_no,
-            msg: "boolean predicates are not valid tensor expressions".into(),
+            msg: "boolean predicates and scalar functions are not valid tensor expressions".into(),
         }),
     }
 }
@@ -386,6 +391,56 @@ pub fn expr_to_string(expr: &Expr) -> String {
             expr_to_string(low),
             expr_to_string(high)
         ),
+        Expr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            let mut s = "CASE".to_string();
+            if let Some(op) = operand {
+                s.push_str(&format!(" {}", expr_to_string(op)));
+            }
+            for (cond, res) in branches {
+                s.push_str(&format!(
+                    " WHEN {} THEN {}",
+                    expr_to_string(cond),
+                    expr_to_string(res)
+                ));
+            }
+            if let Some(e) = else_expr {
+                s.push_str(&format!(" ELSE {}", expr_to_string(e)));
+            }
+            s.push_str(" END");
+            s
+        }
+        Expr::Coalesce(args) => {
+            let items: Vec<String> = args.iter().map(expr_to_string).collect();
+            format!("COALESCE({})", items.join(", "))
+        }
+        Expr::Nullif(a, b) => format!("NULLIF({}, {})", expr_to_string(a), expr_to_string(b)),
+        Expr::ScalarFn { func, args } => {
+            use crate::dsl::ast::ScalarFnKind;
+            let name = match func {
+                ScalarFnKind::Upper => "UPPER",
+                ScalarFnKind::Lower => "LOWER",
+                ScalarFnKind::Length => "LENGTH",
+                ScalarFnKind::Trim => "TRIM",
+                ScalarFnKind::Concat => "CONCAT",
+                ScalarFnKind::Substr => "SUBSTR",
+            };
+            let items: Vec<String> = args.iter().map(expr_to_string).collect();
+            format!("{}({})", name, items.join(", "))
+        }
+        Expr::Cast { expr, to } => {
+            use crate::dsl::ast::CastTarget;
+            let type_name = match to {
+                CastTarget::Int => "INT",
+                CastTarget::Float => "FLOAT",
+                CastTarget::Text => "TEXT",
+                CastTarget::Bool => "BOOL",
+            };
+            format!("CAST({} AS {})", expr_to_string(expr), type_name)
+        }
     }
 }
 

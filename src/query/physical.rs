@@ -737,6 +737,126 @@ pub fn evaluate_expression(
             );
             Value::Bool(ge && le)
         }
+        crate::query::logical::Expr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            let operand_val = operand.as_ref().map(|e| evaluate_expression(e, row));
+            for (cond, result) in branches {
+                let matched = if let Some(ref ov) = operand_val {
+                    let cv = evaluate_expression(cond, row);
+                    ov.compare(&cv) == Some(std::cmp::Ordering::Equal)
+                } else {
+                    matches!(evaluate_expression(cond, row), Value::Bool(true))
+                };
+                if matched {
+                    return evaluate_expression(result, row);
+                }
+            }
+            else_expr
+                .as_ref()
+                .map_or(Value::Null, |e| evaluate_expression(e, row))
+        }
+        crate::query::logical::Expr::Coalesce(args) => {
+            for arg in args {
+                let v = evaluate_expression(arg, row);
+                if !v.is_null() {
+                    return v;
+                }
+            }
+            Value::Null
+        }
+        crate::query::logical::Expr::Nullif(a, b) => {
+            let va = evaluate_expression(a, row);
+            let vb = evaluate_expression(b, row);
+            if va.compare(&vb) == Some(std::cmp::Ordering::Equal) {
+                Value::Null
+            } else {
+                va
+            }
+        }
+        crate::query::logical::Expr::ScalarFn { func, args } => {
+            use crate::query::logical::ScalarFnKind;
+            let vals: Vec<Value> = args.iter().map(|a| evaluate_expression(a, row)).collect();
+            match func {
+                ScalarFnKind::Upper => match vals.first() {
+                    Some(Value::String(s)) => Value::String(s.to_uppercase()),
+                    _ => Value::Null,
+                },
+                ScalarFnKind::Lower => match vals.first() {
+                    Some(Value::String(s)) => Value::String(s.to_lowercase()),
+                    _ => Value::Null,
+                },
+                ScalarFnKind::Length => match vals.first() {
+                    Some(Value::String(s)) => Value::Int(s.len() as i64),
+                    _ => Value::Null,
+                },
+                ScalarFnKind::Trim => match vals.first() {
+                    Some(Value::String(s)) => Value::String(s.trim().to_string()),
+                    _ => Value::Null,
+                },
+                ScalarFnKind::Concat => {
+                    let parts: String = vals
+                        .iter()
+                        .filter_map(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    Value::String(parts)
+                }
+                ScalarFnKind::Substr => {
+                    if let (Some(Value::String(s)), Some(Value::Int(start))) =
+                        (vals.first(), vals.get(1))
+                    {
+                        let start = (*start as usize).saturating_sub(1); // 1-based
+                        if let Some(Value::Int(n)) = vals.get(2) {
+                            Value::String(s.chars().skip(start).take(*n as usize).collect())
+                        } else {
+                            Value::String(s.chars().skip(start).collect())
+                        }
+                    } else {
+                        Value::Null
+                    }
+                }
+            }
+        }
+        crate::query::logical::Expr::Cast { expr, to } => {
+            use crate::query::logical::CastTarget;
+            let val = evaluate_expression(expr, row);
+            match to {
+                CastTarget::Int => match val {
+                    Value::Int(n) => Value::Int(n),
+                    Value::Float(f) => Value::Int(f as i64),
+                    Value::String(s) => s.parse::<i64>().map(Value::Int).unwrap_or(Value::Null),
+                    Value::Bool(b) => Value::Int(if b { 1 } else { 0 }),
+                    _ => Value::Null,
+                },
+                CastTarget::Float => match val {
+                    Value::Float(f) => Value::Float(f),
+                    Value::Int(n) => Value::Float(n as f32),
+                    Value::String(s) => s.parse::<f32>().map(Value::Float).unwrap_or(Value::Null),
+                    _ => Value::Null,
+                },
+                CastTarget::Text => Value::String(match val {
+                    Value::String(s) => s,
+                    Value::Int(n) => n.to_string(),
+                    Value::Float(f) => f.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    _ => return Value::Null,
+                }),
+                CastTarget::Bool => match val {
+                    Value::Bool(b) => Value::Bool(b),
+                    Value::Int(n) => Value::Bool(n != 0),
+                    Value::String(s) => Value::Bool(!s.is_empty()),
+                    _ => Value::Null,
+                },
+            }
+        }
         _ => Value::Null,
     }
 }
@@ -893,6 +1013,68 @@ impl PhysicalPlan for NestedLoopJoinExec {
         }
 
         Ok(output)
+    }
+}
+
+/// UNION / UNION ALL Executor
+#[derive(Debug)]
+pub struct UnionExec {
+    pub left: Box<dyn PhysicalPlan>,
+    pub right: Box<dyn PhysicalPlan>,
+    pub all: bool,
+}
+
+impl PhysicalPlan for UnionExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.left.schema()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        let mut rows = self.left.execute(db)?;
+        rows.extend(self.right.execute(db)?);
+        if !self.all {
+            let mut seen = std::collections::HashSet::new();
+            rows.retain(|row| {
+                let key: String = row
+                    .values
+                    .iter()
+                    .map(|v| format!("{:?}", v))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                seen.insert(key)
+            });
+        }
+        Ok(rows)
+    }
+}
+
+/// DISTINCT Executor — removes duplicate rows
+#[derive(Debug)]
+pub struct DistinctExec {
+    pub input: Box<dyn PhysicalPlan>,
+}
+
+impl PhysicalPlan for DistinctExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.input.schema()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        let rows = self.input.execute(db)?;
+        let mut seen = std::collections::HashSet::new();
+        let deduped = rows
+            .into_iter()
+            .filter(|row| {
+                let key: String = row
+                    .values
+                    .iter()
+                    .map(|v| format!("{:?}", v))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                seen.insert(key)
+            })
+            .collect();
+        Ok(deduped)
     }
 }
 

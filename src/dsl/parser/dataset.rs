@@ -398,10 +398,18 @@ impl Parser {
         }
     }
 
-    // SELECT [* | col, ...] FROM <dataset|subquery> [JOIN ...] [WHERE expr]
+    // SELECT [DISTINCT] [* | col, ...] FROM <dataset|subquery> [JOIN ...] [WHERE expr]
     //        [GROUP BY ...] [HAVING expr] [ORDER BY col [ASC|DESC], ...] [LIMIT n [OFFSET m]]
+    //        [UNION [ALL] SELECT ...]
     pub(super) fn parse_select(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Select)?;
+
+        let distinct = if self.at(&Token::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         let columns = if self.at(&Token::Star) {
             self.advance();
@@ -519,7 +527,35 @@ impl Parser {
             }
         }
 
+        // UNION [ALL] SELECT ...
+        let union = if self.at(&Token::Union) {
+            self.advance();
+            let all = if self.at(&Token::All) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let right_stmt = self.parse_select()?;
+            if let Statement::Select(right) = right_stmt {
+                Some((
+                    if all {
+                        SetOpKind::UnionAll
+                    } else {
+                        SetOpKind::Union
+                    },
+                    Box::new(right),
+                ))
+            } else {
+                return Err(self.error("Expected SELECT after UNION"));
+            }
+        } else {
+            None
+        };
+
         Ok(Statement::Select(SelectStmt {
+            ctes: vec![],
+            distinct,
             source,
             joins,
             columns,
@@ -529,7 +565,38 @@ impl Parser {
             order_by,
             limit,
             offset,
+            union,
         }))
+    }
+
+    // WITH <name> AS (SELECT ...) SELECT ...
+    pub(super) fn parse_cte_select(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::With)?;
+        let mut ctes = vec![];
+        loop {
+            let name = self.eat_ident()?;
+            self.eat(&Token::As)?;
+            self.eat(&Token::LParen)?;
+            let inner_stmt = self.parse_select()?;
+            self.eat(&Token::RParen)?;
+            if let Statement::Select(inner) = inner_stmt {
+                ctes.push((name, inner));
+            } else {
+                return Err(self.error("Expected SELECT inside CTE body"));
+            }
+            if self.at(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let main_stmt = self.parse_select()?;
+        if let Statement::Select(mut main) = main_stmt {
+            main.ctes = ctes;
+            Ok(Statement::Select(main))
+        } else {
+            Err(self.error("Expected SELECT after WITH clause"))
+        }
     }
 
     // [INNER | LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN <dataset> ON <col> = <col>
@@ -654,45 +721,200 @@ impl Parser {
         Ok(Statement::Materialize(MaterializeStmt { target }))
     }
 
-    // SELECT column list item: plain column or aggregate call
+    // SELECT column list item: plain column, aggregate, window, or computed expression
     pub(super) fn parse_select_expr(&mut self) -> Result<SelectExpr, ParseError> {
-        match self.peek() {
-            Some(Token::Sum) => {
+        // Check for aggregate functions or window-capable functions
+        let agg_func = match self.peek() {
+            Some(Token::Sum) => Some(AggFuncAst::Sum),
+            Some(Token::Ident(s)) if s == "AVG" => Some(AggFuncAst::Avg),
+            Some(Token::Ident(s)) if s == "COUNT" => Some(AggFuncAst::Count),
+            Some(Token::Ident(s)) if s == "MIN" => Some(AggFuncAst::Min),
+            Some(Token::Ident(s)) if s == "MAX" => Some(AggFuncAst::Max),
+            _ => None,
+        };
+
+        if let Some(func) = agg_func {
+            self.advance();
+            self.eat(&Token::LParen)?;
+            let inner_expr = if self.at(&Token::Star) {
                 self.advance();
-                self.parse_agg_call(AggFuncAst::Sum)
-            }
-            Some(Token::Ident(s)) if s == "AVG" => {
+                Expr::Ref("*".to_string())
+            } else {
+                self.parse_expr()?
+            };
+            self.eat(&Token::RParen)?;
+            // Check for OVER clause (window function)
+            if self.at(&Token::Over) {
                 self.advance();
-                self.parse_agg_call(AggFuncAst::Avg)
+                let spec = self.parse_window_spec()?;
+                let alias = if self.at(&Token::As) {
+                    self.advance();
+                    self.eat_ident()?
+                } else {
+                    format!("{:?}(expr)_OVER", func).to_lowercase()
+                };
+                let wfunc = match func {
+                    AggFuncAst::Sum => WindowFunc::Sum(Box::new(inner_expr)),
+                    AggFuncAst::Avg => WindowFunc::Avg(Box::new(inner_expr)),
+                    AggFuncAst::Count => WindowFunc::Count(Box::new(inner_expr)),
+                    AggFuncAst::Min => WindowFunc::Min(Box::new(inner_expr)),
+                    AggFuncAst::Max => WindowFunc::Max(Box::new(inner_expr)),
+                };
+                return Ok(SelectExpr::Window {
+                    func: wfunc,
+                    spec,
+                    alias,
+                });
             }
-            Some(Token::Ident(s)) if s == "COUNT" => {
-                self.advance();
-                self.parse_agg_call(AggFuncAst::Count)
-            }
-            Some(Token::Ident(s)) if s == "MIN" => {
-                self.advance();
-                self.parse_agg_call(AggFuncAst::Min)
-            }
-            Some(Token::Ident(s)) if s == "MAX" => {
-                self.advance();
-                self.parse_agg_call(AggFuncAst::Max)
-            }
-            _ => Ok(SelectExpr::Column(self.eat_ident()?)),
+            return Ok(SelectExpr::Aggregate {
+                func,
+                expr: Box::new(inner_expr),
+            });
         }
+
+        // Check for ranking window functions: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD
+        if let Some(Token::Ident(s)) = self.peek() {
+            let upper = s.to_uppercase();
+            match upper.as_str() {
+                "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "LAG" | "LEAD" => {
+                    let fname = upper.clone();
+                    self.advance();
+                    self.eat(&Token::LParen)?;
+                    let (col, offset) = if fname == "LAG" || fname == "LEAD" {
+                        let col = self.eat_ident()?;
+                        let off = if self.at(&Token::Comma) {
+                            self.advance();
+                            self.eat_usize()?
+                        } else {
+                            1
+                        };
+                        (col, off)
+                    } else {
+                        (String::new(), 0)
+                    };
+                    self.eat(&Token::RParen)?;
+                    self.eat(&Token::Over)?;
+                    let spec = self.parse_window_spec()?;
+                    let alias = if self.at(&Token::As) {
+                        self.advance();
+                        self.eat_ident()?
+                    } else {
+                        fname.to_lowercase()
+                    };
+                    let wfunc = match fname.as_str() {
+                        "ROW_NUMBER" => WindowFunc::RowNumber,
+                        "RANK" => WindowFunc::Rank,
+                        "DENSE_RANK" => WindowFunc::DenseRank,
+                        "LAG" => WindowFunc::Lag { col, offset },
+                        "LEAD" => WindowFunc::Lead { col, offset },
+                        _ => unreachable!(),
+                    };
+                    return Ok(SelectExpr::Window {
+                        func: wfunc,
+                        spec,
+                        alias,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Check for CASE WHEN, scalar functions, CAST, COALESCE, NULLIF → Computed
+        match self.peek() {
+            Some(Token::Case) | Some(Token::Ident(_)) => {
+                let is_computed = match self.peek() {
+                    Some(Token::Case) => true,
+                    Some(Token::Ident(s)) => {
+                        let u = s.to_uppercase();
+                        matches!(
+                            u.as_str(),
+                            "UPPER"
+                                | "LOWER"
+                                | "LENGTH"
+                                | "TRIM"
+                                | "CONCAT"
+                                | "SUBSTR"
+                                | "CAST"
+                                | "COALESCE"
+                                | "NULLIF"
+                                | "IFNULL"
+                        )
+                    }
+                    _ => false,
+                };
+                if is_computed {
+                    let expr = self.parse_expr()?;
+                    let alias = if self.at(&Token::As) {
+                        self.advance();
+                        Some(self.eat_ident()?)
+                    } else {
+                        None
+                    };
+                    return Ok(SelectExpr::Computed {
+                        expr: Box::new(expr),
+                        alias,
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        // Default: plain column with optional alias
+        let name = self.eat_ident()?;
+        if self.at(&Token::As) {
+            self.advance();
+            let alias = self.eat_ident()?;
+            return Ok(SelectExpr::Computed {
+                expr: Box::new(Expr::Ref(name)),
+                alias: Some(alias),
+            });
+        }
+        Ok(SelectExpr::Column(name))
     }
 
-    pub(super) fn parse_agg_call(&mut self, func: AggFuncAst) -> Result<SelectExpr, ParseError> {
+    // Parse OVER (PARTITION BY ... ORDER BY ...) window spec
+    fn parse_window_spec(&mut self) -> Result<WindowSpec, ParseError> {
         self.eat(&Token::LParen)?;
-        let expr = if self.at(&Token::Star) {
+        let mut partition_by = vec![];
+        let mut order_by = vec![];
+        if self.at(&Token::Partition) {
             self.advance();
-            Expr::Ref("*".to_string())
-        } else {
-            self.parse_expr()?
-        };
+            self.eat(&Token::By)?;
+            loop {
+                partition_by.push(self.eat_ident()?);
+                if self.at(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        if self.at(&Token::Order) {
+            self.advance();
+            self.eat(&Token::By)?;
+            loop {
+                let col = self.eat_ident()?;
+                let asc = if self.at_ident("DESC") {
+                    self.advance();
+                    false
+                } else {
+                    if self.at_ident("ASC") {
+                        self.advance();
+                    }
+                    true
+                };
+                order_by.push((col, asc));
+                if self.at(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
         self.eat(&Token::RParen)?;
-        Ok(SelectExpr::Aggregate {
-            func,
-            expr: Box::new(expr),
+        Ok(WindowSpec {
+            partition_by,
+            order_by,
         })
     }
 

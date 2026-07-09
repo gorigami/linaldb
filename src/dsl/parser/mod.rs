@@ -234,6 +234,7 @@ impl Parser {
             Some(Token::Dataset) => self.parse_create_dataset(),
             Some(Token::Insert) => self.parse_insert_into(),
             Some(Token::Select) => self.parse_select(),
+            Some(Token::With) => self.parse_cte_select(),
             Some(Token::Materialize) => self.parse_materialize(),
             Some(Token::Deliver) => self.parse_deliver(),
             Some(Token::Explain) => self.parse_explain(),
@@ -1551,5 +1552,282 @@ mod tests {
         if let Some(Expr::And(lhs, _)) = s.filter {
             assert!(matches!(*lhs, Expr::Between { .. }));
         }
+    }
+
+    // ─── v0.1.29: CTEs, Window Functions, UNION, CASE WHEN, DISTINCT, COALESCE, ScalarFn, CAST ──
+
+    #[test]
+    fn select_distinct() {
+        let stmt = parse_ok("SELECT DISTINCT col FROM my_ds");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert!(s.distinct);
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(&cols[0], SelectExpr::Column(c) if c == "col"));
+    }
+
+    #[test]
+    fn select_distinct_star() {
+        let stmt = parse_ok("SELECT DISTINCT * FROM my_ds");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert!(s.distinct);
+        assert!(matches!(s.columns, SelectColumns::All));
+    }
+
+    #[test]
+    fn select_union() {
+        let stmt = parse_ok("SELECT a FROM t1 UNION SELECT a FROM t2");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert!(s.union.is_some());
+        let (kind, _) = s.union.unwrap();
+        assert!(matches!(kind, SetOpKind::Union));
+    }
+
+    #[test]
+    fn select_union_all() {
+        let stmt = parse_ok("SELECT a FROM t1 UNION ALL SELECT a FROM t2");
+        let Statement::Select(s) = stmt else { panic!() };
+        let (kind, _) = s.union.unwrap();
+        assert!(matches!(kind, SetOpKind::UnionAll));
+    }
+
+    #[test]
+    fn cte_basic() {
+        let stmt = parse_ok("WITH cte AS (SELECT * FROM employees) SELECT * FROM cte");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert_eq!(s.ctes.len(), 1);
+        assert_eq!(s.ctes[0].0, "cte");
+        assert!(matches!(&s.source, DatasetSource::Named(n) if n == "cte"));
+    }
+
+    #[test]
+    fn cte_multiple() {
+        let stmt =
+            parse_ok("WITH a AS (SELECT * FROM t1), b AS (SELECT * FROM t2) SELECT * FROM a");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert_eq!(s.ctes.len(), 2);
+        assert_eq!(s.ctes[0].0, "a");
+        assert_eq!(s.ctes[1].0, "b");
+    }
+
+    #[test]
+    fn case_when_simple() {
+        let stmt =
+            parse_ok("SELECT CASE WHEN age > 30 THEN \"senior\" ELSE \"junior\" END FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { expr, .. } if matches!(expr.as_ref(), Expr::Case { .. }))
+        );
+    }
+
+    #[test]
+    fn case_when_no_else() {
+        let stmt = parse_ok("SELECT CASE WHEN x > 0 THEN \"pos\" END FROM t");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(&cols[0], SelectExpr::Computed { .. }));
+    }
+
+    #[test]
+    fn coalesce_expr() {
+        let stmt = parse_ok("SELECT COALESCE(a, b, 0) FROM t");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { expr, .. } if matches!(expr.as_ref(), Expr::Coalesce(_)))
+        );
+    }
+
+    #[test]
+    fn nullif_expr() {
+        let stmt = parse_ok("SELECT NULLIF(a, 0) FROM t");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { expr, .. } if matches!(expr.as_ref(), Expr::Nullif(..)))
+        );
+    }
+
+    #[test]
+    fn scalar_fn_upper() {
+        let stmt = parse_ok("SELECT UPPER(name) FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { expr, .. } if matches!(expr.as_ref(), Expr::ScalarFn { func: ScalarFnKind::Upper, .. }))
+        );
+    }
+
+    #[test]
+    fn scalar_fn_lower() {
+        let stmt = parse_ok("SELECT LOWER(name) AS lower_name FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { alias: Some(a), .. } if a == "lower_name")
+        );
+    }
+
+    #[test]
+    fn scalar_fn_length() {
+        let stmt = parse_ok("SELECT LENGTH(name) FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { expr, .. } if matches!(expr.as_ref(), Expr::ScalarFn { func: ScalarFnKind::Length, .. }))
+        );
+    }
+
+    #[test]
+    fn cast_expr() {
+        let stmt = parse_ok("SELECT CAST(age AS FLOAT) AS f_age FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { expr, alias: Some(a) } if a == "f_age" && matches!(expr.as_ref(), Expr::Cast { to: CastTarget::Float, .. }))
+        );
+    }
+
+    #[test]
+    fn cast_to_int() {
+        let stmt = parse_ok("SELECT CAST(score AS INT) FROM t");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Computed { expr, .. } if matches!(expr.as_ref(), Expr::Cast { to: CastTarget::Int, .. }))
+        );
+    }
+
+    #[test]
+    fn window_row_number() {
+        let stmt = parse_ok(
+            "SELECT ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM emp",
+        );
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Window { func: WindowFunc::RowNumber, alias, .. } if alias == "rn")
+        );
+    }
+
+    #[test]
+    fn window_rank() {
+        let stmt =
+            parse_ok("SELECT RANK() OVER (PARTITION BY dept ORDER BY salary) AS rnk FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(
+            &cols[0],
+            SelectExpr::Window {
+                func: WindowFunc::Rank,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn window_dense_rank() {
+        let stmt = parse_ok("SELECT DENSE_RANK() OVER (ORDER BY score DESC) AS dr FROM t");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(
+            &cols[0],
+            SelectExpr::Window {
+                func: WindowFunc::DenseRank,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn window_lag() {
+        let stmt = parse_ok("SELECT LAG(salary, 1) OVER (ORDER BY date) AS prev_sal FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Window { func: WindowFunc::Lag { col, offset: 1 }, .. } if col == "salary")
+        );
+    }
+
+    #[test]
+    fn window_lead() {
+        let stmt = parse_ok("SELECT LEAD(salary, 2) OVER (ORDER BY date) AS next_sal FROM emp");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(
+            matches!(&cols[0], SelectExpr::Window { func: WindowFunc::Lead { col, offset: 2 }, .. } if col == "salary")
+        );
+    }
+
+    #[test]
+    fn window_sum_over() {
+        let stmt =
+            parse_ok("SELECT SUM(amount) OVER (PARTITION BY customer) AS running_sum FROM orders");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(
+            &cols[0],
+            SelectExpr::Window {
+                func: WindowFunc::Sum(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn window_avg_over() {
+        let stmt = parse_ok("SELECT AVG(score) OVER (PARTITION BY dept) AS dept_avg FROM t");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(
+            &cols[0],
+            SelectExpr::Window {
+                func: WindowFunc::Avg(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn select_no_distinct_by_default() {
+        let stmt = parse_ok("SELECT col FROM ds");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert!(!s.distinct);
+        assert!(s.union.is_none());
+        assert!(s.ctes.is_empty());
     }
 }

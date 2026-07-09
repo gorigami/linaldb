@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.29] - 2026-07-09
+
+### Added — Window Functions, CTEs, UNION, CASE WHEN, DISTINCT, COALESCE/NULLIF, String Functions, CAST
+
+**CTEs (`WITH name AS (SELECT ...) SELECT * FROM name`):**
+- `SelectStmt.ctes: Vec<(String, SelectStmt)>` stores CTE definitions before the main query
+- New `Token::With` dispatches to `parse_cte_select` in `parser/dataset.rs`
+- Executed in `execute_select`: each CTE is materialized as a temp dataset before the main query runs
+
+**Window functions (`ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD/SUM/AVG/COUNT/MIN/MAX OVER (PARTITION BY … ORDER BY …)`):**
+- `WindowFunc` and `WindowSpec` AST types added
+- `SelectExpr::Window { func, spec, alias }` for window columns
+- Post-processed after base plan execution in `execute_select` → `apply_window_func`
+- Supports partitioned and unpartitioned windows with optional ORDER BY
+
+**UNION / UNION ALL:**
+- `SetOpKind { Union, UnionAll }` enum; `SelectStmt.union: Option<(SetOpKind, Box<SelectStmt>)>`
+- Parsed via `Token::Union` after the main SELECT body; `UNION ALL` checks for `Token::All`
+- Executed by running both queries, concatenating rows, deduplicating for plain UNION
+
+**CASE WHEN (`CASE WHEN cond THEN val … ELSE default END`):**
+- `Expr::Case { operand, branches, else_expr }` in AST and logical layer
+- Parsed by new `parse_case_expr` in `parser/expr.rs` triggered by `Token::Case`
+- Evaluated in `physical::evaluate_expression`; also works inside WHERE/HAVING
+
+**SELECT DISTINCT:**
+- `SelectStmt.distinct: bool`; parsed as `Token::Distinct` immediately after `SELECT`
+- Maps to `LogicalPlan::Distinct → DistinctExec` (row-level deduplication via HashSet)
+
+**COALESCE / NULLIF:**
+- `Expr::Coalesce(Vec<Expr>)` and `Expr::Nullif(Box<Expr>, Box<Expr>)` in AST and logical layer
+- Parsed as identifier calls in `parse_expr_atom` (IFNULL treated as NULLIF alias)
+- `COALESCE` returns first non-null arg; `NULLIF` returns null when both args equal
+
+**String functions (UPPER, LOWER, LENGTH, TRIM, CONCAT, SUBSTR):**
+- `ScalarFnKind` enum; `Expr::ScalarFn { func, args }` in AST and logical layer
+- Parsed in `parse_expr_atom` from identifier names with `(` lookahead
+- Evaluated in `physical::evaluate_expression`
+
+**CAST (`CAST(expr AS INT|FLOAT|TEXT|BOOL)`):**
+- `CastTarget` enum; `Expr::Cast { expr, to }` in AST and logical layer
+- Parsed in `parse_expr_atom` from `CAST` identifier with `(` lookahead; type parsed with `AS` keyword
+- Evaluated with type coercion in `physical::evaluate_expression`
+
+**`SelectExpr::Computed { expr, alias }`:**
+- New variant for arbitrary expressions in SELECT column list (CASE, ScalarFn, CAST, etc.)
+- Post-processed after base plan execution via `apply_window_and_computed_exprs`
+- Column alias via `AS name` syntax
+
+### Changed
+- `parse_select_expr` extended to detect and route window/computed expressions
+- `dsl_expr_to_logical_expr` maps all new AST expression variants to logical layer
+- All `SelectExpr` match arms updated project-wide for exhaustiveness
+- `parse_agg_call` removed (functionality inlined into `parse_select_expr`)
+- 23 new parser tests covering all 8 feature areas
+
+---
+
 ## [0.1.28] - 2026-07-08
 
 ### Added — Subqueries, LIMIT/OFFSET, Multi-col ORDER BY, IN/BETWEEN, RIGHT/FULL JOIN, compound HAVING
