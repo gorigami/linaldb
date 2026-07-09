@@ -181,7 +181,14 @@ pub fn execute_statement(
                 let fields: Vec<Field> = s
                     .columns
                     .iter()
-                    .map(|c| Field::new(&c.name, col_type_to_value_type(&c.col_type)))
+                    .map(|c| {
+                        let f = Field::new(&c.name, col_type_to_value_type(&c.col_type));
+                        if c.nullable {
+                            f.nullable()
+                        } else {
+                            f
+                        }
+                    })
                     .collect();
                 let schema = Arc::new(Schema::new(fields));
                 db.create_dataset(s.name.clone(), schema)
@@ -531,6 +538,10 @@ pub(super) fn col_type_to_value_type(ct: &ColType) -> ValueType {
         ColType::Bool => ValueType::Bool,
         ColType::Vector(n) => ValueType::Vector(*n),
         ColType::Matrix(r, c) => ValueType::Matrix(*r, *c),
-        ColType::Tensor(_) => ValueType::Float,
+        ColType::Tensor(dims) => match dims.as_slice() {
+            [d] => ValueType::Vector(*d),
+            [r, c] => ValueType::Matrix(*r, *c),
+            _ => ValueType::Vector(0),
+        },
     }
 }

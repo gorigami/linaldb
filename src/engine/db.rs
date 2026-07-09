@@ -663,6 +663,11 @@ impl TensorDb {
         self.active_instance().list_dataset_names()
     }
 
+    /// Remove a dataset by name (used for CTE cleanup)
+    pub fn remove_dataset(&mut self, name: &str) -> Result<(), EngineError> {
+        self.active_instance_mut().remove_dataset(name)
+    }
+
     pub fn alter_dataset_add_column(
         &mut self,
         dataset_name: &str,
@@ -1295,6 +1300,14 @@ impl DatabaseInstance {
     /// List all dataset names
     pub fn list_dataset_names(&self) -> Vec<String> {
         self.dataset_store.list_names()
+    }
+
+    /// Remove a dataset by name (used for CTE cleanup)
+    pub fn remove_dataset(&mut self, name: &str) -> Result<(), EngineError> {
+        self.dataset_store
+            .remove_by_name(name)
+            .map(|_| ())
+            .map_err(|_| EngineError::DatasetNotFound(name.to_string()))
     }
 
     /// Add a column to an existing dataset

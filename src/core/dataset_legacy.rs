@@ -139,9 +139,10 @@ impl Dataset {
         rows: Vec<Tuple>,
         name: Option<String>,
     ) -> Result<Self, String> {
-        // Validate all rows match schema
+        // Validate all rows match schema (structural equality, not pointer equality,
+        // so rows from different query results with the same shape are accepted)
         for (i, row) in rows.iter().enumerate() {
-            if !Arc::ptr_eq(&row.schema, &schema) {
+            if row.schema.as_ref() != schema.as_ref() {
                 return Err(format!("Row {} has incompatible schema", i));
             }
         }

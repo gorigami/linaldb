@@ -162,7 +162,19 @@ impl<'a> Planner<'a> {
             } => {
                 let left_plan = self.create_physical_plan(left)?;
                 let right_plan = self.create_physical_plan(right)?;
-                let output_schema = logical_plan.schema();
+                // Mark all output fields as nullable so NULL-padded rows
+                // (from LEFT/RIGHT/FULL OUTER JOIN unmatched sides) pass validation.
+                let base_schema = logical_plan.schema();
+                let nullable_fields: Vec<crate::core::tuple::Field> = base_schema
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let mut nf = f.clone();
+                        nf.nullable = true;
+                        nf
+                    })
+                    .collect();
+                let output_schema = Arc::new(Schema::new(nullable_fields));
                 Ok(Box::new(NestedLoopJoinExec {
                     left: left_plan,
                     right: right_plan,

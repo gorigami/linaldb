@@ -387,24 +387,46 @@ pub(super) fn execute_select(
         result_rows =
             apply_window_and_computed_exprs(result_rows, &base_schema, &window_exprs, line_no)?;
 
-        // Build final output schema: base columns + window/computed columns
-        let mut fields = base_schema.fields.clone();
-        for we in &window_exprs {
-            let (col_name, vtype) = match we {
-                SelectExpr::Window { alias, .. } => (alias.clone(), ValueType::Int),
-                SelectExpr::Computed { alias, expr } => {
-                    let name = alias.clone().unwrap_or_else(|| "expr".to_string());
-                    let vtype = infer_expr_result_type(expr);
-                    (name, vtype)
-                }
-                _ => unreachable!(),
-            };
-            fields.push(crate::core::tuple::Field::new(&col_name, vtype));
-        }
+        // Derive the extended schema from the first row (types are actual, not inferred)
+        let extended_schema = if let Some(first_row) = result_rows.first() {
+            first_row.schema.clone()
+        } else {
+            // Fallback: build schema from inference (no rows to peek at)
+            let mut fields = base_schema.fields.clone();
+            for we in &window_exprs {
+                let (col_name, vtype) = match we {
+                    SelectExpr::Window { alias, func, .. } => {
+                        let vtype = match func {
+                            WindowFunc::RowNumber
+                            | WindowFunc::Rank
+                            | WindowFunc::DenseRank
+                            | WindowFunc::Count(_)
+                            | WindowFunc::Lag { .. }
+                            | WindowFunc::Lead { .. } => ValueType::Int,
+                            WindowFunc::Avg(_) | WindowFunc::Sum(_) => ValueType::Float,
+                            WindowFunc::Min(_) | WindowFunc::Max(_) => ValueType::Float,
+                        };
+                        (alias.clone(), vtype)
+                    }
+                    SelectExpr::Computed { alias, expr } => {
+                        let name = alias.clone().unwrap_or_else(|| "expr".to_string());
+                        let vtype = infer_expr_result_type(expr);
+                        (name, vtype)
+                    }
+                    _ => unreachable!(),
+                };
+                fields.push(crate::core::tuple::Field::new(&col_name, vtype));
+            }
+            std::sync::Arc::new(crate::core::tuple::Schema::new(fields))
+        };
 
         // Now project to match the SELECT column order
         let ordered_cols: Vec<String> = match &s.columns {
-            SelectColumns::All => fields.iter().map(|f| f.name.clone()).collect(),
+            SelectColumns::All => extended_schema
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect(),
             SelectColumns::Named(exprs) => exprs
                 .iter()
                 .map(|e| match e {
@@ -417,7 +439,6 @@ pub(super) fn execute_select(
                 })
                 .collect(),
         };
-        let extended_schema = std::sync::Arc::new(crate::core::tuple::Schema::new(fields));
         let col_indices: Vec<usize> = ordered_cols
             .iter()
             .filter_map(|name| extended_schema.get_field_index(name))
@@ -467,7 +488,25 @@ pub(super) fn execute_select(
         (result_rows, result_schema)
     };
 
-    // CTEs remain as temp datasets in the session (cleaned up on RESET)
+    // Clean up CTE temp datasets so they don't shadow real datasets in subsequent queries
+    for cte_name in &cte_names {
+        let _ = db.remove_dataset(cte_name);
+    }
+
+    // Normalize all rows to the canonical result_schema Arc so that Dataset::with_rows
+    // schema equality check (structural, not pointer) passes even for rows from different
+    // query results (UNION, window/computed column extensions, etc.)
+    let result_rows: Vec<Tuple> = result_rows
+        .into_iter()
+        .map(|row| {
+            if row.values.len() == result_schema.fields.len() {
+                let vals = row.values.clone();
+                Tuple::new(result_schema.clone(), vals).unwrap_or(row)
+            } else {
+                row
+            }
+        })
+        .collect();
 
     let ds = dataset_legacy::Dataset::with_rows(
         dataset_legacy::DatasetId(0),
@@ -488,6 +527,21 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
         Expr::Scalar(_) => ValueType::Float,
         Expr::StringLit(_) => ValueType::String,
         Expr::Bool(_) => ValueType::Bool,
+        Expr::Ref(_) => ValueType::Float,
+        Expr::Infix { op, lhs, rhs } => {
+            let lt = infer_expr_result_type(lhs);
+            let rt = infer_expr_result_type(rhs);
+            match op {
+                InfixOp::Add | InfixOp::Subtract | InfixOp::Multiply | InfixOp::Divide => {
+                    match (lt, rt) {
+                        (ValueType::Float, _) | (_, ValueType::Float) => ValueType::Float,
+                        (ValueType::Int, ValueType::Int) => ValueType::Int,
+                        _ => ValueType::Float,
+                    }
+                }
+                _ => ValueType::Bool,
+            }
+        }
         Expr::ScalarFn {
             func: ScalarFnKind::Length,
             ..
@@ -496,9 +550,10 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
         Expr::Cast { to, .. } => match to {
             CastTarget::Int => ValueType::Int,
             CastTarget::Float => ValueType::Float,
-            CastTarget::Text | CastTarget::Bool => ValueType::String,
+            CastTarget::Text => ValueType::String,
+            CastTarget::Bool => ValueType::Bool,
         },
-        _ => ValueType::String,
+        _ => ValueType::Float,
     }
 }
 
@@ -510,14 +565,24 @@ fn apply_window_and_computed_exprs(
 ) -> Result<Vec<Tuple>, DslError> {
     use crate::query::physical::evaluate_expression;
 
+    let mut computed_idx = 0usize;
     for we in window_exprs {
         match we {
-            SelectExpr::Computed { expr, .. } => {
+            SelectExpr::Computed { expr, alias } => {
+                let temp_name = alias
+                    .clone()
+                    .unwrap_or_else(|| format!("__cmp_{}", computed_idx));
+                computed_idx += 1;
                 let logical_expr = dsl_expr_to_logical_expr(expr);
+                let fallback_vtype = infer_expr_result_type(expr);
                 rows = rows
                     .into_iter()
                     .map(|row| {
                         let val = evaluate_expression(&logical_expr, &row);
+                        let actual_vtype = match val.value_type() {
+                            ValueType::Null => fallback_vtype.clone(),
+                            t => t,
+                        };
                         let mut vals = row.values.clone();
                         vals.push(val);
                         let ext_schema = std::sync::Arc::new(crate::core::tuple::Schema::new(
@@ -525,18 +590,18 @@ fn apply_window_and_computed_exprs(
                                 .fields
                                 .iter()
                                 .cloned()
-                                .chain(std::iter::once(crate::core::tuple::Field::new(
-                                    "_computed",
-                                    ValueType::String,
-                                )))
+                                .chain(std::iter::once(
+                                    crate::core::tuple::Field::new(&temp_name, actual_vtype)
+                                        .nullable(),
+                                ))
                                 .collect(),
                         ));
                         Tuple::new(ext_schema, vals).unwrap_or(row)
                     })
                     .collect();
             }
-            SelectExpr::Window { func, spec, .. } => {
-                rows = apply_window_func(rows, func, spec);
+            SelectExpr::Window { func, spec, alias } => {
+                rows = apply_window_func(rows, func, spec, alias);
             }
             _ => {}
         }
@@ -544,7 +609,12 @@ fn apply_window_and_computed_exprs(
     Ok(rows)
 }
 
-fn apply_window_func(rows: Vec<Tuple>, func: &WindowFunc, spec: &WindowSpec) -> Vec<Tuple> {
+fn apply_window_func(
+    rows: Vec<Tuple>,
+    func: &WindowFunc,
+    spec: &WindowSpec,
+    alias: &str,
+) -> Vec<Tuple> {
     use crate::query::physical::evaluate_expression;
 
     let n = rows.len();
@@ -709,7 +779,20 @@ fn apply_window_func(rows: Vec<Tuple>, func: &WindowFunc, spec: &WindowSpec) -> 
         }
     }
 
-    // Append window result to each row
+    // Infer value type from computed results
+    let vtype = result_vals
+        .iter()
+        .find(|v| !matches!(v, Value::Null))
+        .map(|v| match v {
+            Value::Int(_) => ValueType::Int,
+            Value::Float(_) => ValueType::Float,
+            Value::String(_) => ValueType::String,
+            Value::Bool(_) => ValueType::Bool,
+            _ => ValueType::Int,
+        })
+        .unwrap_or(ValueType::Int);
+
+    // Append window result to each row using the alias as the column name
     rows.into_iter()
         .enumerate()
         .map(|(i, row)| {
@@ -721,8 +804,8 @@ fn apply_window_func(rows: Vec<Tuple>, func: &WindowFunc, spec: &WindowSpec) -> 
                 .iter()
                 .cloned()
                 .chain(std::iter::once(crate::core::tuple::Field::new(
-                    "_window",
-                    ValueType::Int,
+                    alias,
+                    vtype.clone(),
                 )))
                 .collect();
             let new_schema = std::sync::Arc::new(crate::core::tuple::Schema::new(new_fields));
