@@ -93,6 +93,24 @@ pub enum Token {
     In,
     #[token("BETWEEN")]
     Between,
+    #[token("UNION")]
+    Union,
+    #[token("DISTINCT")]
+    Distinct,
+    #[token("OVER")]
+    Over,
+    #[token("PARTITION")]
+    Partition,
+    #[token("CASE")]
+    Case,
+    #[token("WHEN")]
+    When,
+    #[token("THEN")]
+    Then,
+    #[token("ELSE")]
+    Else,
+    #[token("END")]
+    End,
 
     // ─── Structural / sub-command keywords ───────────────────────────────────
     #[token("AS")]

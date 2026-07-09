@@ -59,7 +59,9 @@ pub fn execute_explain(
                                         expr: Box::new(dsl_expr_to_logical_expr(expr)),
                                     })
                                 }
-                                SelectExpr::Column(_) => None,
+                                SelectExpr::Column(_)
+                                | SelectExpr::Window { .. }
+                                | SelectExpr::Computed { .. } => None,
                             })
                             .collect()
                     })
@@ -74,7 +76,9 @@ pub fn execute_explain(
                     .into_iter()
                     .filter_map(|e| match e {
                         SelectExpr::Column(c) => Some(c),
-                        SelectExpr::Aggregate { .. } => None,
+                        SelectExpr::Aggregate { .. }
+                        | SelectExpr::Window { .. }
+                        | SelectExpr::Computed { .. } => None,
                     })
                     .collect();
                 if !cols.is_empty() {
@@ -184,7 +188,9 @@ pub fn execute_explain(
                                     expr: Box::new(dsl_expr_to_logical_expr(expr)),
                                 })
                             }
-                            SelectExpr::Column(_) => None,
+                            SelectExpr::Column(_)
+                            | SelectExpr::Window { .. }
+                            | SelectExpr::Computed { .. } => None,
                         })
                         .collect(),
                     SelectColumns::All => vec![],
@@ -230,7 +236,9 @@ pub fn execute_explain(
                         .into_iter()
                         .filter_map(|e| match e {
                             SelectExpr::Column(name) => Some(name),
-                            SelectExpr::Aggregate { .. } => None,
+                            SelectExpr::Aggregate { .. }
+                            | SelectExpr::Window { .. }
+                            | SelectExpr::Computed { .. } => None,
                         })
                         .collect(),
                 };

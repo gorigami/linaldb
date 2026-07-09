@@ -238,7 +238,37 @@ pub enum DatasetSource {
 }
 
 #[derive(Debug, Clone)]
+pub enum SetOpKind {
+    Union,
+    UnionAll,
+}
+
+/// `PARTITION BY col, ... ORDER BY col ASC/DESC, ...` clause for window functions.
+#[derive(Debug, Clone)]
+pub struct WindowSpec {
+    pub partition_by: Vec<String>,
+    pub order_by: Vec<(String, bool)>,
+}
+
+/// Window function variants.
+#[derive(Debug, Clone)]
+pub enum WindowFunc {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Lag { col: String, offset: usize },
+    Lead { col: String, offset: usize },
+    Sum(Box<Expr>),
+    Avg(Box<Expr>),
+    Count(Box<Expr>),
+    Min(Box<Expr>),
+    Max(Box<Expr>),
+}
+
+#[derive(Debug, Clone)]
 pub struct SelectStmt {
+    pub ctes: Vec<(String, SelectStmt)>,
+    pub distinct: bool,
     pub source: DatasetSource,
     pub joins: Vec<JoinClause>,
     pub columns: SelectColumns,
@@ -248,6 +278,7 @@ pub struct SelectStmt {
     pub order_by: Option<OrderByClause>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub union: Option<(SetOpKind, Box<SelectStmt>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -294,11 +325,25 @@ pub struct ShowStmt {
     pub target: ShowTarget,
 }
 
-/// A single item in a SELECT column list — either a plain column or an aggregate call.
+/// A single item in a SELECT column list.
 #[derive(Debug, Clone)]
 pub enum SelectExpr {
     Column(String),
-    Aggregate { func: AggFuncAst, expr: Box<Expr> },
+    Aggregate {
+        func: AggFuncAst,
+        expr: Box<Expr>,
+    },
+    /// Window function: `fn() OVER (PARTITION BY … ORDER BY …) AS alias`
+    Window {
+        func: WindowFunc,
+        spec: WindowSpec,
+        alias: String,
+    },
+    /// Arbitrary computed expression with optional alias: `UPPER(name) AS uname`
+    Computed {
+        expr: Box<Expr>,
+        alias: Option<String>,
+    },
 }
 
 /// Aggregate functions recognised in SELECT columns.
@@ -566,6 +611,38 @@ pub enum Expr {
     Field { base: Box<Expr>, field: String },
     /// Dataset constructor used in `LET ds = dataset("name")`
     DatasetRef(String),
+    /// `CASE [expr] WHEN cond THEN result … [ELSE default] END`
+    Case {
+        operand: Option<Box<Expr>>,
+        branches: Vec<(Expr, Expr)>,
+        else_expr: Option<Box<Expr>>,
+    },
+    /// `COALESCE(e1, e2, …)` — first non-NULL
+    Coalesce(Vec<Expr>),
+    /// `NULLIF(a, b)` — NULL if a == b, else a
+    Nullif(Box<Expr>, Box<Expr>),
+    /// Scalar string/type functions: `UPPER(s)`, `CAST(x AS INT)`, etc.
+    ScalarFn { func: ScalarFnKind, args: Vec<Expr> },
+    /// `CAST(expr AS type)`
+    Cast { expr: Box<Expr>, to: CastTarget },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarFnKind {
+    Upper,
+    Lower,
+    Length,
+    Trim,
+    Concat,
+    Substr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastTarget {
+    Int,
+    Float,
+    Text,
+    Bool,
 }
 
 /// Infix arithmetic operators (symbols: `+`, `-`, `*`, `/`).

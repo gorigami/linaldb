@@ -39,6 +39,38 @@ pub enum Expr {
         func: AggregateFunction,
         expr: Box<Expr>,
     },
+    /// `CASE [operand] WHEN cond THEN result … [ELSE default] END`
+    Case {
+        operand: Option<Box<Expr>>,
+        branches: Vec<(Expr, Expr)>,
+        else_expr: Option<Box<Expr>>,
+    },
+    /// `COALESCE(e1, e2, …)`
+    Coalesce(Vec<Expr>),
+    /// `NULLIF(a, b)`
+    Nullif(Box<Expr>, Box<Expr>),
+    /// Scalar functions: UPPER, LOWER, LENGTH, TRIM, CONCAT, SUBSTR
+    ScalarFn { func: ScalarFnKind, args: Vec<Expr> },
+    /// `CAST(expr AS type)`
+    Cast { expr: Box<Expr>, to: CastTarget },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarFnKind {
+    Upper,
+    Lower,
+    Length,
+    Trim,
+    Concat,
+    Substr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastTarget {
+    Int,
+    Float,
+    Text,
+    Bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +139,14 @@ pub enum LogicalPlan {
         group_expr: Vec<Expr>,
         aggr_expr: Vec<Expr>,
     },
+    /// UNION / UNION ALL of two query results
+    Union {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        all: bool,
+    },
+    /// DISTINCT — deduplicate rows
+    Distinct { input: Box<LogicalPlan> },
 }
 
 impl LogicalPlan {
@@ -144,6 +184,8 @@ impl LogicalPlan {
                 }
                 Arc::new(Schema::new(fields))
             }
+            LogicalPlan::Union { left, .. } => left.schema(),
+            LogicalPlan::Distinct { input } => input.schema(),
             LogicalPlan::Aggregate {
                 input,
                 group_expr,
@@ -228,5 +270,32 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
         | Expr::In { .. }
         | Expr::Between { .. } => ValueType::Bool,
         Expr::AggregateExpr { .. } => ValueType::Int,
+        Expr::Case {
+            else_expr,
+            branches,
+            ..
+        } => {
+            if let Some(branch) = branches.first() {
+                infer_expr_type_full(&branch.1, schema)
+            } else if let Some(e) = else_expr {
+                infer_expr_type_full(e, schema)
+            } else {
+                ValueType::Null
+            }
+        }
+        Expr::Coalesce(args) => args
+            .first()
+            .map(|e| infer_expr_type_full(e, schema))
+            .unwrap_or(ValueType::Null),
+        Expr::Nullif(a, _) => infer_expr_type_full(a, schema),
+        Expr::ScalarFn { func, .. } => match func {
+            ScalarFnKind::Length => ValueType::Int,
+            _ => ValueType::String,
+        },
+        Expr::Cast { to, .. } => match to {
+            CastTarget::Int => ValueType::Int,
+            CastTarget::Float => ValueType::Float,
+            CastTarget::Text | CastTarget::Bool => ValueType::String,
+        },
     }
 }

@@ -2,8 +2,8 @@ use crate::core::tuple::Schema;
 use crate::engine::{EngineError, TensorDb};
 use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
-    AggregateExec, FilterExec, IndexScanExec, LimitExec, NestedLoopJoinExec, PhysicalPlan,
-    ProjectionExec, SeqScanExec, SortExec, VectorSearchExec,
+    AggregateExec, DistinctExec, FilterExec, IndexScanExec, LimitExec, NestedLoopJoinExec,
+    PhysicalPlan, ProjectionExec, SeqScanExec, SortExec, UnionExec, VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -172,6 +172,19 @@ impl<'a> Planner<'a> {
                     output_schema,
                 }))
             }
+            LogicalPlan::Union { left, right, all } => {
+                let left_plan = self.create_physical_plan(left)?;
+                let right_plan = self.create_physical_plan(right)?;
+                Ok(Box::new(UnionExec {
+                    left: left_plan,
+                    right: right_plan,
+                    all: *all,
+                }))
+            }
+            LogicalPlan::Distinct { input } => {
+                let input_plan = self.create_physical_plan(input)?;
+                Ok(Box::new(DistinctExec { input: input_plan }))
+            }
         }
     }
 
@@ -280,14 +293,54 @@ fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
                 false
             }
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            let operand_val = operand
+                .as_ref()
+                .map(|e| eval_value(e, row).unwrap_or(crate::core::value::Value::Null));
+            for (cond, result) in branches {
+                let matched = if let Some(ref ov) = operand_val {
+                    eval_value(cond, row)
+                        .map(|cv| ov.compare(&cv) == Some(std::cmp::Ordering::Equal))
+                        .unwrap_or(false)
+                } else {
+                    evaluate_expr(cond, row)
+                };
+                if matched {
+                    return evaluate_expr(result, row);
+                }
+            }
+            else_expr.as_ref().is_some_and(|e| evaluate_expr(e, row))
+        }
+        Expr::Coalesce(args) => {
+            for arg in args {
+                if let Some(v) = eval_value(arg, row) {
+                    if !v.is_null() {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        Expr::ScalarFn { .. } | Expr::Cast { .. } | Expr::Nullif(_, _) => false,
         _ => false,
     }
 }
 
 fn eval_value(expr: &Expr, row: &crate::core::tuple::Tuple) -> Option<crate::core::value::Value> {
+    use crate::query::physical::evaluate_expression;
     match expr {
         Expr::Column(name) => row.get(name).cloned(),
         Expr::Literal(val) => Some(val.clone()),
+        // For complex exprs, delegate to the full evaluator
+        Expr::ScalarFn { .. }
+        | Expr::Cast { .. }
+        | Expr::Case { .. }
+        | Expr::Coalesce(_)
+        | Expr::Nullif(_, _) => Some(evaluate_expression(expr, row)),
         _ => None,
     }
 }
