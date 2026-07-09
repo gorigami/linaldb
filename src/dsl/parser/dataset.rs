@@ -859,17 +859,23 @@ impl Parser {
             _ => {}
         }
 
-        // Default: plain column with optional alias
-        let name = self.eat_ident()?;
-        if self.at(&Token::As) {
+        // Default: parse as a full expression (handles `col`, `col AS alias`, `expr OP expr AS alias`)
+        let expr = self.parse_expr()?;
+        let alias = if self.at(&Token::As) {
             self.advance();
-            let alias = self.eat_ident()?;
-            return Ok(SelectExpr::Computed {
-                expr: Box::new(Expr::Ref(name)),
-                alias: Some(alias),
-            });
+            Some(self.eat_ident()?)
+        } else {
+            None
+        };
+        match (expr, alias) {
+            // Simple column reference with no alias → Column
+            (Expr::Ref(name), None) => Ok(SelectExpr::Column(name)),
+            // Everything else → Computed
+            (expr, alias) => Ok(SelectExpr::Computed {
+                expr: Box::new(expr),
+                alias,
+            }),
         }
-        Ok(SelectExpr::Column(name))
     }
 
     // Parse OVER (PARTITION BY ... ORDER BY ...) window spec

@@ -677,7 +677,20 @@ impl Parser {
             }
             Some(Token::Tensor) => {
                 self.advance();
-                let dims = self.parse_usize_list()?;
+                let dims = if self.at(&Token::LParen) {
+                    self.eat(&Token::LParen)?;
+                    let mut dims = Vec::new();
+                    while !self.at(&Token::RParen) && !self.eof() {
+                        dims.push(self.eat_usize()?);
+                        if self.at(&Token::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.eat(&Token::RParen)?;
+                    dims
+                } else {
+                    self.parse_usize_list()?
+                };
                 Ok(ColType::Tensor(dims))
             }
             Some(Token::Ident(_)) => {
@@ -701,7 +714,23 @@ impl Parser {
                         self.eat(&Token::RParen)?;
                         Ok(ColType::Matrix(rows, cols))
                     }
-                    "TENSOR" => Ok(ColType::Tensor(self.parse_usize_list()?)),
+                    "TENSOR" => {
+                        let dims = if self.at(&Token::LParen) {
+                            self.eat(&Token::LParen)?;
+                            let mut dims = Vec::new();
+                            while !self.at(&Token::RParen) && !self.eof() {
+                                dims.push(self.eat_usize()?);
+                                if self.at(&Token::Comma) {
+                                    self.advance();
+                                }
+                            }
+                            self.eat(&Token::RParen)?;
+                            dims
+                        } else {
+                            self.parse_usize_list()?
+                        };
+                        Ok(ColType::Tensor(dims))
+                    }
                     other => Err(self.error(format!("unknown column type '{}'", other))),
                 }
             }

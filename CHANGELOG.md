@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.30] - 2026-07-09
+
+### Fixed — Correctness bug-fix pass with 12 integration tests
+
+**Bug 1 — Computed columns: type inference now uses actual runtime value type**
+- `infer_expr_result_type` added `Expr::Ref` → `Float` and `Expr::Infix` with recursive left/right inference
+- `apply_window_and_computed_exprs`: field type now derived from `val.value_type()` instead of static inference, preventing `Tuple::new` rejections on Int/Bool/String results
+- Projection `extended_schema` now derived from the first row's schema (actual types) instead of static inference
+
+**Bug 2 — NULLABLE columns ignored in `DATASET ... COLUMNS (...)`**
+- `Field::new` in `CreateDataset` executor now calls `.nullable()` when `ColumnDef.nullable` is true
+- `INSERT INTO ... VALUES (NULL)` now correctly accepted for columns declared `INT NULLABLE`, `STRING NULLABLE`, etc.
+
+**Bug 3 — `TENSOR(n)` parenthesis syntax rejected**
+- `parse_col_type` (both `Token::Tensor` and `"TENSOR"` string paths) now accepts `TENSOR(n)` and `TENSOR(r, c)` with parentheses in addition to existing `TENSOR[n]` bracket form
+
+**Bug 4 — COALESCE result type**
+- `apply_window_and_computed_exprs` correctly handles `COALESCE` whose args are reference columns: uses actual computed `Value::Int`/`Value::Float`/etc. rather than a static `Float` fallback
+
+### Tests — 12 new integration tests in `tests/correctness_integration.rs`
+- `test_multiple_computed_columns` — multiple `expr AS alias` in one SELECT
+- `test_window_no_partition_by` — `ROW_NUMBER() OVER (ORDER BY ...)` with no partition
+- `test_union_deduplicates` — `UNION` produces distinct rows
+- `test_union_all_keeps_duplicates` — `UNION ALL` retains duplicates
+- `test_cast_to_bool` — `CAST(0 AS BOOL)` → false, `CAST(1 AS BOOL)` → true
+- `test_substr_two_arg` — `SUBSTR(str, 2)` uses 1-based indexing
+- `test_coalesce_three_args` — `COALESCE(NULL, NULL, 42)` → 42 with nullable INT columns
+- `test_right_join_correctness` — right-only rows have NULL left-side columns
+- `test_full_outer_join_correctness` — unmatched rows on both sides carry NULLs
+- `test_cte_cleanup_after_query` — CTE temp dataset removed after query completes
+- `test_tensor_column_preserves_dimensions` — `TENSOR(128)` → `Vector(128)`
+- `test_tensor_2d_column_maps_to_matrix` — `TENSOR(4, 8)` → `Matrix(4, 8)`
+
+---
+
 ## [0.1.29] - 2026-07-09
 
 ### Added — Window Functions, CTEs, UNION, CASE WHEN, DISTINCT, COALESCE/NULLIF, String Functions, CAST
