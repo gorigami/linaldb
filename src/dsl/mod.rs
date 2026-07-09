@@ -131,13 +131,11 @@ pub fn execute_script(db: &mut TensorDb, script: &str) -> Result<(), DslError> {
         // Heuristic: balance is 0.
         // Note: This might be fragile if strings contain parens, but MVP.
         if paren_balance == 0 {
-            match execute_line(db, &current_cmd, start_line) {
-                Ok(output) => {
-                    if !matches!(output, DslOutput::None) {
-                        println!("{}", output);
-                    }
+            {
+                let output = execute_line(db, &current_cmd, start_line)?;
+                if !matches!(output, DslOutput::None) {
+                    println!("{}", output);
                 }
-                Err(e) => return Err(e),
             }
             current_cmd.clear();
         }
