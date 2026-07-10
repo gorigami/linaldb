@@ -57,6 +57,8 @@ pub enum Expr {
     VecLiteral(Vec<f64>),
     /// SQL-style vector function: `COSINE_SIM(emb, [0.1, 0.2])`, `NORMALIZE(emb)`
     VectorFn { func: VectorFnKind, args: Vec<Expr> },
+    /// Inline matrix literal: `[[0.1, 0.2], [0.3, 0.4]]`
+    MatLiteral(Vec<Vec<f64>>),
 }
 
 /// Vector/tensor functions usable in SQL expressions.
@@ -68,6 +70,9 @@ pub enum VectorFnKind {
     Dot,
     VecAdd,
     VecScale,
+    Matmul,
+    Transpose,
+    MatShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,11 +300,18 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             _ => ValueType::Int,
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),
+        Expr::MatLiteral(rows) => {
+            let r = rows.len();
+            let c = rows.first().map_or(0, |row| row.len());
+            ValueType::Matrix(r, c)
+        }
         Expr::VectorFn { func, .. } => match func {
             VectorFnKind::Normalize | VectorFnKind::VecAdd | VectorFnKind::VecScale => {
                 ValueType::Vector(0)
             }
             VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
+            VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
+            VectorFnKind::MatShape => ValueType::String,
         },
         Expr::Case {
             else_expr,

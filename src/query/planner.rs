@@ -2,8 +2,9 @@ use crate::core::tuple::Schema;
 use crate::engine::{EngineError, TensorDb};
 use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
-    AggregateExec, DistinctExec, FilterExec, IndexScanExec, LimitExec, NestedLoopJoinExec,
-    PhysicalPlan, ProjectionExec, SeqScanExec, SortExec, UnionExec, VectorSearchExec,
+    AggregateExec, CosineFilterExec, DistinctExec, FilterExec, IndexScanExec, LimitExec,
+    NestedLoopJoinExec, PhysicalPlan, ProjectionExec, SeqScanExec, SortExec, UnionExec,
+    VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -206,23 +207,62 @@ impl<'a> Planner<'a> {
         schema: &Schema,
         predicate: &Expr,
     ) -> Option<Box<dyn PhysicalPlan>> {
-        // Look for: Col = Literal
         if let Expr::BinaryExpr { left, op, right } = predicate {
+            // Pattern 1: col = literal → hash index
             if op == "=" {
                 if let (Expr::Column(col_name), Expr::Literal(val)) =
                     (left.as_ref(), right.as_ref())
                 {
-                    // Check if index exists
                     if let Ok(dataset) = self.db.get_dataset(dataset_name) {
                         if let Some(index) = dataset.get_index(col_name) {
                             if index.index_type() == crate::core::index::IndexType::Hash {
-                                // FOUND MATCH! Use IndexScan
                                 return Some(Box::new(IndexScanExec {
                                     dataset_name: dataset_name.to_string(),
                                     schema: Arc::new(schema.clone()),
                                     column: col_name.clone(),
                                     value: val.clone(),
                                 }));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pattern 2: COSINE_SIM(col, query_vec) > threshold → vector index
+            if op == ">" || op == ">=" {
+                if let Expr::VectorFn {
+                    func: crate::query::logical::VectorFnKind::CosineSim,
+                    args,
+                } = left.as_ref()
+                {
+                    if args.len() == 2 {
+                        if let (
+                            Expr::Column(col_name),
+                            Expr::Literal(crate::core::value::Value::Vector(qvec)),
+                        ) = (&args[0], &args[1])
+                        {
+                            let threshold = match right.as_ref() {
+                                Expr::Literal(crate::core::value::Value::Float(f)) => Some(*f),
+                                Expr::Literal(crate::core::value::Value::Int(i)) => Some(*i as f32),
+                                _ => None,
+                            };
+                            if let Some(threshold) = threshold {
+                                if let Ok(dataset) = self.db.get_dataset(dataset_name) {
+                                    if let Some(index) = dataset.get_index(col_name) {
+                                        if index.index_type()
+                                            == crate::core::index::IndexType::Vector
+                                        {
+                                            return Some(Box::new(CosineFilterExec {
+                                                dataset_name: dataset_name.to_string(),
+                                                schema: Arc::new(schema.clone()),
+                                                column: col_name.clone(),
+                                                query: qvec.clone(),
+                                                threshold,
+                                                strict: op == ">",
+                                            }));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

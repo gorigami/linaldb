@@ -252,6 +252,7 @@ impl Parser {
             Some(Token::Search) => self.parse_search(),
             Some(Token::Update) => self.parse_update(),
             Some(Token::Delete) => self.parse_delete(),
+            Some(Token::Transform) => self.parse_transform(),
             Some(Token::Reset) => {
                 self.advance();
                 if self.at_ident("SESSION") {
@@ -521,6 +522,42 @@ impl Parser {
         Ok(Statement::DropDatabase(DropDatabaseStmt {
             name,
             if_exists,
+        }))
+    }
+
+    // TRANSFORM <source> SELECT ... [WHERE ...] [INTO <target>]
+    fn parse_transform(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::Transform)?;
+        let source = self.eat_ident()?;
+        self.eat(&Token::Select)?;
+        let columns = if self.at(&Token::Star) {
+            self.advance();
+            SelectColumns::All
+        } else {
+            let mut cols = vec![self.parse_select_expr()?];
+            while self.at(&Token::Comma) {
+                self.advance();
+                cols.push(self.parse_select_expr()?);
+            }
+            SelectColumns::Named(cols)
+        };
+        let filter = if matches!(self.peek(), Some(Token::Where) | Some(Token::Filter)) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let target = if self.at(&Token::Into) {
+            self.advance();
+            Some(self.eat_ident()?)
+        } else {
+            None
+        };
+        Ok(Statement::Transform(TransformStmt {
+            source,
+            columns,
+            filter,
+            target,
         }))
     }
 

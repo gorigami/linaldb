@@ -592,6 +592,72 @@ impl PhysicalPlan for AggregateExec {
     }
 }
 
+/// Cosine similarity threshold filter using a vector index.
+#[derive(Debug)]
+pub struct CosineFilterExec {
+    pub dataset_name: String,
+    pub schema: Arc<Schema>,
+    pub column: String,
+    pub query: Vec<f32>,
+    pub threshold: f32,
+    pub strict: bool,
+}
+
+impl PhysicalPlan for CosineFilterExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        use crate::core::tensor::{Shape, TensorId, TensorMetadata};
+
+        let dataset = db.get_dataset(&self.dataset_name)?;
+        let index = dataset.get_index(&self.column).ok_or_else(|| {
+            EngineError::InvalidOp(format!(
+                "Vector index not found on column '{}'",
+                self.column
+            ))
+        })?;
+
+        if index.index_type() != crate::core::index::IndexType::Vector {
+            return Err(EngineError::InvalidOp(format!(
+                "Index on '{}' is not a VECTOR index",
+                self.column
+            )));
+        }
+
+        let k = dataset.rows.len().max(1);
+        let n = self.query.len();
+        let id = TensorId::new();
+        let meta = TensorMetadata::new(id, None);
+        let query_tensor =
+            crate::core::tensor::Tensor::new(id, Shape::new(vec![n]), self.query.clone(), meta)
+                .map_err(EngineError::InvalidOp)?;
+
+        let results = index
+            .search(&query_tensor, k)
+            .map_err(EngineError::InvalidOp)?;
+
+        let row_ids: Vec<usize> = results
+            .into_iter()
+            .filter(|(_, score)| {
+                if self.strict {
+                    *score > self.threshold
+                } else {
+                    *score >= self.threshold
+                }
+            })
+            .map(|(id, _)| id)
+            .collect();
+
+        let mut evaluated_rows = Vec::new();
+        for row in dataset.get_rows_by_ids(&row_ids) {
+            evaluated_rows.push(evaluate_lazy_columns_in_row(dataset, &row)?);
+        }
+        Ok(evaluated_rows)
+    }
+}
+
 pub fn evaluate_expression(
     expr: &crate::query::logical::Expr,
     row: &crate::core::tuple::Tuple,
@@ -866,6 +932,11 @@ pub fn evaluate_expression(
         crate::query::logical::Expr::VecLiteral(vals) => {
             Value::Vector(vals.iter().map(|&v| v as f32).collect())
         }
+        crate::query::logical::Expr::MatLiteral(rows) => Value::Matrix(
+            rows.iter()
+                .map(|r| r.iter().map(|&v| v as f32).collect())
+                .collect(),
+        ),
         crate::query::logical::Expr::VectorFn { func, args } => {
             use crate::query::logical::VectorFnKind;
             let vals: Vec<Value> = args.iter().map(|a| evaluate_expression(a, row)).collect();
@@ -921,6 +992,62 @@ pub fn evaluate_expression(
                         };
                         Value::Vector(v.iter().map(|x| x * factor).collect())
                     }
+                    _ => Value::Null,
+                },
+                VectorFnKind::Matmul => match (vals.first(), vals.get(1)) {
+                    (Some(Value::Matrix(a)), Some(Value::Matrix(b))) => {
+                        if a.is_empty() || b.is_empty() || a[0].len() != b.len() {
+                            return Value::Null;
+                        }
+                        let rows = a.len();
+                        let cols = b[0].len();
+                        let inner = b.len();
+                        let mut result = vec![vec![0.0f32; cols]; rows];
+                        for i in 0..rows {
+                            for j in 0..cols {
+                                for k in 0..inner {
+                                    result[i][j] += a[i][k] * b[k][j];
+                                }
+                            }
+                        }
+                        Value::Matrix(result)
+                    }
+                    (Some(Value::Matrix(m)), Some(Value::Vector(v))) => {
+                        if m.is_empty() || m[0].len() != v.len() {
+                            return Value::Null;
+                        }
+                        let result: Vec<f32> = m
+                            .iter()
+                            .map(|row| row.iter().zip(v.iter()).map(|(a, b)| a * b).sum())
+                            .collect();
+                        Value::Vector(result)
+                    }
+                    _ => Value::Null,
+                },
+                VectorFnKind::Transpose => match vals.first() {
+                    Some(Value::Matrix(m)) => {
+                        if m.is_empty() {
+                            return Value::Matrix(vec![]);
+                        }
+                        let rows = m.len();
+                        let cols = m[0].len();
+                        let mut result = vec![vec![0.0f32; rows]; cols];
+                        for i in 0..rows {
+                            for j in 0..cols {
+                                result[j][i] = m[i][j];
+                            }
+                        }
+                        Value::Matrix(result)
+                    }
+                    _ => Value::Null,
+                },
+                VectorFnKind::MatShape => match vals.first() {
+                    Some(Value::Matrix(m)) => {
+                        let r = m.len();
+                        let c = m.first().map_or(0, |row| row.len());
+                        Value::String(format!("{}x{}", r, c))
+                    }
+                    Some(Value::Vector(v)) => Value::String(format!("{}x1", v.len())),
                     _ => Value::Null,
                 },
             }

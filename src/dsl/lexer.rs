@@ -69,6 +69,8 @@ pub enum Token {
     Export,
     #[token("RESET")]
     Reset,
+    #[token("TRANSFORM")]
+    Transform,
     #[token("UPDATE")]
     Update,
     #[token("DELETE")]

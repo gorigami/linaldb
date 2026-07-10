@@ -115,6 +115,7 @@ fn eval_expr_to_name(
         | Expr::ScalarFn { .. }
         | Expr::Cast { .. }
         | Expr::VecLiteral(_)
+        | Expr::MatLiteral(_)
         | Expr::VectorFn { .. } => Err(DslError::Parse {
             line: line_no,
             msg: "boolean predicates, scalar functions, and SQL vector functions are not valid tensor expressions".into(),
@@ -447,6 +448,16 @@ pub fn expr_to_string(expr: &Expr) -> String {
             let items: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
             format!("[{}]", items.join(", "))
         }
+        Expr::MatLiteral(rows) => {
+            let row_strs: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    let items: Vec<String> = r.iter().map(|v| v.to_string()).collect();
+                    format!("[{}]", items.join(", "))
+                })
+                .collect();
+            format!("[{}]", row_strs.join(", "))
+        }
         Expr::VectorFn { func, args } => {
             use crate::dsl::ast::VectorFnKind;
             let name = match func {
@@ -456,6 +467,9 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 VectorFnKind::Dot => "DOT",
                 VectorFnKind::VecAdd => "VEC_ADD",
                 VectorFnKind::VecScale => "VEC_SCALE",
+                VectorFnKind::Matmul => "MATMUL",
+                VectorFnKind::Transpose => "TRANSPOSE",
+                VectorFnKind::MatShape => "MAT_SHAPE",
             };
             let items: Vec<String> = args.iter().map(expr_to_string).collect();
             format!("{}({})", name, items.join(", "))

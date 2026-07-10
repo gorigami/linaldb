@@ -87,6 +87,10 @@ pub enum Statement {
     /// `DELETE FROM <dataset> [WHERE ...]`
     Delete(DeleteStmt),
 
+    // ─── Pipeline ────────────────────────────────────────────────────────────
+    /// `TRANSFORM <source> SELECT ... [WHERE ...] [INTO <target>]`
+    Transform(TransformStmt),
+
     // ─── Session ─────────────────────────────────────────────────────────────
     /// `RESET`
     Reset,
@@ -633,6 +637,8 @@ pub enum Expr {
     VecLiteral(Vec<f64>),
     /// SQL-style vector function: `COSINE_SIM(embedding, [0.1, 0.2, 0.3])`
     VectorFn { func: VectorFnKind, args: Vec<Expr> },
+    /// Inline matrix literal: `[[0.1, 0.2], [0.3, 0.4]]`
+    MatLiteral(Vec<Vec<f64>>),
 }
 
 /// Vector/tensor functions usable directly in SQL expressions.
@@ -644,6 +650,9 @@ pub enum VectorFnKind {
     Dot,
     VecAdd,
     VecScale,
+    Matmul,
+    Transpose,
+    MatShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,6 +731,15 @@ pub enum CallExpr {
     // ── N-ary operations ────────────────────────────────────────────────────
     /// `STACK t1 t2 t3 ...`
     Stack(Vec<Expr>),
+}
+
+#[derive(Debug, Clone)]
+pub struct TransformStmt {
+    pub source: String,
+    pub columns: SelectColumns,
+    pub filter: Option<Expr>,
+    /// If Some, write result to this dataset; if None, replace source in-place.
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone)]

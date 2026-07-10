@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.32] - 2026-07-10
+
+### Added — Vector engine: index-aware similarity search, matrix SQL expressions, and TRANSFORM
+
+**Feature 1 — Index-aware COSINE_SIM (`COSINE_SIM(col, vec) > threshold`)**
+- The query planner now detects `COSINE_SIM(col, vec) > threshold` / `>= threshold` predicates in WHERE clauses
+- When a vector index exists on the filtered column, the planner replaces the full table scan with a new `CosineFilterExec` physical node that calls `index.search(query, k=total_rows)` and filters candidates by score, avoiding reading irrelevant rows
+- Falls back to brute-force expression evaluation when no vector index is present — behavior is identical, only performance differs
+- Supports both `>` (strict) and `>=` (inclusive) threshold comparisons
+
+**Feature 2 — Matrix SQL expressions**
+- `[[r1_v1, r1_v2], [r2_v1, r2_v2]]` matrix literals now valid anywhere an expression is expected
+- `MATMUL(a, b)` — matrix × matrix or matrix × vector multiplication in SELECT/WHERE
+- `TRANSPOSE(col)` — transposes a matrix column; rows and columns are swapped
+- `MAT_SHAPE(col)` — returns the shape as a `"RxC"` string (e.g. `"2x3"`)
+- All four additions are wired through parser → AST (`Expr::MatLiteral`, `VectorFnKind::{Matmul,Transpose,MatShape}`) → logical plan → physical evaluation
+- `MATMUL` and `TRANSPOSE` tokens disambiguated: followed by `(` → SQL-function call; otherwise → existing tensor-algebra prefix syntax
+
+**Feature 3 — TRANSFORM statement**
+- New top-level DSL statement: `TRANSFORM <source> SELECT <cols> [WHERE <predicate>] [INTO <target>]`
+- Applies a SELECT with optional filter over an existing dataset
+- `INTO <target>` writes the result to a new (or existing) dataset; omitting `INTO` replaces the source in-place
+- Implemented by wrapping into a `SelectStmt` and delegating to `execute_select`, then reinserting the result
+
+**Tests**
+- `tests/v0132_features_test.rs`: 11 integration tests covering all three features (matrix literals, MATMUL, TRANSPOSE, MAT_SHAPE, TRANSFORM with/without INTO, TRANSFORM SELECT *, COSINE_SIM with and without a vector index)
+
+---
+
 ## [0.1.31] - 2026-07-10
 
 ### Added — Tensor-SQL bridge: vectors as first-class SQL citizens
