@@ -50,9 +50,8 @@ fn mat_shape_returns_string() {
     let mut db = db();
     exec(&mut db, "DATASET mats COLUMNS (m: Matrix(2, 3))");
     exec(&mut db, "INSERT INTO mats (m = [[1, 2, 3], [4, 5, 6]])");
-    let out =
-        execute_line_with_context(&mut db, "SELECT MAT_SHAPE(m) AS shape FROM mats", 1, None)
-            .unwrap();
+    let out = execute_line_with_context(&mut db, "SELECT MAT_SHAPE(m) AS shape FROM mats", 1, None)
+        .unwrap();
     let table = as_table(out);
     let val = table.rows[0].get("shape").unwrap();
     assert_eq!(val, &linal::core::value::Value::String("2x3".to_string()));
@@ -64,8 +63,7 @@ fn transpose_flips_rows_and_cols() {
     exec(&mut db, "DATASET mats COLUMNS (m: Matrix(2, 3))");
     exec(&mut db, "INSERT INTO mats (m = [[1, 2, 3], [4, 5, 6]])");
     let out =
-        execute_line_with_context(&mut db, "SELECT TRANSPOSE(m) AS t FROM mats", 1, None)
-            .unwrap();
+        execute_line_with_context(&mut db, "SELECT TRANSPOSE(m) AS t FROM mats", 1, None).unwrap();
     let table = as_table(out);
     let val = table.rows[0].get("t").unwrap();
     if let linal::core::value::Value::Matrix(m) = val {
@@ -86,10 +84,12 @@ fn matmul_matrix_times_vector() {
         &mut db,
         "DATASET ops COLUMNS (m: Matrix(2, 2), v: Vector(2))",
     );
-    exec(&mut db, "INSERT INTO ops (m = [[1, 0], [0, 1]], v = [3.0, 4.0])");
-    let out =
-        execute_line_with_context(&mut db, "SELECT MATMUL(m, v) AS result FROM ops", 1, None)
-            .unwrap();
+    exec(
+        &mut db,
+        "INSERT INTO ops (m = [[1, 0], [0, 1]], v = [3.0, 4.0])",
+    );
+    let out = execute_line_with_context(&mut db, "SELECT MATMUL(m, v) AS result FROM ops", 1, None)
+        .unwrap();
     let table = as_table(out);
     let val = table.rows[0].get("result").unwrap();
     if let linal::core::value::Value::Vector(v) = val {
@@ -108,10 +108,12 @@ fn matmul_matrix_times_matrix() {
         &mut db,
         "DATASET ops COLUMNS (a: Matrix(2, 2), b: Matrix(2, 2))",
     );
-    exec(&mut db, "INSERT INTO ops (a = [[1, 2], [3, 4]], b = [[1, 0], [0, 1]])");
-    let out =
-        execute_line_with_context(&mut db, "SELECT MATMUL(a, b) AS result FROM ops", 1, None)
-            .unwrap();
+    exec(
+        &mut db,
+        "INSERT INTO ops (a = [[1, 2], [3, 4]], b = [[1, 0], [0, 1]])",
+    );
+    let out = execute_line_with_context(&mut db, "SELECT MATMUL(a, b) AS result FROM ops", 1, None)
+        .unwrap();
     let table = as_table(out);
     let val = table.rows[0].get("result").unwrap();
     if let linal::core::value::Value::Matrix(m) = val {
@@ -134,9 +136,18 @@ fn transform_into_new_dataset() {
         &mut db,
         "DATASET employees COLUMNS (name: String, salary: Float)",
     );
-    exec(&mut db, "INSERT INTO employees (name = \"Alice\", salary = 80000.0)");
-    exec(&mut db, "INSERT INTO employees (name = \"Bob\", salary = 50000.0)");
-    exec(&mut db, "INSERT INTO employees (name = \"Carol\", salary = 120000.0)");
+    exec(
+        &mut db,
+        "INSERT INTO employees (name = \"Alice\", salary = 80000.0)",
+    );
+    exec(
+        &mut db,
+        "INSERT INTO employees (name = \"Bob\", salary = 50000.0)",
+    );
+    exec(
+        &mut db,
+        "INSERT INTO employees (name = \"Carol\", salary = 120000.0)",
+    );
 
     exec(
         &mut db,
@@ -211,7 +222,10 @@ fn cosine_sim_threshold_with_vector_index() {
     exec(&mut db, "DATASET vecs COLUMNS (id: Int, emb: Vector(3))");
     exec(&mut db, "INSERT INTO vecs (id = 1, emb = [1.0, 0.0, 0.0])");
     exec(&mut db, "INSERT INTO vecs (id = 2, emb = [0.0, 1.0, 0.0])");
-    exec(&mut db, "INSERT INTO vecs (id = 3, emb = [0.9, 0.436, 0.0])");
+    exec(
+        &mut db,
+        "INSERT INTO vecs (id = 3, emb = [0.9, 0.436, 0.0])",
+    );
     exec(&mut db, "CREATE VECTOR INDEX ON vecs(emb)");
 
     let out = execute_line_with_context(

@@ -932,13 +932,11 @@ pub fn evaluate_expression(
         crate::query::logical::Expr::VecLiteral(vals) => {
             Value::Vector(vals.iter().map(|&v| v as f32).collect())
         }
-        crate::query::logical::Expr::MatLiteral(rows) => {
-            Value::Matrix(
-                rows.iter()
-                    .map(|r| r.iter().map(|&v| v as f32).collect())
-                    .collect(),
-            )
-        }
+        crate::query::logical::Expr::MatLiteral(rows) => Value::Matrix(
+            rows.iter()
+                .map(|r| r.iter().map(|&v| v as f32).collect())
+                .collect(),
+        ),
         crate::query::logical::Expr::VectorFn { func, args } => {
             use crate::query::logical::VectorFnKind;
             let vals: Vec<Value> = args.iter().map(|a| evaluate_expression(a, row)).collect();

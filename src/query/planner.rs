@@ -243,9 +243,7 @@ impl<'a> Planner<'a> {
                         {
                             let threshold = match right.as_ref() {
                                 Expr::Literal(crate::core::value::Value::Float(f)) => Some(*f),
-                                Expr::Literal(crate::core::value::Value::Int(i)) => {
-                                    Some(*i as f32)
-                                }
+                                Expr::Literal(crate::core::value::Value::Int(i)) => Some(*i as f32),
                                 _ => None,
                             };
                             if let Some(threshold) = threshold {
