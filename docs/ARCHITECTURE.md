@@ -219,8 +219,13 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 
 - `Statement` — 27 variants, one per top-level command
 - `Statement::is_read_only()` — gates the shared-reference `execute_line_shared` path
-- `Expr` — expression sub-language: `Ref`, `Scalar`, `StringLit`, `Infix`, `Call`, `Index`, `Field`, `DatasetRef`
+- `Expr` — expression sub-language: `Ref`, `Scalar`, `StringLit`, `Infix`, `Call`, `Index`, `Field`, `DatasetRef`, `VecLiteral(Vec<f64>)`, `VectorFn { func: VectorFnKind, args: Vec<Expr> }`
+  - `Expr::VecLiteral` — inline vector constant `[v1, v2, ...]` usable anywhere in a SQL expression
+  - `Expr::VectorFn` — one of six SQL-style vector functions (see `VectorFnKind`) usable in SELECT, WHERE, ORDER BY
+- `VectorFnKind` — `Normalize`, `L2Norm`, `CosineSim`, `Dot`, `VecAdd`, `VecScale` (v0.1.31)
 - `CallExpr` — 18 named-prefix operations: binary (`ADD`, `MATMUL`, `CORRELATE`, …), unary (`NORMALIZE`, `RESHAPE`, …), n-ary (`STACK`)
+- `AggFuncAst` — aggregate functions: `Sum`, `Avg`, `Count`, `Min`, `Max`, `AvgVec`, `SumVec` (v0.1.31)
+  - `AvgVec` / `SumVec` — element-wise vector aggregates for GROUP BY centroid queries
 - All types (`ColType`, `TensorKindAst`, `InfixOp`, `CmpOp`, `FilterValue`) are decoupled from engine internals; the executor maps them
 - `DatasetFromClause` — typed clause bag for `DATASET … FROM source [FILTER …] [SELECT …] [GROUP BY …] [HAVING …] [ORDER BY …] [LIMIT …]`
 - `DatasetFilter { column, op: CmpOp, value: FilterValue }` — typed predicate for FILTER/HAVING in dataset queries
@@ -235,7 +240,11 @@ Split from a single 2581-line `parser.rs` into five focused files. All files sha
 
 - **`parser/mod.rs`** — `Parser` struct, all cursor/consuming primitives (`peek`, `eat`, `eat_ident`, etc.), `parse_statement` dispatch, small statement parsers (`parse_define_tensor`, `parse_let`, `parse_create`, `parse_drop`, etc.), full test suite (58 tests)
 - **`parser/dataset.rs`** — `parse_create_dataset`, `parse_dataset_from_clause`, `parse_select`, `parse_alter`, `parse_insert_into`, `parse_search`, `parse_materialize`, and related helpers (`parse_cmp_op`, `parse_filter_value`, `parse_agg_call`, `parse_select_expr`)
+  - `parse_select_expr` detects `AVG_VEC` / `SUM_VEC` identifiers and routes to `SelectExpr::Aggregate { func: AvgVec/SumVec, ... }`; consumes optional `AS alias` (v0.1.31)
 - **`parser/expr.rs`** — `parse_expr`, `parse_pratt` (Pratt precedence climber), `parse_expr_atom`, `parse_call_expr`, `parse_simple_expr`, `can_start_simple_expr`
+  - `parse_vec_literal()` — parses `[n, n, ...]` into `Expr::VecLiteral`; triggered by `Token::LBracket` at atom position (v0.1.31)
+  - `Token::Normalize` in atom position: if next token is `(` → SQL-style `Expr::VectorFn { Normalize, ... }`, otherwise → tensor-algebra `CallExpr::Normalize` (v0.1.31)
+  - Ident `L2_NORM` / `COSINE_SIM` / `DOT` / `VEC_ADD` / `VEC_SCALE` followed by `(` → `Expr::VectorFn` (v0.1.31)
 - **`parser/introspection.rs`** — `parse_show`, `parse_explain`, `parse_audit`, `parse_deliver`
 - **`parser/persistence.rs`** — `parse_save`, `parse_load`, `parse_list`, `parse_import`, `parse_export`, `parse_use`
 
@@ -243,6 +252,7 @@ Public API (unchanged): `parse(source) -> Result<Statement, ParseError>` — ent
 
 Key properties:
 - Pratt parser for the expression sub-language with correct infix precedence (`*`/`/` > `+`/`-` > comparisons) and postfix `.field` / `[...]` binding
+- `Token::LBracket` in atom position always routes to `parse_vec_literal()` (SQL vector literal); in postfix position routes to `parse_index_specs()` (tensor indexing)
 - `ParseError { offset: usize, msg: String }` with `into_dsl_error(line)` for integration
 - All statement forms from v0.1.20–v0.1.21 (hardened `IF NOT EXISTS`, SEARCH, computed columns, `Expr::Int`, aggregate expressions) preserved unchanged
 
@@ -255,6 +265,9 @@ Split from a single 2014-line `executor.rs` into five focused files, each with a
 - **`executor/show.rs`** — `execute_show` (all `ShowTarget` variants; calls engine APIs directly); `format_lineage_tree` (private)
 - **`executor/explain.rs`** — `execute_explain`; builds `LogicalPlan` directly from typed `ExplainTarget` (Dataset/Search/Select) through the `Planner`; reuses shared helpers from `query.rs` via `use super::query::...` to avoid duplication
 - **`executor/query.rs`** — `execute_select`, `execute_create_dataset_from`, `execute_add_computed_column`; shared logical-plan helpers (`agg_func_to_logical`, `dataset_filter_to_logical`, `dsl_expr_to_logical_expr`); `eval_row_expr` (pure per-row evaluator for computed columns, walks `Expr::Infix` with column lookup)
+  - `dsl_expr_to_logical_expr` maps `Expr::VecLiteral` → `LogicalExpr::Literal(Value::Vector(...))` and `Expr::VectorFn` → `LogicalExpr::VectorFn` (v0.1.31)
+  - `agg_func_to_logical` maps `AggFuncAst::AvgVec` / `SumVec` → `AggregateFunction::AvgVec` / `SumVec` (v0.1.31)
+  - `infer_expr_result_type` extended for `VecLiteral` (→ `Vector(n)`) and `VectorFn` (→ `Vector(0)` for shape-returning fns, `Float` for scalar-returning fns) (v0.1.31)
 
 #### `mod.rs` — Dispatch Entry Point
 
@@ -279,11 +292,23 @@ The query module implements query planning and optimization:
 
 - **LogicalPlan**: High-level query representation
 - Operations: Scan, Filter, Project, Aggregate, GroupBy, Limit
+- **`Expr`** extended in v0.1.31:
+  - `Expr::VecLiteral(Vec<f64>)` — compile-time vector constant
+  - `Expr::VectorFn { func: VectorFnKind, args: Vec<Expr> }` — vector scalar functions
+  - `VectorFnKind`: `Normalize`, `L2Norm`, `CosineSim`, `Dot`, `VecAdd`, `VecScale`
+- **`AggregateFunction`** extended: `AvgVec`, `SumVec` for element-wise vector aggregation
+- `infer_expr_type_full`: `VecLiteral` → `Vector(n)`, vector scalar fns → `Vector(0)` or `Float`; `AvgVec`/`SumVec` → `Vector(0)` (wildcard, actual dim known at runtime)
 
 #### `physical.rs`
 
 - **PhysicalPlan**: Executable query plan
 - **Executor**: Executes physical plans with index-aware execution
+- **`evaluate_expression`** extended in v0.1.31:
+  - `VecLiteral` → constructs `Value::Vector` from the literal's `f64` values cast to `f32`
+  - `VectorFn` → evaluates all 6 functions: NORMALIZE (unit-length), L2_NORM (Euclidean norm → Float), COSINE_SIM (dot/(‖a‖·‖b‖) → Float), DOT (dot product → Float), VEC_ADD (element-wise add → Vector), VEC_SCALE (scalar multiply → Vector)
+- **`AggregateExec`** extended in v0.1.31:
+  - `SumVec` shares the `Sum` accumulation path (element-wise addition on `Value::Vector`)
+  - `AvgVec` shares the `Avg` accumulation path (element-wise sum + count, finalized as element-wise divide)
 
 #### `planner.rs`
 
@@ -384,9 +409,16 @@ Expressions are evaluated recursively:
 GROUP BY queries:
 
 1. Group rows by grouping columns
-2. Apply aggregation functions (SUM, AVG, COUNT, MIN, MAX)
+2. Apply aggregation functions (SUM, AVG, COUNT, MIN, MAX, AVG_VEC, SUM_VEC)
 3. Support element-wise aggregation for vectors/matrices
 4. Apply HAVING clause filter
+
+**Vector aggregates** (v0.1.31): `AVG_VEC` and `SUM_VEC` compute element-wise statistics across all vectors in a group, enabling centroid computation directly in SQL:
+
+```sql
+SELECT category, AVG_VEC(embedding) AS centroid
+FROM docs GROUP BY category
+```
 
 ---
 
@@ -510,6 +542,7 @@ Every stored tensor carries a `TensorKind` tag:
 - Compile-time type checking in expressions
 - Runtime validation for dataset operations
 - Clear error messages for type mismatches
+- `Vector(0)` in schema field declarations acts as a dimension wildcard, accepting any `Value::Vector(n)` at runtime. Used by aggregate outputs (`AVG_VEC`, `SUM_VEC`) whose dimension is only known once actual data flows through (v0.1.31)
 
 ---
 

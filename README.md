@@ -9,6 +9,8 @@
 LINALDB is designed for developers and researchers who need the structure of a database with the mathematical power of a tensor library.
 
 - **Multi-Dimensional Tensors**: Generalized N-dimensional math (Rank > 2) with efficient offset traversal.
+- **Tensor-SQL Bridge**: Inline vector literals and SQL vector functions (`COSINE_SIM`, `L2_NORM`, `NORMALIZE`, `DOT`, `VEC_ADD`, `VEC_SCALE`) usable directly inside SELECT, WHERE, and ORDER BY clauses.
+- **Vector Aggregates**: `AVG_VEC` and `SUM_VEC` compute element-wise centroid or sum across row groups in a single GROUP BY query.
 - **Lazy Evaluation Engine**: Define computation graphs using `LAZY LET` and materialize them on-demand via `SHOW`.
 - **Numerical Aggregations**: Native `SUM`, `MEAN`, and `STDEV` operations for powerful statistical analysis.
 - **Semantic Transformations**: Build zero-copy views using Reference Graphs and Lineage tracking.
@@ -55,7 +57,28 @@ DATASET diagnostics COLUMNS (
 )
 ```
 
-### 2. Zero-Copy Reference Graphs
+### 2. Tensor-SQL Bridge
+
+Vectors are first-class citizens in SQL expressions — no separate vector query language needed.
+
+```sql
+-- Similarity search with an inline query vector
+SELECT id, title, COSINE_SIM(embedding, [0.9, 0.1, 0.0]) AS score
+FROM docs
+WHERE COSINE_SIM(embedding, [0.9, 0.1, 0.0]) > 0.7
+ORDER BY score DESC
+LIMIT 10
+
+-- Compute per-category centroids with GROUP BY
+SELECT category, AVG_VEC(embedding) AS centroid
+FROM docs
+GROUP BY category
+
+-- Normalize before storing results
+SELECT id, NORMALIZE(embedding) AS unit_vec FROM docs
+```
+
+### 3. Zero-Copy Reference Graphs
 
 Create semantic views without duplicating data. LINALDB tracks lineage and provenance automatically.
 
@@ -72,7 +95,7 @@ LAZY LET trend = STDEV (sensor_3d * 1.5)
 DERIVE clean_data FROM sensor_3d[0:10, :, *]
 ```
 
-### 3. High-Concurrency Analytics
+### 4. High-Concurrency Analytics
 
 Multi-platform server with parallel execution and background workload management.
 

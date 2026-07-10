@@ -142,6 +142,60 @@ LET scaled = m_a * 10
 
 ## 4. Query & Engineering (SQL)
 
+### Inline Vector Literals
+
+Any SQL expression can contain an inline vector literal. The syntax mirrors Python list notation:
+
+```sql
+SELECT id, COSINE_SIM(embedding, [0.1, 0.2, 0.3]) AS score FROM docs
+SELECT id, VEC_ADD(v, [0.0, 0.0, 1.0]) AS shifted FROM vecs
+SELECT L2_NORM([3.0, 4.0]) AS five FROM dual
+```
+
+### Vector Scalar Functions
+
+Use inside SELECT columns, WHERE predicates, or ORDER BY:
+
+| Function | Signature | Returns | Description |
+|---|---|---|---|
+| `NORMALIZE(v)` | `Vector → Vector` | Unit vector | Scales `v` to L2 norm = 1 |
+| `L2_NORM(v)` | `Vector → Float` | Euclidean length | `√(∑ vᵢ²)` |
+| `COSINE_SIM(a, b)` | `Vector, Vector → Float` | [-1, 1] | `dot(a,b) / (‖a‖ · ‖b‖)` |
+| `DOT(a, b)` | `Vector, Vector → Float` | Scalar | Dot product `∑ aᵢbᵢ` |
+| `VEC_ADD(a, b)` | `Vector, Vector → Vector` | Same dim | Element-wise addition |
+| `VEC_SCALE(v, s)` | `Vector, Float → Vector` | Same dim | Multiply all elements by `s` |
+
+**Typical similarity search**:
+
+```sql
+SELECT id, title, COSINE_SIM(embedding, [0.9, 0.1, 0.0]) AS score
+FROM docs
+WHERE COSINE_SIM(embedding, [0.9, 0.1, 0.0]) > 0.7
+ORDER BY score DESC
+LIMIT 10
+```
+
+### Vector Aggregate Functions
+
+Compute element-wise statistics across all rows in a group:
+
+| Function | Description |
+|---|---|
+| `AVG_VEC(col)` | Element-wise average — produces the centroid of all vectors in the group |
+| `SUM_VEC(col)` | Element-wise sum across all vectors in the group |
+
+```sql
+-- Compute per-category centroids
+SELECT category, AVG_VEC(embedding) AS centroid
+FROM docs
+GROUP BY category
+
+-- Compute total embedding mass per user
+SELECT user_id, SUM_VEC(event_vector) AS total
+FROM events
+GROUP BY user_id
+```
+
 ### SELECT
 
 Query datasets with familiar syntax.
@@ -155,7 +209,7 @@ HAVING AVG(score) > 0.5
 LIMIT 10
 ```
 
-- **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`.
+- **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `AVG_VEC`, `SUM_VEC`.
 - **Filtering**: `WHERE` or `FILTER` can be used interchangeably.
 
 ### Semantic Transforms (Zero-Copy)
