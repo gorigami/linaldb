@@ -324,14 +324,14 @@ impl PhysicalPlan for AggregateExec {
                             match func {
                                 crate::query::logical::AggregateFunction::Count => {
                                     regular_accs.push(Value::Int(0));
-                                    avg_accumulators.push((Value::Null, 0)); // Placeholder
+                                    avg_accumulators.push((Value::Null, 0));
                                 }
-                                crate::query::logical::AggregateFunction::Sum => {
+                                crate::query::logical::AggregateFunction::Sum
+                                | crate::query::logical::AggregateFunction::SumVec => {
                                     let val = evaluate_expression(inner, &row);
                                     if let Value::Vector(v) = val {
                                         regular_accs.push(Value::Vector(vec![0.0; v.len()]));
                                     } else if let Value::Matrix(m) = val {
-                                        // Zero matrix
                                         if m.is_empty() {
                                             regular_accs.push(Value::Matrix(vec![]));
                                         } else {
@@ -342,18 +342,18 @@ impl PhysicalPlan for AggregateExec {
                                     } else {
                                         regular_accs.push(Value::Int(0));
                                     }
-                                    avg_accumulators.push((Value::Null, 0)); // Placeholder
+                                    avg_accumulators.push((Value::Null, 0));
                                 }
                                 crate::query::logical::AggregateFunction::Min => {
                                     regular_accs.push(Value::Null);
-                                    avg_accumulators.push((Value::Null, 0)); // Placeholder
+                                    avg_accumulators.push((Value::Null, 0));
                                 }
                                 crate::query::logical::AggregateFunction::Max => {
                                     regular_accs.push(Value::Null);
-                                    avg_accumulators.push((Value::Null, 0)); // Placeholder
+                                    avg_accumulators.push((Value::Null, 0));
                                 }
-                                crate::query::logical::AggregateFunction::Avg => {
-                                    // For AVG, initialize sum based on first value type
+                                crate::query::logical::AggregateFunction::Avg
+                                | crate::query::logical::AggregateFunction::AvgVec => {
                                     let val = evaluate_expression(inner, &row);
                                     let initial_sum = if let Value::Vector(v) = val {
                                         Value::Vector(vec![0.0; v.len()])
@@ -369,7 +369,7 @@ impl PhysicalPlan for AggregateExec {
                                         Value::Float(0.0)
                                     };
                                     avg_accumulators.push((initial_sum, 0));
-                                    regular_accs.push(Value::Null); // Placeholder, will be replaced with computed avg
+                                    regular_accs.push(Value::Null);
                                 }
                             }
                         }
@@ -399,7 +399,8 @@ impl PhysicalPlan for AggregateExec {
                                 accs[i] = Value::Int(c + 1);
                             }
                         }
-                        crate::query::logical::AggregateFunction::Sum => {
+                        crate::query::logical::AggregateFunction::Sum
+                        | crate::query::logical::AggregateFunction::SumVec => {
                             match (&mut accs[i], &val) {
                                 (Value::Int(ref mut sum), Value::Int(v)) => *sum += v,
                                 (Value::Float(ref mut sum), Value::Float(v)) => *sum += v,
@@ -429,7 +430,8 @@ impl PhysicalPlan for AggregateExec {
                                 _ => {}
                             }
                         }
-                        crate::query::logical::AggregateFunction::Avg => {
+                        crate::query::logical::AggregateFunction::Avg
+                        | crate::query::logical::AggregateFunction::AvgVec => {
                             // Track sum and count for AVG
                             let (sum_ref, count_ref) = &mut avg_accs[i];
                             *count_ref += 1;
@@ -548,7 +550,11 @@ impl PhysicalPlan for AggregateExec {
             let mut final_accs = Vec::new();
             for (i, expr) in self.aggr_expr.iter().enumerate() {
                 if let crate::query::logical::Expr::AggregateExpr { func, .. } = expr {
-                    if matches!(func, crate::query::logical::AggregateFunction::Avg) {
+                    if matches!(
+                        func,
+                        crate::query::logical::AggregateFunction::Avg
+                            | crate::query::logical::AggregateFunction::AvgVec
+                    ) {
                         // Compute average: sum / count
                         let (sum, count) = &avg_accs[i];
                         if *count > 0 {
@@ -853,6 +859,68 @@ pub fn evaluate_expression(
                     Value::Bool(b) => Value::Bool(b),
                     Value::Int(n) => Value::Bool(n != 0),
                     Value::String(s) => Value::Bool(!s.is_empty()),
+                    _ => Value::Null,
+                },
+            }
+        }
+        crate::query::logical::Expr::VecLiteral(vals) => {
+            Value::Vector(vals.iter().map(|&v| v as f32).collect())
+        }
+        crate::query::logical::Expr::VectorFn { func, args } => {
+            use crate::query::logical::VectorFnKind;
+            let vals: Vec<Value> = args.iter().map(|a| evaluate_expression(a, row)).collect();
+            match func {
+                VectorFnKind::Normalize => match vals.first() {
+                    Some(Value::Vector(v)) => {
+                        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if norm == 0.0 {
+                            Value::Vector(v.clone())
+                        } else {
+                            Value::Vector(v.iter().map(|x| x / norm).collect())
+                        }
+                    }
+                    _ => Value::Null,
+                },
+                VectorFnKind::L2Norm => match vals.first() {
+                    Some(Value::Vector(v)) => {
+                        Value::Float(v.iter().map(|x| x * x).sum::<f32>().sqrt())
+                    }
+                    _ => Value::Null,
+                },
+                VectorFnKind::CosineSim => match (vals.first(), vals.get(1)) {
+                    (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
+                        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if na == 0.0 || nb == 0.0 {
+                            Value::Float(0.0)
+                        } else {
+                            Value::Float(dot / (na * nb))
+                        }
+                    }
+                    _ => Value::Null,
+                },
+                VectorFnKind::Dot => match (vals.first(), vals.get(1)) {
+                    (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
+                        Value::Float(a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>())
+                    }
+                    _ => Value::Null,
+                },
+                VectorFnKind::VecAdd => match (vals.first(), vals.get(1)) {
+                    (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
+                        Value::Vector(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
+                    }
+                    _ => Value::Null,
+                },
+                VectorFnKind::VecScale => match (vals.first(), vals.get(1)) {
+                    (Some(Value::Vector(v)), Some(factor_val)) => {
+                        let factor = match factor_val {
+                            Value::Float(f) => *f,
+                            Value::Int(i) => *i as f32,
+                            _ => return Value::Null,
+                        };
+                        Value::Vector(v.iter().map(|x| x * factor).collect())
+                    }
                     _ => Value::Null,
                 },
             }

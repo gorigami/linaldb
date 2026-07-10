@@ -53,6 +53,21 @@ pub enum Expr {
     ScalarFn { func: ScalarFnKind, args: Vec<Expr> },
     /// `CAST(expr AS type)`
     Cast { expr: Box<Expr>, to: CastTarget },
+    /// Inline vector literal: `[0.1, 0.2, 0.3]`
+    VecLiteral(Vec<f64>),
+    /// SQL-style vector function: `COSINE_SIM(emb, [0.1, 0.2])`, `NORMALIZE(emb)`
+    VectorFn { func: VectorFnKind, args: Vec<Expr> },
+}
+
+/// Vector/tensor functions usable in SQL expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorFnKind {
+    Normalize,
+    L2Norm,
+    CosineSim,
+    Dot,
+    VecAdd,
+    VecScale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +103,10 @@ pub enum AggregateFunction {
     Count,
     Min,
     Max,
+    /// Element-wise vector average across group rows
+    AvgVec,
+    /// Element-wise vector sum across group rows
+    SumVec,
 }
 
 #[derive(Debug, Clone)]
@@ -217,15 +236,15 @@ impl LogicalPlan {
                             super::logical::AggregateFunction::Sum
                             | super::logical::AggregateFunction::Min
                             | super::logical::AggregateFunction::Max => {
-                                // If inner expr is Column, try to lookup in input schema?
-                                // We need access to input schema here!
-                                // self.input.schema() is available as `input.schema()`
-
                                 let input_schema = input.schema();
                                 typ = infer_expr_type_full(inner.as_ref(), &input_schema);
                             }
                             super::logical::AggregateFunction::Avg => {
                                 typ = crate::core::value::ValueType::Float;
+                            }
+                            super::logical::AggregateFunction::AvgVec
+                            | super::logical::AggregateFunction::SumVec => {
+                                typ = crate::core::value::ValueType::Vector(0);
                             }
                             _ => {}
                         }
@@ -269,7 +288,19 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
         | Expr::IsNotNull(_)
         | Expr::In { .. }
         | Expr::Between { .. } => ValueType::Bool,
-        Expr::AggregateExpr { .. } => ValueType::Int,
+        Expr::AggregateExpr { func, .. } => match func {
+            AggregateFunction::Avg => ValueType::Float,
+            AggregateFunction::Count => ValueType::Int,
+            AggregateFunction::AvgVec | AggregateFunction::SumVec => ValueType::Vector(0),
+            _ => ValueType::Int,
+        },
+        Expr::VecLiteral(v) => ValueType::Vector(v.len()),
+        Expr::VectorFn { func, .. } => match func {
+            VectorFnKind::Normalize | VectorFnKind::VecAdd | VectorFnKind::VecScale => {
+                ValueType::Vector(0)
+            }
+            VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
+        },
         Expr::Case {
             else_expr,
             branches,

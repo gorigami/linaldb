@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.31] - 2026-07-10
+
+### Added — Tensor-SQL bridge: vectors as first-class SQL citizens
+
+**Inline vector literals in SQL expressions**
+- `[v1, v2, ...]` syntax now valid anywhere an expression is expected: `SELECT [1.0, 0.0] AS query FROM docs`
+- `Expr::VecLiteral(Vec<f64>)` added to both the DSL AST and the logical expression layer
+- Parser: `Token::LBracket` in `parse_expr_atom` routes to the new `parse_vec_literal()` helper
+
+**Vector scalar functions usable in SELECT, WHERE, ORDER BY**
+- `NORMALIZE(col)` — normalizes a column vector to unit length; disambiguated from tensor-algebra `NORMALIZE` by presence of `(`
+- `L2_NORM(col)` — returns the Euclidean norm as a `Float`
+- `COSINE_SIM(a, b)` — cosine similarity between two vector expressions; works with inline literals
+- `DOT(a, b)` — dot product returning `Float`
+- `VEC_ADD(a, b)` — element-wise vector addition returning a `Vector`
+- `VEC_SCALE(col, factor)` — scalar multiplication returning a `Vector`
+- All six functions fully integrated through parser → AST → logical plan → physical evaluation
+
+**Vector aggregate functions for GROUP BY centroid queries**
+- `AVG_VEC(col)` — element-wise average across group rows; produces per-group centroid vectors
+- `SUM_VEC(col)` — element-wise sum across group rows
+- Both functions update `AggregateExec` init, accumulation, and finalization paths
+- `AS alias` now consumed (and respected) for aggregate functions in SELECT lists
+
+**Schema compatibility**
+- `Vector(0)` in schema fields now accepted as a wildcard matching any vector dimension, enabling aggregate output rows whose dimension is only known at runtime
+
+**Tests**
+- `tests/vector_expressions_test.rs`: 11 integration tests covering inline literals, all 6 scalar functions, WHERE filtering with vector functions, and GROUP BY with AVG_VEC / SUM_VEC
+
+---
+
 ## [0.1.30] - 2026-07-09
 
 ### Fixed — Correctness bug-fix pass with 12 integration tests

@@ -354,6 +354,10 @@ pub enum AggFuncAst {
     Count,
     Min,
     Max,
+    /// Element-wise vector average: `AVG_VEC(embedding)`
+    AvgVec,
+    /// Element-wise vector sum: `SUM_VEC(embedding)`
+    SumVec,
 }
 
 /// What `SHOW` should display.
@@ -625,6 +629,21 @@ pub enum Expr {
     ScalarFn { func: ScalarFnKind, args: Vec<Expr> },
     /// `CAST(expr AS type)`
     Cast { expr: Box<Expr>, to: CastTarget },
+    /// Inline vector literal: `[0.1, 0.2, 0.3]`
+    VecLiteral(Vec<f64>),
+    /// SQL-style vector function: `COSINE_SIM(embedding, [0.1, 0.2, 0.3])`
+    VectorFn { func: VectorFnKind, args: Vec<Expr> },
+}
+
+/// Vector/tensor functions usable directly in SQL expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorFnKind {
+    Normalize,
+    L2Norm,
+    CosineSim,
+    Dot,
+    VecAdd,
+    VecScale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -730,6 +730,8 @@ impl Parser {
             Some(Token::Ident(s)) if s == "COUNT" => Some(AggFuncAst::Count),
             Some(Token::Ident(s)) if s == "MIN" => Some(AggFuncAst::Min),
             Some(Token::Ident(s)) if s == "MAX" => Some(AggFuncAst::Max),
+            Some(Token::Ident(s)) if s == "AVG_VEC" => Some(AggFuncAst::AvgVec),
+            Some(Token::Ident(s)) if s == "SUM_VEC" => Some(AggFuncAst::SumVec),
             _ => None,
         };
 
@@ -754,8 +756,8 @@ impl Parser {
                     format!("{:?}(expr)_OVER", func).to_lowercase()
                 };
                 let wfunc = match func {
-                    AggFuncAst::Sum => WindowFunc::Sum(Box::new(inner_expr)),
-                    AggFuncAst::Avg => WindowFunc::Avg(Box::new(inner_expr)),
+                    AggFuncAst::Sum | AggFuncAst::SumVec => WindowFunc::Sum(Box::new(inner_expr)),
+                    AggFuncAst::Avg | AggFuncAst::AvgVec => WindowFunc::Avg(Box::new(inner_expr)),
                     AggFuncAst::Count => WindowFunc::Count(Box::new(inner_expr)),
                     AggFuncAst::Min => WindowFunc::Min(Box::new(inner_expr)),
                     AggFuncAst::Max => WindowFunc::Max(Box::new(inner_expr)),
@@ -765,6 +767,11 @@ impl Parser {
                     spec,
                     alias,
                 });
+            }
+            // Consume optional AS alias (alias is noted but the schema uses the function name)
+            if self.at(&Token::As) {
+                self.advance();
+                let _ = self.eat_ident()?;
             }
             return Ok(SelectExpr::Aggregate {
                 func,
@@ -819,11 +826,12 @@ impl Parser {
             }
         }
 
-        // Check for CASE WHEN, scalar functions, CAST, COALESCE, NULLIF → Computed
+        // Check for CASE WHEN, scalar functions, CAST, COALESCE, NULLIF, NORMALIZE → Computed
         match self.peek() {
-            Some(Token::Case) | Some(Token::Ident(_)) => {
+            Some(Token::Case) | Some(Token::Ident(_)) | Some(Token::Normalize) => {
                 let is_computed = match self.peek() {
                     Some(Token::Case) => true,
+                    Some(Token::Normalize) => true,
                     Some(Token::Ident(s)) => {
                         let u = s.to_uppercase();
                         matches!(
@@ -838,6 +846,11 @@ impl Parser {
                                 | "COALESCE"
                                 | "NULLIF"
                                 | "IFNULL"
+                                | "L2_NORM"
+                                | "COSINE_SIM"
+                                | "DOT"
+                                | "VEC_ADD"
+                                | "VEC_SCALE"
                         )
                     }
                     _ => false,
