@@ -322,6 +322,8 @@ pub struct TensorDb {
     pub config: crate::core::config::EngineConfig,
     databases: HashMap<String, DatabaseInstance>,
     active_db: String,
+    /// Session-wide named pipeline registry.
+    pub pipelines: HashMap<String, Vec<crate::dsl::ast::PipelineStep>>,
 }
 
 impl Default for TensorDb {
@@ -348,6 +350,7 @@ impl TensorDb {
             databases: dbs,
             active_db: default_name,
             config,
+            pipelines: HashMap::new(),
         };
 
         // Try to recover existing databases
@@ -820,6 +823,7 @@ impl TensorDb {
     /// Resets the active session (clear all data in the active database)
     pub fn reset_session(&mut self) {
         self.active_instance_mut().reset();
+        self.pipelines.clear();
     }
 }
 

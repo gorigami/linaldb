@@ -253,6 +253,8 @@ impl Parser {
             Some(Token::Update) => self.parse_update(),
             Some(Token::Delete) => self.parse_delete(),
             Some(Token::Transform) => self.parse_transform(),
+            Some(Token::Apply) => self.parse_apply_pipeline(),
+            Some(Token::Describe) => self.parse_describe_pipeline(),
             Some(Token::Reset) => {
                 self.advance();
                 if self.at_ident("SESSION") {
@@ -271,9 +273,14 @@ impl Parser {
 // ─── Small statement parsers ──────────────────────────────────────────────────
 
 impl Parser {
+    // DEFINE PIPELINE <name> AS step [THEN step ...]
     // DEFINE <name> AS [STRICT] TENSOR [dims] VALUES [values]
     fn parse_define_tensor(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Define)?;
+        // Check for DEFINE PIPELINE
+        if self.at(&Token::Pipeline) {
+            return self.parse_define_pipeline();
+        }
         let name = self.eat_ident()?;
         self.eat(&Token::As)?;
 
@@ -505,8 +512,14 @@ impl Parser {
     }
 
     // DROP DATABASE [IF EXISTS] <name>
+    // DROP PIPELINE <name>
     fn parse_drop(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Drop)?;
+        if self.at(&Token::Pipeline) {
+            self.advance();
+            let name = self.eat_ident()?;
+            return Ok(Statement::DropPipeline(name));
+        }
         self.eat(&Token::Database)?;
         let if_exists = if self.at_ident("IF") {
             self.advance();
@@ -559,6 +572,102 @@ impl Parser {
             filter,
             target,
         }))
+    }
+
+    // (Already ate DEFINE) PIPELINE <name> AS step [THEN step ...]
+    fn parse_define_pipeline(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::Pipeline)?;
+        let name = self.eat_ident()?;
+        self.eat(&Token::As)?;
+        let mut steps = vec![self.parse_pipeline_step()?];
+        while self.at(&Token::Then) {
+            self.advance();
+            steps.push(self.parse_pipeline_step()?);
+        }
+        Ok(Statement::DefinePipeline(DefinePipelineStmt {
+            name,
+            steps,
+        }))
+    }
+
+    fn parse_pipeline_step(&mut self) -> Result<PipelineStep, ParseError> {
+        match self.peek() {
+            Some(Token::Select) => {
+                self.advance();
+                let mut exprs = vec![self.parse_select_expr()?];
+                while self.at(&Token::Comma) {
+                    self.advance();
+                    exprs.push(self.parse_select_expr()?);
+                }
+                Ok(PipelineStep::Select(exprs))
+            }
+            Some(Token::Where) | Some(Token::Filter) => {
+                self.advance();
+                Ok(PipelineStep::Filter(self.parse_expr()?))
+            }
+            Some(Token::Order) => {
+                self.advance();
+                self.eat(&Token::By)?;
+                let mut cols = vec![];
+                loop {
+                    let col = self.eat_ident()?;
+                    let ascending = if self.at_ident("DESC") {
+                        self.advance();
+                        false
+                    } else {
+                        if self.at_ident("ASC") {
+                            self.advance();
+                        }
+                        true
+                    };
+                    cols.push((col, ascending));
+                    if !self.at(&Token::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                Ok(PipelineStep::OrderBy(cols))
+            }
+            Some(Token::Limit) => {
+                self.advance();
+                let n = self.eat_usize()?;
+                Ok(PipelineStep::Limit(n))
+            }
+            Some(Token::Normalize) => {
+                self.advance();
+                let col = self.eat_ident()?;
+                Ok(PipelineStep::NormalizeCol(col))
+            }
+            _ => Err(self.unexpected("SELECT, WHERE, FILTER, ORDER BY, LIMIT, or NORMALIZE")),
+        }
+    }
+
+    // APPLY PIPELINE <name> ON <source> [INTO <target>]
+    fn parse_apply_pipeline(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::Apply)?;
+        self.eat(&Token::Pipeline)?;
+        let pipeline = self.eat_ident()?;
+        self.eat(&Token::On)?;
+        let source = self.eat_ident()?;
+        let into = if self.at(&Token::Into) {
+            self.advance();
+            Some(self.eat_ident()?)
+        } else {
+            None
+        };
+        Ok(Statement::ApplyPipeline(ApplyPipelineStmt {
+            pipeline,
+            source,
+            into,
+        }))
+    }
+
+    // DESCRIBE PIPELINE <name>
+    fn parse_describe_pipeline(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::Describe)?;
+        self.eat(&Token::Pipeline)?;
+        let name = self.eat_ident()?;
+        Ok(Statement::DescribePipeline(name))
     }
 
     // SET DATASET <name> [METADATA] <key> = <value>

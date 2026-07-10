@@ -13,6 +13,7 @@ use crate::query::planner::Planner;
 
 mod eval;
 mod explain;
+mod pipeline;
 mod query;
 mod show;
 
@@ -506,8 +507,14 @@ pub fn execute_statement(
             )))
         }
 
-        // ── Pipeline ─────────────────────────────────────────────────────────
+        // ── Transform ────────────────────────────────────────────────────────
         Statement::Transform(s) => query::execute_transform(db, s, line_no),
+
+        // ── Named pipelines ───────────────────────────────────────────────────
+        Statement::DefinePipeline(s) => pipeline::execute_define_pipeline(db, s, line_no),
+        Statement::ApplyPipeline(s) => pipeline::execute_apply_pipeline(db, s, line_no),
+        Statement::DropPipeline(name) => pipeline::execute_drop_pipeline(db, name, line_no),
+        Statement::DescribePipeline(name) => pipeline::execute_describe_pipeline(db, name, line_no),
 
         // ── Data mutation ────────────────────────────────────────────────────
         Statement::Update(s) => query::execute_update(db, s, line_no),

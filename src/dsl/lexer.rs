@@ -113,6 +113,14 @@ pub enum Token {
     Else,
     #[token("END")]
     End,
+    #[token("PIPELINE")]
+    Pipeline,
+    #[token("PIPELINES")]
+    Pipelines,
+    #[token("APPLY")]
+    Apply,
+    #[token("DESCRIBE")]
+    Describe,
 
     // ─── Structural / sub-command keywords ───────────────────────────────────
     #[token("AS")]

@@ -285,6 +285,8 @@ pub(super) fn execute_show(
             })
         }
 
+        ShowTarget::Pipelines => super::pipeline::execute_show_pipelines(db),
+
         ShowTarget::StringLiteral(s) => Ok(DslOutput::Message(s)),
 
         ShowTarget::Named(name) => {
