@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.33] - 2026-07-10
+
+### Added — Named, reusable, composable pipelines
+
+**DSL surface**
+- `DEFINE PIPELINE <name> AS step [THEN step ...]` — defines a named pipeline of sequential data steps
+- `APPLY PIPELINE <name> ON <source> [INTO <target>]` — executes a pipeline on a dataset; writes result to `target`, or updates `source` in-place when `INTO` is omitted
+- `SHOW PIPELINES` — lists all defined pipelines with step counts
+- `DESCRIBE PIPELINE <name>` — prints a human-readable summary of each pipeline step
+- `DROP PIPELINE <name>` — removes a pipeline from the session
+
+**Supported pipeline steps** (combinable with `THEN`):
+- `SELECT col [AS alias], ...` — column projection
+- `WHERE expr` / `FILTER expr` — row filtering
+- `ORDER BY col [ASC|DESC] [, ...]` — sorting
+- `LIMIT n` — row cap
+- `NORMALIZE col` — L2-normalize a vector column in-place (implemented as direct mutation, not routed through SELECT)
+
+**Internals**
+- 4 new lexer tokens: `PIPELINE`, `PIPELINES`, `APPLY`, `DESCRIBE`
+- `PipelineStep` enum and `DefinePipelineStmt` / `ApplyPipelineStmt` AST structs in `dsl/ast.rs`
+- `TensorDb.pipelines: HashMap<String, Vec<PipelineStep>>` — session-scoped pipeline registry (cleared on `RESET`)
+- New `src/dsl/executor/pipeline.rs` module with all pipeline execution logic
+- `ShowTarget::Pipelines` variant routed through `execute_show`
+
+**Tests** — `tests/pipeline_test.rs` (10 integration tests)
+
+---
+
 ## [0.1.32] - 2026-07-10
 
 ### Added — Vector engine: index-aware similarity search, matrix SQL expressions, and TRANSFORM

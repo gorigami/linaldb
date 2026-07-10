@@ -65,6 +65,10 @@ impl Parser {
                     _ => return Err(self.unexpected("METADATA or VERSIONS after SHOW DATASET")),
                 }
             }
+            Some(Token::Pipelines) => {
+                self.advance();
+                ShowTarget::Pipelines
+            }
             Some(Token::Str(_)) => ShowTarget::StringLiteral(self.eat_str()?),
             Some(Token::Ident(_)) => ShowTarget::Named(self.eat_ident()?),
             _ => return Err(self.unexpected("a SHOW target")),

@@ -90,6 +90,14 @@ pub enum Statement {
     // ─── Pipeline ────────────────────────────────────────────────────────────
     /// `TRANSFORM <source> SELECT ... [WHERE ...] [INTO <target>]`
     Transform(TransformStmt),
+    /// `DEFINE PIPELINE <name> AS step [THEN step ...]`
+    DefinePipeline(DefinePipelineStmt),
+    /// `APPLY PIPELINE <name> ON <source> [INTO <target>]`
+    ApplyPipeline(ApplyPipelineStmt),
+    /// `DROP PIPELINE <name>`
+    DropPipeline(String),
+    /// `DESCRIBE PIPELINE <name>`
+    DescribePipeline(String),
 
     // ─── Session ─────────────────────────────────────────────────────────────
     /// `RESET`
@@ -389,6 +397,8 @@ pub enum ShowTarget {
     StringLiteral(String),
     /// `SHOW <name>` — tensor or dataset by name
     Named(String),
+    /// `SHOW PIPELINES`
+    Pipelines,
 }
 
 /// What `EXPLAIN` should show a query plan for.
@@ -754,6 +764,34 @@ pub struct UpdateStmt {
 pub struct DeleteStmt {
     pub dataset: String,
     pub filter: Option<Expr>,
+}
+
+/// A single step in a named pipeline.
+#[derive(Debug, Clone)]
+pub enum PipelineStep {
+    /// `SELECT expr AS alias, ...`
+    Select(Vec<SelectExpr>),
+    /// `WHERE condition` or `FILTER condition`
+    Filter(Expr),
+    /// `ORDER BY col ASC/DESC, ...`
+    OrderBy(Vec<(String, bool)>),
+    /// `LIMIT n`
+    Limit(usize),
+    /// `NORMALIZE col_name` — normalize a vector column in-place
+    NormalizeCol(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct DefinePipelineStmt {
+    pub name: String,
+    pub steps: Vec<PipelineStep>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyPipelineStmt {
+    pub pipeline: String,
+    pub source: String,
+    pub into: Option<String>,
 }
 
 /// A single dimension specifier inside a subscript expression `t[...]`.
