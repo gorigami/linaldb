@@ -179,18 +179,36 @@ impl Parser {
             let mut row: Vec<f64> = vec![];
             while !self.at(&Token::RBracket) && !self.eof() {
                 let neg = self.at(&Token::Minus);
-                if neg { self.advance(); }
+                if neg {
+                    self.advance();
+                }
                 let v = match self.peek() {
-                    Some(Token::Float(_)) => { if let Some(Token::Float(f)) = self.advance() { f } else { unreachable!() } }
-                    Some(Token::Int(_)) => { if let Some(Token::Int(n)) = self.advance() { n as f64 } else { unreachable!() } }
+                    Some(Token::Float(_)) => {
+                        if let Some(Token::Float(f)) = self.advance() {
+                            f
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    Some(Token::Int(_)) => {
+                        if let Some(Token::Int(n)) = self.advance() {
+                            n as f64
+                        } else {
+                            unreachable!()
+                        }
+                    }
                     _ => return Err(self.unexpected("a number in matrix literal")),
                 };
                 row.push(if neg { -v } else { v });
-                if self.at(&Token::Comma) { self.advance(); }
+                if self.at(&Token::Comma) {
+                    self.advance();
+                }
             }
             self.eat(&Token::RBracket)?;
             rows.push(row);
-            if self.at(&Token::Comma) { self.advance(); }
+            if self.at(&Token::Comma) {
+                self.advance();
+            }
         }
         self.eat(&Token::RBracket)?;
         Ok(Expr::MatLiteral(rows))
@@ -268,9 +286,15 @@ impl Parser {
                     self.advance();
                     self.advance();
                     let mut args = vec![self.parse_expr()?];
-                    while self.at(&Token::Comma) { self.advance(); args.push(self.parse_expr()?); }
+                    while self.at(&Token::Comma) {
+                        self.advance();
+                        args.push(self.parse_expr()?);
+                    }
                     self.eat(&Token::RParen)?;
-                    return Ok(Expr::VectorFn { func: VectorFnKind::Matmul, args });
+                    return Ok(Expr::VectorFn {
+                        func: VectorFnKind::Matmul,
+                        args,
+                    });
                 }
                 return self.parse_call_expr();
             }
@@ -280,7 +304,10 @@ impl Parser {
                     self.advance();
                     let arg = self.parse_expr()?;
                     self.eat(&Token::RParen)?;
-                    return Ok(Expr::VectorFn { func: VectorFnKind::Transpose, args: vec![arg] });
+                    return Ok(Expr::VectorFn {
+                        func: VectorFnKind::Transpose,
+                        args: vec![arg],
+                    });
                 }
                 return self.parse_call_expr();
             }
