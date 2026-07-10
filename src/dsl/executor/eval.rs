@@ -113,9 +113,11 @@ fn eval_expr_to_name(
         | Expr::Coalesce(_)
         | Expr::Nullif(_, _)
         | Expr::ScalarFn { .. }
-        | Expr::Cast { .. } => Err(DslError::Parse {
+        | Expr::Cast { .. }
+        | Expr::VecLiteral(_)
+        | Expr::VectorFn { .. } => Err(DslError::Parse {
             line: line_no,
-            msg: "boolean predicates and scalar functions are not valid tensor expressions".into(),
+            msg: "boolean predicates, scalar functions, and SQL vector functions are not valid tensor expressions".into(),
         }),
     }
 }
@@ -440,6 +442,23 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 CastTarget::Bool => "BOOL",
             };
             format!("CAST({} AS {})", expr_to_string(expr), type_name)
+        }
+        Expr::VecLiteral(vals) => {
+            let items: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Expr::VectorFn { func, args } => {
+            use crate::dsl::ast::VectorFnKind;
+            let name = match func {
+                VectorFnKind::Normalize => "NORMALIZE",
+                VectorFnKind::L2Norm => "L2_NORM",
+                VectorFnKind::CosineSim => "COSINE_SIM",
+                VectorFnKind::Dot => "DOT",
+                VectorFnKind::VecAdd => "VEC_ADD",
+                VectorFnKind::VecScale => "VEC_SCALE",
+            };
+            let items: Vec<String> = args.iter().map(expr_to_string).collect();
+            format!("{}({})", name, items.join(", "))
         }
     }
 }

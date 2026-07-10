@@ -553,6 +553,13 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             CastTarget::Text => ValueType::String,
             CastTarget::Bool => ValueType::Bool,
         },
+        Expr::VecLiteral(v) => ValueType::Vector(v.len()),
+        Expr::VectorFn { func, .. } => match func {
+            VectorFnKind::Normalize | VectorFnKind::VecAdd | VectorFnKind::VecScale => {
+                ValueType::Vector(0)
+            }
+            VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
+        },
         _ => ValueType::Float,
     }
 }
@@ -943,6 +950,8 @@ pub(super) fn agg_func_to_logical(f: &AggFuncAst) -> AggregateFunction {
         AggFuncAst::Count => AggregateFunction::Count,
         AggFuncAst::Min => AggregateFunction::Min,
         AggFuncAst::Max => AggregateFunction::Max,
+        AggFuncAst::AvgVec => AggregateFunction::AvgVec,
+        AggFuncAst::SumVec => AggregateFunction::SumVec,
     }
 }
 
@@ -1041,6 +1050,24 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
             LogicalExpr::Cast {
                 expr: Box::new(dsl_expr_to_logical_expr(expr)),
                 to: lto,
+            }
+        }
+        Expr::VecLiteral(vals) => {
+            LogicalExpr::Literal(Value::Vector(vals.iter().map(|&v| v as f32).collect()))
+        }
+        Expr::VectorFn { func, args } => {
+            use crate::query::logical::VectorFnKind as LVk;
+            let lfunc = match func {
+                VectorFnKind::Normalize => LVk::Normalize,
+                VectorFnKind::L2Norm => LVk::L2Norm,
+                VectorFnKind::CosineSim => LVk::CosineSim,
+                VectorFnKind::Dot => LVk::Dot,
+                VectorFnKind::VecAdd => LVk::VecAdd,
+                VectorFnKind::VecScale => LVk::VecScale,
+            };
+            LogicalExpr::VectorFn {
+                func: lfunc,
+                args: args.iter().map(dsl_expr_to_logical_expr).collect(),
             }
         }
         _ => LogicalExpr::Literal(Value::Null),

@@ -352,7 +352,9 @@ fn eval_value(expr: &Expr, row: &crate::core::tuple::Tuple) -> Option<crate::cor
         | Expr::Cast { .. }
         | Expr::Case { .. }
         | Expr::Coalesce(_)
-        | Expr::Nullif(_, _) => Some(evaluate_expression(expr, row)),
+        | Expr::Nullif(_, _)
+        | Expr::VecLiteral(_)
+        | Expr::VectorFn { .. } => Some(evaluate_expression(expr, row)),
         _ => None,
     }
 }

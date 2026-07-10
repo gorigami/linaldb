@@ -134,9 +134,47 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// Parse a comma-separated list of numbers as an inline vector literal: `[1.0, 2.0, 3.0]`
+    fn parse_vec_literal(&mut self) -> Result<Expr, ParseError> {
+        self.eat(&Token::LBracket)?;
+        let mut vals: Vec<f64> = vec![];
+        loop {
+            let neg = self.at(&Token::Minus);
+            if neg {
+                self.advance();
+            }
+            let v = match self.peek() {
+                Some(Token::Float(_)) => {
+                    if let Some(Token::Float(f)) = self.advance() {
+                        f
+                    } else {
+                        unreachable!()
+                    }
+                }
+                Some(Token::Int(_)) => {
+                    if let Some(Token::Int(n)) = self.advance() {
+                        n as f64
+                    } else {
+                        unreachable!()
+                    }
+                }
+                _ => return Err(self.unexpected("a number in vector literal")),
+            };
+            vals.push(if neg { -v } else { v });
+            if self.at(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Token::RBracket)?;
+        Ok(Expr::VecLiteral(vals))
+    }
+
     pub(super) fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
         match self.peek() {
             Some(Token::Case) => return self.parse_case_expr(),
+            Some(Token::LBracket) => return self.parse_vec_literal(),
             Some(Token::Null) => {
                 self.advance();
                 return Ok(Expr::Ref("NULL".to_string()));
@@ -179,6 +217,22 @@ impl Parser {
                 self.eat(&Token::RParen)?;
                 return Ok(e);
             }
+            // NORMALIZE(col) → SQL vector fn; NORMALIZE tensor → tensor algebra
+            Some(Token::Normalize) => {
+                self.advance();
+                if self.at(&Token::LParen) {
+                    self.advance();
+                    let arg = self.parse_expr()?;
+                    self.eat(&Token::RParen)?;
+                    return Ok(Expr::VectorFn {
+                        func: VectorFnKind::Normalize,
+                        args: vec![arg],
+                    });
+                } else {
+                    let inner = self.parse_simple_expr()?;
+                    return Ok(Expr::Call(CallExpr::Normalize(Box::new(inner))));
+                }
+            }
             Some(Token::Add)
             | Some(Token::Subtract)
             | Some(Token::Multiply)
@@ -187,7 +241,6 @@ impl Parser {
             | Some(Token::Similarity)
             | Some(Token::Distance)
             | Some(Token::Matmul)
-            | Some(Token::Normalize)
             | Some(Token::Transpose)
             | Some(Token::Flatten)
             | Some(Token::Sum)
@@ -305,6 +358,27 @@ impl Parser {
                         let b = self.parse_expr()?;
                         self.eat(&Token::RParen)?;
                         return Ok(Expr::Nullif(Box::new(a), Box::new(b)));
+                    }
+                    // Vector scalar functions (SQL-style with parens)
+                    "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE"
+                        if self.at(&Token::LParen) =>
+                    {
+                        let func = match upper.as_str() {
+                            "L2_NORM" => VectorFnKind::L2Norm,
+                            "COSINE_SIM" => VectorFnKind::CosineSim,
+                            "DOT" => VectorFnKind::Dot,
+                            "VEC_ADD" => VectorFnKind::VecAdd,
+                            "VEC_SCALE" => VectorFnKind::VecScale,
+                            _ => unreachable!(),
+                        };
+                        self.advance(); // consume '('
+                        let mut args = vec![self.parse_expr()?];
+                        while self.at(&Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expr()?);
+                        }
+                        self.eat(&Token::RParen)?;
+                        return Ok(Expr::VectorFn { func, args });
                     }
                     _ => {}
                 }
