@@ -506,6 +506,9 @@ pub fn execute_statement(
             )))
         }
 
+        // ── Pipeline ─────────────────────────────────────────────────────────
+        Statement::Transform(s) => query::execute_transform(db, s, line_no),
+
         // ── Data mutation ────────────────────────────────────────────────────
         Statement::Update(s) => query::execute_update(db, s, line_no),
         Statement::Delete(s) => query::execute_delete(db, s, line_no),

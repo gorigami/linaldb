@@ -828,10 +828,15 @@ impl Parser {
 
         // Check for CASE WHEN, scalar functions, CAST, COALESCE, NULLIF, NORMALIZE → Computed
         match self.peek() {
-            Some(Token::Case) | Some(Token::Ident(_)) | Some(Token::Normalize) => {
+            Some(Token::Case)
+            | Some(Token::Ident(_))
+            | Some(Token::Normalize)
+            | Some(Token::Matmul)
+            | Some(Token::Transpose) => {
                 let is_computed = match self.peek() {
                     Some(Token::Case) => true,
                     Some(Token::Normalize) => true,
+                    Some(Token::Matmul) | Some(Token::Transpose) => true,
                     Some(Token::Ident(s)) => {
                         let u = s.to_uppercase();
                         matches!(
@@ -851,6 +856,7 @@ impl Parser {
                                 | "DOT"
                                 | "VEC_ADD"
                                 | "VEC_SCALE"
+                                | "MAT_SHAPE"
                         )
                     }
                     _ => false,

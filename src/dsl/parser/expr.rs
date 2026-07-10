@@ -171,10 +171,40 @@ impl Parser {
         Ok(Expr::VecLiteral(vals))
     }
 
+    fn parse_mat_literal(&mut self) -> Result<Expr, ParseError> {
+        self.eat(&Token::LBracket)?;
+        let mut rows: Vec<Vec<f64>> = vec![];
+        while !self.at(&Token::RBracket) && !self.eof() {
+            self.eat(&Token::LBracket)?;
+            let mut row: Vec<f64> = vec![];
+            while !self.at(&Token::RBracket) && !self.eof() {
+                let neg = self.at(&Token::Minus);
+                if neg { self.advance(); }
+                let v = match self.peek() {
+                    Some(Token::Float(_)) => { if let Some(Token::Float(f)) = self.advance() { f } else { unreachable!() } }
+                    Some(Token::Int(_)) => { if let Some(Token::Int(n)) = self.advance() { n as f64 } else { unreachable!() } }
+                    _ => return Err(self.unexpected("a number in matrix literal")),
+                };
+                row.push(if neg { -v } else { v });
+                if self.at(&Token::Comma) { self.advance(); }
+            }
+            self.eat(&Token::RBracket)?;
+            rows.push(row);
+            if self.at(&Token::Comma) { self.advance(); }
+        }
+        self.eat(&Token::RBracket)?;
+        Ok(Expr::MatLiteral(rows))
+    }
+
     pub(super) fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
         match self.peek() {
             Some(Token::Case) => return self.parse_case_expr(),
-            Some(Token::LBracket) => return self.parse_vec_literal(),
+            Some(Token::LBracket) => {
+                if self.peek_at(1) == Some(&Token::LBracket) {
+                    return self.parse_mat_literal();
+                }
+                return self.parse_vec_literal();
+            }
             Some(Token::Null) => {
                 self.advance();
                 return Ok(Expr::Ref("NULL".to_string()));
@@ -233,6 +263,27 @@ impl Parser {
                     return Ok(Expr::Call(CallExpr::Normalize(Box::new(inner))));
                 }
             }
+            Some(Token::Matmul) => {
+                if self.peek_at(1) == Some(&Token::LParen) {
+                    self.advance();
+                    self.advance();
+                    let mut args = vec![self.parse_expr()?];
+                    while self.at(&Token::Comma) { self.advance(); args.push(self.parse_expr()?); }
+                    self.eat(&Token::RParen)?;
+                    return Ok(Expr::VectorFn { func: VectorFnKind::Matmul, args });
+                }
+                return self.parse_call_expr();
+            }
+            Some(Token::Transpose) => {
+                if self.peek_at(1) == Some(&Token::LParen) {
+                    self.advance();
+                    self.advance();
+                    let arg = self.parse_expr()?;
+                    self.eat(&Token::RParen)?;
+                    return Ok(Expr::VectorFn { func: VectorFnKind::Transpose, args: vec![arg] });
+                }
+                return self.parse_call_expr();
+            }
             Some(Token::Add)
             | Some(Token::Subtract)
             | Some(Token::Multiply)
@@ -240,8 +291,6 @@ impl Parser {
             | Some(Token::Correlate)
             | Some(Token::Similarity)
             | Some(Token::Distance)
-            | Some(Token::Matmul)
-            | Some(Token::Transpose)
             | Some(Token::Flatten)
             | Some(Token::Sum)
             | Some(Token::Mean)
@@ -360,7 +409,7 @@ impl Parser {
                         return Ok(Expr::Nullif(Box::new(a), Box::new(b)));
                     }
                     // Vector scalar functions (SQL-style with parens)
-                    "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE"
+                    "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE" | "MAT_SHAPE"
                         if self.at(&Token::LParen) =>
                     {
                         let func = match upper.as_str() {
@@ -369,6 +418,7 @@ impl Parser {
                             "DOT" => VectorFnKind::Dot,
                             "VEC_ADD" => VectorFnKind::VecAdd,
                             "VEC_SCALE" => VectorFnKind::VecScale,
+                            "MAT_SHAPE" => VectorFnKind::MatShape,
                             _ => unreachable!(),
                         };
                         self.advance(); // consume '('

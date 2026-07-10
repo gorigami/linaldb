@@ -554,11 +554,14 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             CastTarget::Bool => ValueType::Bool,
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),
+        Expr::MatLiteral(_) => ValueType::Matrix(0, 0),
         Expr::VectorFn { func, .. } => match func {
             VectorFnKind::Normalize | VectorFnKind::VecAdd | VectorFnKind::VecScale => {
                 ValueType::Vector(0)
             }
             VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
+            VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
+            VectorFnKind::MatShape => ValueType::String,
         },
         _ => ValueType::Float,
     }
@@ -1055,6 +1058,11 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
         Expr::VecLiteral(vals) => {
             LogicalExpr::Literal(Value::Vector(vals.iter().map(|&v| v as f32).collect()))
         }
+        Expr::MatLiteral(rows) => LogicalExpr::Literal(Value::Matrix(
+            rows.iter()
+                .map(|r| r.iter().map(|&v| v as f32).collect())
+                .collect(),
+        )),
         Expr::VectorFn { func, args } => {
             use crate::query::logical::VectorFnKind as LVk;
             let lfunc = match func {
@@ -1064,6 +1072,9 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 VectorFnKind::Dot => LVk::Dot,
                 VectorFnKind::VecAdd => LVk::VecAdd,
                 VectorFnKind::VecScale => LVk::VecScale,
+                VectorFnKind::Matmul => LVk::Matmul,
+                VectorFnKind::Transpose => LVk::Transpose,
+                VectorFnKind::MatShape => LVk::MatShape,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,
@@ -1072,6 +1083,71 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
         }
         _ => LogicalExpr::Literal(Value::Null),
     }
+}
+
+// ─── TRANSFORM ────────────────────────────────────────────────────────────────
+
+pub(super) fn execute_transform(
+    db: &mut TensorDb,
+    s: TransformStmt,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let select_stmt = SelectStmt {
+        ctes: vec![],
+        distinct: false,
+        source: DatasetSource::Named(s.source.clone()),
+        joins: vec![],
+        columns: s.columns,
+        filter: s.filter,
+        group_by: vec![],
+        having: None,
+        order_by: None,
+        limit: None,
+        offset: None,
+        union: None,
+    };
+
+    let result = execute_select(db, select_stmt, line_no)?;
+    let DslOutput::Table(result_ds) = result else {
+        return Err(DslError::Parse {
+            line: line_no,
+            msg: "TRANSFORM did not produce a table result".into(),
+        });
+    };
+
+    let target_name = s.target.unwrap_or(s.source);
+    let schema = result_ds.schema.clone();
+    let rows = result_ds.rows;
+
+    if db.get_dataset(&target_name).is_ok() {
+        let ds = db
+            .get_dataset_mut(&target_name)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+        ds.rows = rows;
+        ds.metadata.update_stats(&ds.schema, &ds.rows);
+    } else {
+        db.create_dataset(target_name.clone(), schema)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+        let ds = db
+            .get_dataset_mut(&target_name)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+        ds.rows = rows;
+        ds.metadata.update_stats(&ds.schema, &ds.rows);
+    }
+
+    Ok(DslOutput::Message(format!(
+        "Transformed dataset '{}'.",
+        target_name
+    )))
 }
 
 // ─── UPDATE ───────────────────────────────────────────────────────────────────
