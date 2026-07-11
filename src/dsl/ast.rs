@@ -445,6 +445,7 @@ pub struct LoadStmt {
 pub enum PersistKind {
     Tensor,
     Dataset,
+    Pipeline,
 }
 
 #[derive(Debug, Clone)]
@@ -785,6 +786,15 @@ pub enum PipelineStep {
 pub struct DefinePipelineStmt {
     pub name: String,
     pub steps: Vec<PipelineStep>,
+    /// Original DSL source text — populated by the executor entry-point for persistence.
+    pub source: String,
+}
+
+/// A pipeline stored in the session registry.
+#[derive(Debug, Clone)]
+pub struct StoredPipeline {
+    pub steps: Vec<PipelineStep>,
+    pub source: String,
 }
 
 #[derive(Debug, Clone)]

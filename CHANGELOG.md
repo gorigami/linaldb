@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.34] - 2026-07-10
+
+### Added — Pipeline persistence (`SAVE`/`LOAD PIPELINE`)
+
+**DSL surface**
+- `SAVE PIPELINE <name> [TO '<path>']` — serializes a named pipeline to JSON; defaults to `<data_dir>/<db>/pipelines/<name>.json`
+- `LOAD PIPELINE <name> [FROM '<path>']` — restores a pipeline from its JSON file by re-parsing the stored DSL source
+
+**JSON format** — human-readable and editable:
+```json
+{ "name": "...", "source": "DEFINE PIPELINE ... AS ...", "version": "0.1.34" }
+```
+
+**Internals**
+- `StoredPipeline { steps, source }` — replaces bare `Vec<PipelineStep>` in `TensorDb.pipelines`; keeps the original DSL text alongside the parsed steps
+- `PersistKind::Pipeline` variant added to the `PersistKind` enum
+- `save_all_pipelines` / `load_all_pipelines` — public helpers for bulk pipeline persistence (building block for future `SAVE DATABASE` / `LOAD DATABASE`)
+- Source line attached in `execute_line_with_context` at parse/execute boundary so that `DefinePipelineStmt.source` is always populated before storage
+
+---
+
 ## [0.1.33] - 2026-07-10
 
 ### Added — Named, reusable, composable pipelines

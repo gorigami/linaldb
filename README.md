@@ -95,7 +95,30 @@ LAZY LET trend = STDEV (sensor_3d * 1.5)
 DERIVE clean_data FROM sensor_3d[0:10, :, *]
 ```
 
-### 4. High-Concurrency Analytics
+### 4. Named Pipelines with Persistence
+
+Define reusable transformation chains and persist them across sessions.
+
+```sql
+-- Define a multi-step pipeline
+DEFINE PIPELINE clean_rank AS
+    WHERE active = 1
+    THEN ORDER BY score DESC
+    THEN LIMIT 10
+
+-- Apply to a dataset
+APPLY PIPELINE clean_rank ON products INTO top_products
+
+-- Save to disk and restore later
+SAVE PIPELINE clean_rank
+-- ... restart session ...
+LOAD PIPELINE clean_rank
+APPLY PIPELINE clean_rank ON new_products INTO results
+```
+
+Pipelines are stored as human-readable JSON containing the original DSL source, making them portable and editable.
+
+### 5. High-Concurrency Analytics
 
 Multi-platform server with parallel execution and background workload management.
 

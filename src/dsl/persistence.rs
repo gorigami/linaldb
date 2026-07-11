@@ -4,7 +4,7 @@ use crate::core::connectors::{
 };
 use crate::core::dataset::{Dataset, DatasetMetadata, DatasetOrigin, ResourceReference};
 use crate::core::storage::{record_batch_to_tensors, CsvStorage, ParquetStorage, StorageEngine};
-use crate::dsl::ast::{ListTarget, PersistKind};
+use crate::dsl::ast::{ListTarget, PersistKind, StoredPipeline};
 use crate::dsl::{DslError, DslOutput};
 use crate::engine::TensorDb;
 use std::ffi::OsStr;
@@ -542,6 +542,165 @@ fn export_csv_core(
     )))
 }
 
+// ─── Pipeline ─────────────────────────────────────────────────────────────────
+
+fn pipeline_dir(db: &TensorDb) -> std::path::PathBuf {
+    let mut path = db.config.storage.data_dir.clone();
+    path.push(&db.active_instance().name);
+    path.push("pipelines");
+    path
+}
+
+fn save_pipeline_core(
+    db: &TensorDb,
+    name: &str,
+    explicit_path: Option<&str>,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let stored = db.pipelines.get(name).ok_or_else(|| DslError::Parse {
+        line: line_no,
+        msg: format!("Pipeline '{}' not found", name),
+    })?;
+
+    let save_path = if let Some(p) = explicit_path {
+        PathBuf::from(p)
+    } else {
+        pipeline_dir(db).join(format!("{}.json", name))
+    };
+
+    if let Some(parent) = save_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to create pipeline directory: {}", e),
+        })?;
+    }
+
+    let json = serde_json::json!({
+        "name": name,
+        "source": stored.source,
+        "version": "0.1.34"
+    });
+
+    fs::write(&save_path, serde_json::to_string_pretty(&json).unwrap()).map_err(|e| {
+        DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to write pipeline file: {}", e),
+        }
+    })?;
+
+    Ok(DslOutput::Message(format!(
+        "Saved pipeline '{}' to '{}'",
+        name,
+        save_path.display()
+    )))
+}
+
+fn load_pipeline_core(
+    db: &mut TensorDb,
+    name: &str,
+    explicit_path: Option<&str>,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let load_path = if let Some(p) = explicit_path {
+        PathBuf::from(p)
+    } else {
+        pipeline_dir(db).join(format!("{}.json", name))
+    };
+
+    let content = fs::read_to_string(&load_path).map_err(|_| DslError::Parse {
+        line: line_no,
+        msg: format!("Pipeline file not found: '{}'", load_path.display()),
+    })?;
+
+    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| DslError::Parse {
+        line: line_no,
+        msg: format!("Invalid pipeline JSON: {}", e),
+    })?;
+
+    let source = json["source"].as_str().ok_or_else(|| DslError::Parse {
+        line: line_no,
+        msg: "Pipeline file missing 'source' field".into(),
+    })?;
+
+    // Re-parse the DSL source to reconstruct steps.
+    let stmt = crate::dsl::parser::parse(source).map_err(|e| DslError::Parse {
+        line: line_no,
+        msg: format!("Failed to re-parse pipeline source: {:?}", e),
+    })?;
+
+    match stmt {
+        crate::dsl::ast::Statement::DefinePipeline(mut def) => {
+            def.source = source.to_string();
+            db.pipelines.insert(
+                def.name.clone(),
+                StoredPipeline {
+                    steps: def.steps,
+                    source: def.source,
+                },
+            );
+            Ok(DslOutput::Message(format!(
+                "Loaded pipeline '{}' from '{}'",
+                name,
+                load_path.display()
+            )))
+        }
+        _ => Err(DslError::Parse {
+            line: line_no,
+            msg: "Pipeline file source is not a DEFINE PIPELINE statement".into(),
+        }),
+    }
+}
+
+/// Save all pipelines to `<db_path>/pipelines/` and write an index file.
+pub fn save_all_pipelines(db: &TensorDb, line_no: usize) -> Result<(), DslError> {
+    if db.pipelines.is_empty() {
+        return Ok(());
+    }
+    let dir = pipeline_dir(db);
+    fs::create_dir_all(&dir).map_err(|e| DslError::Parse {
+        line: line_no,
+        msg: format!("Failed to create pipelines dir: {}", e),
+    })?;
+    let names: Vec<&String> = db.pipelines.keys().collect();
+    for name in &names {
+        save_pipeline_core(db, name, None, line_no)?;
+    }
+    let index = serde_json::json!({ "pipelines": names });
+    fs::write(
+        dir.join("index.json"),
+        serde_json::to_string_pretty(&index).unwrap(),
+    )
+    .map_err(|e| DslError::Parse {
+        line: line_no,
+        msg: format!("Failed to write pipeline index: {}", e),
+    })?;
+    Ok(())
+}
+
+/// Load all pipelines from `<db_path>/pipelines/index.json`.
+pub fn load_all_pipelines(db: &mut TensorDb, line_no: usize) -> Result<(), DslError> {
+    let index_path = pipeline_dir(db).join("index.json");
+    if !index_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&index_path).map_err(|e| DslError::Parse {
+        line: line_no,
+        msg: format!("Failed to read pipeline index: {}", e),
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| DslError::Parse {
+        line: line_no,
+        msg: format!("Invalid pipeline index JSON: {}", e),
+    })?;
+    if let Some(arr) = json["pipelines"].as_array() {
+        for val in arr {
+            if let Some(name) = val.as_str() {
+                let _ = load_pipeline_core(db, name, None, line_no);
+            }
+        }
+    }
+    Ok(())
+}
+
 // ─── Typed public API (called from executor) ──────────────────────────────────
 
 pub fn save_typed(
@@ -554,6 +713,7 @@ pub fn save_typed(
     match kind {
         PersistKind::Dataset => save_dataset_core(db, name, explicit_path, line_no),
         PersistKind::Tensor => save_tensor_core(db, name, explicit_path, line_no),
+        PersistKind::Pipeline => save_pipeline_core(db, name, explicit_path, line_no),
     }
 }
 
@@ -567,6 +727,7 @@ pub fn load_typed(
     match kind {
         PersistKind::Dataset => load_dataset_core(db, name, explicit_path, line_no),
         PersistKind::Tensor => load_tensor_core(db, name, explicit_path, line_no),
+        PersistKind::Pipeline => load_pipeline_core(db, name, explicit_path, line_no),
     }
 }
 

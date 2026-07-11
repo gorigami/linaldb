@@ -219,6 +219,14 @@ pub fn execute_line_with_context(
 ) -> Result<DslOutput, DslError> {
     // Try the typed parser first; on parse error fall through to the minimal legacy chain.
     if let Ok(stmt) = crate::dsl::parser::parse(line) {
+        // Attach the raw source line to DefinePipeline for serialization.
+        let stmt = match stmt {
+            crate::dsl::ast::Statement::DefinePipeline(mut s) => {
+                s.source = line.to_string();
+                crate::dsl::ast::Statement::DefinePipeline(s)
+            }
+            other => other,
+        };
         return executor::execute_statement(db, stmt, line_no, ctx);
     }
 

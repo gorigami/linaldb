@@ -240,6 +240,8 @@ Load and save data across different formats.
 - `LOAD DATASET name [FROM "path"]`: Restore a persisted dataset.
 - `SAVE TENSOR name [TO "path"]`: Persist a tensor to JSON.
 - `LOAD TENSOR name [FROM "path"]`: Restore a persisted tensor (preserves lineage).
+- `SAVE PIPELINE name [TO "path"]`: Serialize a named pipeline to JSON. Defaults to `<data_dir>/<db>/pipelines/<name>.json`.
+- `LOAD PIPELINE name [FROM "path"]`: Restore a pipeline from its JSON file by re-parsing the stored DSL source. Overwrites any in-memory definition with the same name.
 - `LIST DATASETS [FROM "path"]`: Show available datasets in the current database context.
 - `LIST TENSORS [FROM "path"]`: Show available tensors in the current storage path.
 - `LIST DATASET VERSIONS <name>`: Show version history and schema evolution log for a persisted dataset.
@@ -254,7 +256,61 @@ LINAL supports direct ingestion of multi-dimensional data:
 
 ---
 
-## 6. Instance & Session Management
+## 6. Pipelines
+
+Named, reusable transformation chains that can be saved to disk and restored across sessions.
+
+### Pipeline Lifecycle
+
+```sql
+-- Define
+DEFINE PIPELINE clean AS WHERE active = 1 THEN ORDER BY score DESC THEN LIMIT 10
+
+-- Inspect
+SHOW PIPELINES
+DESCRIBE PIPELINE clean
+
+-- Apply
+APPLY PIPELINE clean ON products INTO top_products
+APPLY PIPELINE clean ON products          -- in-place (overwrites source)
+
+-- Persist
+SAVE PIPELINE clean                        -- saves to <data_dir>/<db>/pipelines/clean.json
+SAVE PIPELINE clean TO '/backups/clean.json'
+
+-- Restore
+LOAD PIPELINE clean
+LOAD PIPELINE clean FROM '/backups/clean.json'
+
+-- Remove
+DROP PIPELINE clean
+```
+
+### Pipeline Steps
+
+Steps are chained with `THEN`:
+
+| Step | Syntax | Description |
+|---|---|---|
+| Projection | `SELECT col [AS alias], ...` | Keep/rename columns |
+| Filter | `WHERE expr` / `FILTER expr` | Row predicate |
+| Sort | `ORDER BY col [ASC\|DESC] [, ...]` | Row ordering |
+| Limit | `LIMIT n` | Cap row count |
+| Normalize | `NORMALIZE col` | L2-normalize a vector column |
+
+### Pipeline Persistence Details
+
+Pipelines are stored as human-readable JSON containing the original DSL source:
+
+```json
+{ "name": "clean", "source": "DEFINE PIPELINE clean AS WHERE active = 1 THEN LIMIT 10", "version": "0.1.34" }
+```
+
+On load, the source is re-parsed to reconstruct the pipeline exactly. The file is editable — any valid `DEFINE PIPELINE` DSL can replace the source field.
+
+---
+
+## 8. Instance & Session Management
 
 ### Database Management
 
@@ -273,7 +329,7 @@ Clears all in-memory registers (Tensors and Datasets) for the current session.
 
 ---
 
-## 7. Diagnostics
+## 9. Diagnostics
 
 ### Resource Display
 
@@ -307,7 +363,7 @@ SHOW "--- Begin training phase ---"
 
 ---
 
-## 8. Server & Job Management
+## 10. Server & Job Management
 
 For remote execution and production workloads.
 

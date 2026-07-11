@@ -43,7 +43,11 @@ impl Parser {
                 self.advance();
                 Ok(PersistKind::Dataset)
             }
-            _ => Err(self.unexpected("TENSOR or DATASET")),
+            Some(Token::Pipeline) => {
+                self.advance();
+                Ok(PersistKind::Pipeline)
+            }
+            _ => Err(self.unexpected("TENSOR, DATASET, or PIPELINE")),
         }
     }
 
