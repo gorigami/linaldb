@@ -24,7 +24,10 @@ fn test_pipeline_save_load_roundtrip() {
     let mut db = make_db(dir.path());
     execute_line(&mut db, "LOAD PIPELINE simple", 1).unwrap();
 
-    assert!(db.pipelines.contains_key("simple"), "pipeline should be restored");
+    assert!(
+        db.pipelines.contains_key("simple"),
+        "pipeline should be restored"
+    );
     assert_eq!(db.pipelines["simple"].steps.len(), 1);
     assert!(
         db.pipelines["simple"].source.contains("SELECT"),
@@ -54,7 +57,10 @@ fn test_pipeline_save_load_explicit_path() {
     )
     .unwrap();
 
-    assert!(pipe_path.exists(), "pipeline file should exist at explicit path");
+    assert!(
+        pipe_path.exists(),
+        "pipeline file should exist at explicit path"
+    );
 
     execute_line(
         &mut db,
@@ -64,7 +70,11 @@ fn test_pipeline_save_load_explicit_path() {
     .unwrap();
 
     assert!(db.pipelines.contains_key("ep_pipe"));
-    assert_eq!(db.pipelines["ep_pipe"].steps.len(), 2, "WHERE + LIMIT = 2 steps");
+    assert_eq!(
+        db.pipelines["ep_pipe"].steps.len(),
+        2,
+        "WHERE + LIMIT = 2 steps"
+    );
 }
 
 // ── 3. LOAD non-existent pipeline returns an error ───────────────────────────
@@ -75,7 +85,10 @@ fn test_pipeline_load_nonexistent_returns_error() {
     let mut db = make_db(dir.path());
 
     let result = execute_line(&mut db, "LOAD PIPELINE ghost", 1);
-    assert!(result.is_err(), "expected Err loading a pipeline that was never saved");
+    assert!(
+        result.is_err(),
+        "expected Err loading a pipeline that was never saved"
+    );
 }
 
 // ── 4. save_all_pipelines / load_all_pipelines ────────────────────────────────
@@ -157,14 +170,20 @@ fn test_pipeline_load_uses_requested_name_not_source_name() {
     let saved_path = dir.path().join("renamed.json");
     execute_line(
         &mut db,
-        &format!("SAVE PIPELINE original TO '{}'", saved_path.to_str().unwrap()),
+        &format!(
+            "SAVE PIPELINE original TO '{}'",
+            saved_path.to_str().unwrap()
+        ),
         2,
     )
     .unwrap();
 
     execute_line(
         &mut db,
-        &format!("LOAD PIPELINE renamed FROM '{}'", saved_path.to_str().unwrap()),
+        &format!(
+            "LOAD PIPELINE renamed FROM '{}'",
+            saved_path.to_str().unwrap()
+        ),
         3,
     )
     .unwrap();
@@ -184,7 +203,12 @@ fn test_pipeline_vector_ops_roundtrip() {
 
     {
         let mut db = make_db(dir.path());
-        execute_line(&mut db, "DEFINE PIPELINE norm_pipe AS NORMALIZE embedding", 1).unwrap();
+        execute_line(
+            &mut db,
+            "DEFINE PIPELINE norm_pipe AS NORMALIZE embedding",
+            1,
+        )
+        .unwrap();
         execute_line(&mut db, "SAVE PIPELINE norm_pipe", 2).unwrap();
     }
 
@@ -213,7 +237,10 @@ fn test_pipeline_vector_ops_roundtrip() {
                 norm
             );
         } else {
-            panic!("expected Vector in embedding column, got {:?}", ds.rows[0].values[1]);
+            panic!(
+                "expected Vector in embedding column, got {:?}",
+                ds.rows[0].values[1]
+            );
         }
     } else {
         panic!("expected Table output from SELECT");
