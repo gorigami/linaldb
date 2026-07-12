@@ -145,7 +145,38 @@ fn test_pipeline_load_overwrites_in_memory() {
     );
 }
 
-// ── 6. Pipeline with NORMALIZE step survives roundtrip and runs correctly ─────
+// ── 6. LOAD PIPELINE stores under the requested name, not the name embedded
+//       in the file's source (e.g. after copying/renaming a saved pipeline file) ──
+
+#[test]
+fn test_pipeline_load_uses_requested_name_not_source_name() {
+    let dir = TempDir::new().unwrap();
+    let mut db = make_db(dir.path());
+
+    execute_line(&mut db, "DEFINE PIPELINE original AS SELECT id", 1).unwrap();
+    let saved_path = dir.path().join("renamed.json");
+    execute_line(
+        &mut db,
+        &format!("SAVE PIPELINE original TO '{}'", saved_path.to_str().unwrap()),
+        2,
+    )
+    .unwrap();
+
+    execute_line(
+        &mut db,
+        &format!("LOAD PIPELINE renamed FROM '{}'", saved_path.to_str().unwrap()),
+        3,
+    )
+    .unwrap();
+
+    assert!(
+        db.pipelines.contains_key("renamed"),
+        "pipeline should be stored under the requested name 'renamed'"
+    );
+    assert_eq!(db.pipelines["renamed"].steps.len(), 1);
+}
+
+// ── 7. Pipeline with NORMALIZE step survives roundtrip and runs correctly ─────
 
 #[test]
 fn test_pipeline_vector_ops_roundtrip() {

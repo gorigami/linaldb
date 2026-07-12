@@ -32,15 +32,15 @@ pub(super) fn execute_apply_pipeline(
     s: ApplyPipelineStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    let stored = db
+    let steps = db
         .pipelines
         .get(&s.pipeline)
         .ok_or_else(|| DslError::Parse {
             line: line_no,
             msg: format!("Pipeline '{}' not found", s.pipeline),
         })?
+        .steps
         .clone();
-    let steps = stored.steps;
 
     let mut current = s.source.clone();
     let step_count = steps.len();

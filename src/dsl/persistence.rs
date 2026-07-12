@@ -578,7 +578,7 @@ fn save_pipeline_core(
     let json = serde_json::json!({
         "name": name,
         "source": stored.source,
-        "version": "0.1.34"
+        "version": env!("CARGO_PKG_VERSION")
     });
 
     fs::write(&save_path, serde_json::to_string_pretty(&json).unwrap()).map_err(|e| {
@@ -629,13 +629,12 @@ fn load_pipeline_core(
     })?;
 
     match stmt {
-        crate::dsl::ast::Statement::DefinePipeline(mut def) => {
-            def.source = source.to_string();
+        crate::dsl::ast::Statement::DefinePipeline(def) => {
             db.pipelines.insert(
-                def.name.clone(),
+                name.to_string(),
                 StoredPipeline {
                     steps: def.steps,
-                    source: def.source,
+                    source: source.to_string(),
                 },
             );
             Ok(DslOutput::Message(format!(
@@ -694,7 +693,7 @@ pub fn load_all_pipelines(db: &mut TensorDb, line_no: usize) -> Result<(), DslEr
     if let Some(arr) = json["pipelines"].as_array() {
         for val in arr {
             if let Some(name) = val.as_str() {
-                let _ = load_pipeline_core(db, name, None, line_no);
+                load_pipeline_core(db, name, None, line_no)?;
             }
         }
     }
