@@ -323,7 +323,7 @@ pub struct TensorDb {
     databases: HashMap<String, DatabaseInstance>,
     active_db: String,
     /// Session-wide named pipeline registry.
-    pub pipelines: HashMap<String, Vec<crate::dsl::ast::PipelineStep>>,
+    pub pipelines: HashMap<String, crate::dsl::ast::StoredPipeline>,
 }
 
 impl Default for TensorDb {

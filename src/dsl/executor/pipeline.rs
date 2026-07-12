@@ -17,7 +17,13 @@ pub(super) fn execute_define_pipeline(
             msg: "Pipeline must have at least one step".into(),
         });
     }
-    db.pipelines.insert(name.clone(), s.steps);
+    db.pipelines.insert(
+        name.clone(),
+        StoredPipeline {
+            steps: s.steps,
+            source: s.source,
+        },
+    );
     Ok(DslOutput::Message(format!("Defined pipeline '{}'.", name)))
 }
 
@@ -33,6 +39,7 @@ pub(super) fn execute_apply_pipeline(
             line: line_no,
             msg: format!("Pipeline '{}' not found", s.pipeline),
         })?
+        .steps
         .clone();
 
     let mut current = s.source.clone();
@@ -94,14 +101,14 @@ pub(super) fn execute_describe_pipeline(
     name: String,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    let steps = db.pipelines.get(&name).ok_or_else(|| DslError::Parse {
+    let stored = db.pipelines.get(&name).ok_or_else(|| DslError::Parse {
         line: line_no,
         msg: format!("Pipeline '{}' not found", name),
     })?;
 
     let mut out = format!("Pipeline: {}\n", name);
     out.push_str("Steps:\n");
-    for (i, step) in steps.iter().enumerate() {
+    for (i, step) in stored.steps.iter().enumerate() {
         out.push_str(&format!("  {}. {}\n", i + 1, describe_step(step)));
     }
     Ok(DslOutput::Message(out.trim_end().to_string()))
@@ -118,7 +125,7 @@ pub(super) fn execute_show_pipelines(db: &TensorDb) -> Result<DslOutput, DslErro
         out.push_str(&format!(
             "  {} ({} step(s))\n",
             name,
-            db.pipelines[name].len()
+            db.pipelines[name].steps.len()
         ));
     }
     out.push_str("-----------------");

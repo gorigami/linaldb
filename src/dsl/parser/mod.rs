@@ -587,6 +587,7 @@ impl Parser {
         Ok(Statement::DefinePipeline(DefinePipelineStmt {
             name,
             steps,
+            source: String::new(), // populated by execute_line_with_context
         }))
     }
 
