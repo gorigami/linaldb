@@ -360,6 +360,7 @@ SHOW "--- Begin training phase ---"
 
 - `EXPLAIN <query>`: Show the logical execution plan for a SELECT query.
 - `AUDIT DATASET <name>`: Perform a deep health check on the reference graph — detects dangling tensor references.
+- `DELIVER <dataset> [TO '<path>']`: Check whether a dataset is deliverable over the `/delivery` HTTP routes (§10). Errors if the dataset doesn't exist. If it exists but hasn't been persisted yet, reports that and points to `SAVE DATASET`; if a delivery manifest is found (default path `<data_dir>/<db>/datasets/<name>/manifest.json`, or the directory given by `TO`), confirms it's ready to serve.
 
 ---
 
