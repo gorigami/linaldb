@@ -124,18 +124,42 @@ of what's actually implemented. Low-risk, high-value, no code changes.
       **Done in v0.1.37** as a side effect of fixing Track E / E1 —
       `tests/window_functions_test.rs` covers `ROW_NUMBER`, `RANK`,
       `DENSE_RANK` (including ties), `LAG`/`LEAD`, and windowed `SUM`.
-- [ ] **C2.** Add pipeline × vector-engine integration tests — no test
+- [x] **C2.** Add pipeline × vector-engine integration tests — no test
       currently chains `COSINE_SIM`/`MATMUL`/index-aware search inside an
       `APPLY PIPELINE` step; v0.1.31-33 and v0.1.33-34 features are tested
       in total isolation from each other.
-- [ ] **C3.** Add a dedicated test file for v0.1.28 features (subqueries,
+      **Done in v0.1.38** — `tests/pipeline_vector_engine_test.rs` (5 tests):
+      `COSINE_SIM` in a pipeline `WHERE` step (with and without a vector
+      index present), `COSINE_SIM`/`MATMUL` as computed `SELECT` columns,
+      and a chained `WHERE COSINE_SIM(...) ... THEN NORMALIZE` pipeline. No
+      bugs found — all combinations produced correct results.
+- [x] **C3.** Add a dedicated test file for v0.1.28 features (subqueries,
       `RIGHT`/`FULL JOIN`, `IN`/`BETWEEN`, multi-column `ORDER BY`) — only
       incidental coverage exists today, higher silent-regression risk.
-- [ ] **C4.** Add server-level test(s) exercising `PIPELINE` and `SEARCH`
+      **Done in v0.1.38** — `tests/v0128_features_test.rs` (8 tests).
+      RIGHT/FULL JOIN row correctness was already covered by
+      `correctness_integration.rs`, so this file covers what wasn't:
+      subqueries (incl. nested), `IN`, `BETWEEN` (incl. compound `AND`),
+      `LIMIT ... OFFSET`, multi-column `ORDER BY`, and the
+      `FILTER x = true` boolean-literal regression guard.
+- [x] **C4.** Add server-level test(s) exercising `PIPELINE` and `SEARCH`
       through `/execute` — no server test currently references either.
-- [ ] **C5.** Verify `is_read_only` correctly classifies
+      **Done in v0.1.38** — `tests/server_pipeline_search_test.rs` (3
+      tests): full `DEFINE`/`SHOW`/`APPLY`/`DROP PIPELINE` lifecycle over
+      HTTP (incl. confirming `APPLY` on a dropped pipeline now errors
+      rather than silently succeeding), `CREATE VECTOR INDEX` + `SEARCH`
+      over HTTP, and `SEARCH` without a prebuilt index correctly erroring
+      through the HTTP path too.
+- [x] **C5.** Verify `is_read_only` correctly classifies
       `APPLY PIPELINE`/`SAVE PIPELINE`/`LOAD PIPELINE` as write operations
       (not yet confirmed either way — check it doesn't run under a read lock).
+      **Verified correct in v0.1.38, no bug** — `Statement::is_read_only()`
+      (`src/dsl/ast.rs`) only lists `Explain`/`Audit`/`List`/`Deliver` as
+      read-only; pipeline mutations fall through to `false` by default and
+      correctly take the server's write lock
+      (`src/server/mod.rs` picks `db_arc.read()` vs `db_arc.write()` based
+      on this). Added `is_read_only_pipeline_mutations_require_write_lock`
+      unit test in `src/dsl/parser/mod.rs` to lock this in.
 
 ## Track D — Architecture/design debt
 

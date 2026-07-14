@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.38] - 2026-07-14
+
+### Testing — Close out Track C of CONSISTENCY_PLAN.md (test coverage gaps)
+
+No functional changes. Closes the remaining Track C items:
+
+- **C2**: `tests/pipeline_vector_engine_test.rs` (5 tests) — pipelines and
+  the vector engine were previously tested in total isolation. Covers
+  `COSINE_SIM` in a pipeline `WHERE` step (with and without a vector index
+  present), `COSINE_SIM`/`MATMUL` as computed `SELECT` columns inside a
+  pipeline, and a chained filter-then-`NORMALIZE` pipeline. No bugs found.
+- **C3**: `tests/v0128_features_test.rs` (8 tests) — v0.1.28 features
+  (subqueries, `IN`/`BETWEEN`, `LIMIT ... OFFSET`, multi-column `ORDER BY`)
+  had parser-level unit tests but no end-to-end integration coverage.
+  RIGHT/FULL JOIN was already covered elsewhere.
+- **C4**: `tests/server_pipeline_search_test.rs` (3 tests) — first
+  server-level test coverage for `PIPELINE` and `SEARCH` over HTTP,
+  including confirming `APPLY` on a dropped pipeline correctly errors and
+  `SEARCH` without a prebuilt vector index correctly errors through the
+  HTTP path.
+- **C5**: verified (no bug) that `is_read_only()` correctly excludes
+  pipeline mutations from the read-only fast path, so the server takes a
+  write lock for them; added a regression test.
+
+With this, Tracks A, B, C, and E of `CONSISTENCY_PLAN.md` are fully closed.
+Track D (7 items, architecture debt needing design decisions) remains.
+
+---
+
 ## [0.1.37] - 2026-07-14
 
 ### Fixed — Window functions silently corrupted when combined with differing OVER specs (Track E / E1)
