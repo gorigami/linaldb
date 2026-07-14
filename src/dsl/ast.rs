@@ -48,9 +48,9 @@ pub enum Statement {
     Audit(AuditStmt),
 
     // ─── Persistence ─────────────────────────────────────────────────────────
-    /// `SAVE [TENSOR|DATASET] <name> [TO <path>]`
+    /// `SAVE TENSOR|DATASET|PIPELINE <name> [TO <path>]` — the kind keyword is required, not optional
     Save(SaveStmt),
-    /// `LOAD [TENSOR|DATASET] <name> [FROM <path>]`
+    /// `LOAD TENSOR|DATASET|PIPELINE <name> [FROM <path>]` — the kind keyword is required, not optional
     Load(LoadStmt),
     /// `LIST TENSORS` / `LIST DATASETS` / etc.
     List(ListStmt),

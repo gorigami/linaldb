@@ -217,7 +217,8 @@ pub fn execute_line_with_context(
     line_no: usize,
     ctx: Option<&mut crate::engine::context::ExecutionContext>,
 ) -> Result<DslOutput, DslError> {
-    // Try the typed parser first; on parse error fall through to the minimal legacy chain.
+    // Every statement goes through the typed parser — there is no string-matching
+    // fallback chain. On parse failure, only blank/comment lines are tolerated.
     if let Ok(stmt) = crate::dsl::parser::parse(line) {
         // Attach the raw source line to DefinePipeline for serialization.
         let stmt = match stmt {

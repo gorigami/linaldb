@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.36] - 2026-07-14
+
+### Documentation — Track B of CONSISTENCY_PLAN.md
+
+`docs/DSL_REFERENCE.md` was missing a large share of what's actually
+implemented — a 2026-07-12 audit found `INSERT`/`UPDATE`/`DELETE`, `JOIN`,
+CTEs/`UNION`, window functions, `CASE`/`COALESCE`/`NULLIF`/`CAST`, string
+functions, `SEARCH`, `TRANSFORM`, `CREATE INDEX`, and `SET DATASET METADATA`
+entirely undocumented despite being fully implemented and reachable. This
+release fills those gaps, adds a new `## 7. Vector Search & Indexing`
+section (the doc's numbering previously jumped straight from `## 6` to
+`## 8`), and corrects two stale/inaccurate spots:
+
+- `docs/ARCHITECTURE.md`'s "Recovery" section described a metadata-scan and
+  lazy-load-on-access mechanism that doesn't exist — startup only registers
+  empty `DatabaseInstance` stubs per directory found in `data_dir`. Also
+  added a "Pipelines (JSON, v0.1.34)" persistence subsection, which was
+  missing entirely.
+- A stale source comment in `src/dsl/mod.rs` referenced a "legacy chain"
+  fallback for unrecognised DSL syntax that no longer exists (removed in an
+  earlier typed-parser migration) — every statement now goes through the
+  typed parser; only blank/comment lines are tolerated on parse failure.
+- `src/dsl/ast.rs`'s `Statement::Save`/`Statement::Load` doc comments
+  implied the `TENSOR`/`DATASET`/`PIPELINE` kind keyword was optional with
+  a default; it's actually required.
+
+Every new doc example was executed against the DSL directly (not just
+hand-written) to confirm it actually parses and produces the claimed
+output before being committed.
+
+### Found while writing this release (not fixed here)
+
+Verifying the window-functions examples surfaced a real engine bug:
+combining multiple window functions with *different* `OVER (...)` specs in
+one `SELECT` — especially mixing `LAG`/`LEAD` with a differently-specced
+ranking or aggregate window function — can silently produce wrong values
+or an outright schema error, depending on ordering. Same-spec combinations
+work correctly. Tracked as Track E / E1 in `CONSISTENCY_PLAN.md` with
+concrete repro queries; the new documentation only uses verified-safe
+example combinations and calls this out as a known limitation.
+
+---
+
 ## [0.1.35] - 2026-07-12
 
 ### Fixed — Silent correctness bugs (Track A of CONSISTENCY_PLAN.md)
