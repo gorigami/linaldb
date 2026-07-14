@@ -73,31 +73,47 @@ These actively mislead users: no error, no warning, wrong/dropped results.
 `docs/DSL_REFERENCE.md` and `docs/ARCHITECTURE.md` are missing large swaths
 of what's actually implemented. Low-risk, high-value, no code changes.
 
-- [ ] **B1.** Document `INSERT INTO` / `UPDATE ... SET ... WHERE` /
-      `DELETE FROM ... WHERE`.
-- [ ] **B2.** Document `JOIN`/`LEFT JOIN`/`RIGHT JOIN`/`FULL JOIN`.
-- [ ] **B3.** Document `WITH ... AS (...)` CTEs and `UNION`/`UNION ALL`.
-- [ ] **B4.** Document window functions: `ROW_NUMBER() OVER (...)`, `RANK`,
-      `DENSE_RANK`, `LAG`/`LEAD`, windowed aggregates.
-- [ ] **B5.** Document `CASE WHEN`, `COALESCE`, `NULLIF`, `CAST`, and scalar
+- [x] **B1.** Document `INSERT INTO` / `UPDATE ... SET ... WHERE` /
+      `DELETE FROM ... WHERE`. **Done in v0.1.36** (§4).
+- [x] **B2.** Document `JOIN`/`LEFT JOIN`/`RIGHT JOIN`/`FULL JOIN`. **Done in
+      v0.1.36** (§4) — also documents that `table.col` in `ON` only uses the
+      column part (no true qualified-name resolution).
+- [x] **B3.** Document `WITH ... AS (...)` CTEs and `UNION`/`UNION ALL`.
+      **Done in v0.1.36** (§4).
+- [x] **B4.** Document window functions: `ROW_NUMBER() OVER (...)`, `RANK`,
+      `DENSE_RANK`, `LAG`/`LEAD`, windowed aggregates. **Done in v0.1.36**
+      (§4) — found and worked around a real bug while writing this (see
+      Track E / E1 below); examples only use verified-safe combinations.
+- [x] **B5.** Document `CASE WHEN`, `COALESCE`, `NULLIF`, `CAST`, and scalar
       string functions (`UPPER`/`LOWER`/`LENGTH`/`TRIM`/`CONCAT`/`SUBSTR`).
-- [ ] **B6.** Document `SEARCH` (vector similarity search) — currently has
+      **Done in v0.1.36** (§4).
+- [x] **B6.** Document `SEARCH` (vector similarity search) — currently has
       **zero** doc coverage despite being a headline feature. Cover both
       `SEARCH <ds> ON <col> QUERY [...] TOP k` and the legacy
-      `SEARCH target FROM source QUERY [...] ON col K=k` form.
-- [ ] **B7.** Document `TRANSFORM <source> SELECT ... [WHERE ...] [INTO <target>]`.
-- [ ] **B8.** Document `CREATE INDEX ON ds(col)` / `CREATE VECTOR INDEX`.
-- [ ] **B9.** Document `SET DATASET <name> [METADATA] <key> = <value>` syntax.
-- [ ] **B10.** Fix `SAVE`/`LOAD` doc inconsistency — the kind keyword
+      `SEARCH target FROM source QUERY [...] ON col K=k` form. **Done in
+      v0.1.36** (new §7) — covers all 3 syntax forms (modern, `WHERE ~=`
+      shorthand, legacy) and notes all 3 require a prebuilt `CREATE VECTOR
+      INDEX`.
+- [x] **B7.** Document `TRANSFORM <source> SELECT ... [WHERE ...] [INTO <target>]`.
+      **Done in v0.1.36** (new §7) — corrected an assumption while writing
+      this: without `INTO`, `TRANSFORM` overwrites the **source** dataset in
+      place, it does not return results inline like `SELECT`.
+- [x] **B8.** Document `CREATE INDEX ON ds(col)` / `CREATE VECTOR INDEX`.
+      **Done in v0.1.36** (new §7).
+- [x] **B9.** Document `SET DATASET <name> [METADATA] <key> = <value>` syntax.
+      **Done in v0.1.36** (§4, Schema Evolution).
+- [x] **B10.** Fix `SAVE`/`LOAD` doc inconsistency — the kind keyword
       (`TENSOR`/`DATASET`/`PIPELINE`) is required, not optional; the
-      `ast.rs` doc-comment implying a default is wrong.
-- [ ] **B11.** Update `ARCHITECTURE.md`: add a section on pipeline
+      `ast.rs` doc-comment implying a default is wrong. **Fixed in v0.1.36.**
+- [x] **B11.** Update `ARCHITECTURE.md`: add a section on pipeline
       persistence (v0.1.34); fix the "Recovery" section, which describes
       metadata/lazy-loading on startup that doesn't actually exist
       (`recover_databases` just creates empty `DatabaseInstance` stubs).
-- [ ] **B12.** Remove stale references (in docs or code comments) to a
+      **Done in v0.1.36.**
+- [x] **B12.** Remove stale references (in docs or code comments) to a
       string-matching "legacy fallback chain" in `dsl/mod.rs` — it no longer
       exists; `execute_line_with_context` is typed-parser-only now.
+      **Fixed in v0.1.36** (`src/dsl/mod.rs` comment corrected).
 
 ## Track C — Test coverage gaps
 
@@ -153,7 +169,43 @@ These need a design decision before implementation, not just a bug fix.
 
 ---
 
+## Track E — Window function combination bug (found while writing Track B docs)
+
+- [ ] **E1.** Combining multiple window functions with *different* `OVER (...)`
+      specs in one `SELECT` — especially mixing `LAG`/`LEAD` with a
+      differently-specced ranking or aggregate window function — silently
+      produces wrong values or an outright schema-mismatch error, depending
+      on ordering. Reproduced directly against `main` @ v0.1.36 baseline:
+      - `SELECT id, LAG(price) OVER (ORDER BY id) AS prev, SUM(price) OVER (PARTITION BY category ORDER BY id) AS running FROM items`
+        gives the *same* `running` value for every row (not a cumulative
+        sum) — LAG comes first, corrupts the following aggregate window.
+      - `SELECT id, LAG(price) OVER (ORDER BY id) AS prev, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM items`
+        errors outright: `Parse { msg: "Row 1 has incompatible schema" }`.
+      - `SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn, LAG(price) OVER (ORDER BY id) AS prev FROM items`
+        (reversed order) succeeds but silently **drops the `prev` column
+        from the output entirely** — 2 columns come back instead of 3.
+      - Same-spec combinations (identical `PARTITION BY`/`ORDER BY` across
+        all window functions in the `SELECT`) work correctly — this is
+        specifically about *differing* specs interacting, most reliably
+        triggered by `LAG`/`LEAD`.
+      - Likely root cause: `apply_window_and_computed_exprs`
+        (`src/dsl/executor/query.rs`) calls `apply_window_func` once per
+        `SelectExpr::Window` entry, threading `rows` through sequentially;
+        something in how a later call's schema/column-count assumptions
+        interact with an earlier call's appended column (or how `LAG`/`LEAD`
+        specifically build their result column vs. how ranking/aggregate
+        window functions build theirs) is inconsistent. Not yet root-caused
+        beyond this — needs a debugger/print-driven trace through
+        `apply_window_func` for the exact indices/schema at the point of
+        divergence.
+      - `docs/DSL_REFERENCE.md`'s Window Functions section was written to
+        only use verified-safe example combinations and calls this out as a
+        known limitation with a pointer to this entry — update that note if
+        this gets fixed.
+
+---
+
 ## Completion
 
-- [ ] All tracks (A, B, C, D) fully checked off
+- [ ] All tracks (A, B, C, D, E) fully checked off
 - [ ] Final PR deletes this file (`CONSISTENCY_PLAN.md`)
