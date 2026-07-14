@@ -290,9 +290,14 @@ FROM items
 SELECT id, price, LAG(price) OVER (ORDER BY id) AS prev_price FROM items
 SELECT id, price, LEAD(price, 2) OVER (ORDER BY id) AS next2_price FROM items
 
--- Running total within each category, ordered by id
-SELECT id, price, category,
-       RANK() OVER (PARTITION BY category ORDER BY id) AS rk,
+-- Multiple window functions with different PARTITION BY / ORDER BY specs
+-- can be freely combined in one SELECT:
+SELECT id, price,
+       ROW_NUMBER() OVER (ORDER BY price DESC) AS rn,
+       RANK() OVER (PARTITION BY category ORDER BY price DESC) AS rk,
+       DENSE_RANK() OVER (PARTITION BY category ORDER BY price DESC) AS drk,
+       LAG(price) OVER (ORDER BY id) AS prev_price,
+       LEAD(price, 2) OVER (ORDER BY id) AS next2_price,
        SUM(price) OVER (PARTITION BY category ORDER BY id) AS running_total
 FROM items
 ```
@@ -302,7 +307,6 @@ FROM items
 - Aggregate-as-window: any of `SUM`, `AVG`, `COUNT`, `MIN`, `MAX` (or `SUM_VEC`/`AVG_VEC`) followed by `OVER (...)` computes a running aggregate within the window instead of collapsing to one row.
 - `OVER (...)` accepts an optional `PARTITION BY col [, col ...]` and an optional `ORDER BY col [ASC|DESC] [, ...]` — at least one of the two should be present for a meaningful window; `ORDER BY` on a Vector/Matrix column inside `OVER (...)` is rejected (see §1 — these types have no defined ordering).
 - The result column defaults to a lowercase function name (e.g. `row_number`, `rank`) unless aliased with `AS`.
-- **Known limitation**: combining multiple window functions with *different* `OVER (...)` specs in one `SELECT` — especially mixing `LAG`/`LEAD` with a differently-specced ranking or aggregate window function — can silently produce incorrect values for the later column(s), or in some combinations a schema error. Combining window functions that share the *same* `PARTITION BY`/`ORDER BY` (like the last example above) is fine; when in doubt, split into separate queries. Tracked in `CONSISTENCY_PLAN.md` (Track E) if that file still exists in the repo.
 
 ### CASE, COALESCE, NULLIF, CAST
 

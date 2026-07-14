@@ -117,10 +117,13 @@ of what's actually implemented. Low-risk, high-value, no code changes.
 
 ## Track C — Test coverage gaps
 
-- [ ] **C1.** Add window function tests: `PARTITION BY`, `RANK`,
+- [x] **C1.** Add window function tests: `PARTITION BY`, `RANK`,
       `DENSE_RANK`, `LAG`/`LEAD`. Currently exactly one test exists
       (`test_window_no_partition_by`), despite full support being claimed
       shipped in v0.1.29.
+      **Done in v0.1.37** as a side effect of fixing Track E / E1 —
+      `tests/window_functions_test.rs` covers `ROW_NUMBER`, `RANK`,
+      `DENSE_RANK` (including ties), `LAG`/`LEAD`, and windowed `SUM`.
 - [ ] **C2.** Add pipeline × vector-engine integration tests — no test
       currently chains `COSINE_SIM`/`MATMUL`/index-aware search inside an
       `APPLY PIPELINE` step; v0.1.31-33 and v0.1.33-34 features are tested
@@ -171,37 +174,26 @@ These need a design decision before implementation, not just a bug fix.
 
 ## Track E — Window function combination bug (found while writing Track B docs)
 
-- [ ] **E1.** Combining multiple window functions with *different* `OVER (...)`
+- [x] **E1.** Combining multiple window functions with *different* `OVER (...)`
       specs in one `SELECT` — especially mixing `LAG`/`LEAD` with a
       differently-specced ranking or aggregate window function — silently
-      produces wrong values or an outright schema-mismatch error, depending
-      on ordering. Reproduced directly against `main` @ v0.1.36 baseline:
-      - `SELECT id, LAG(price) OVER (ORDER BY id) AS prev, SUM(price) OVER (PARTITION BY category ORDER BY id) AS running FROM items`
-        gives the *same* `running` value for every row (not a cumulative
-        sum) — LAG comes first, corrupts the following aggregate window.
-      - `SELECT id, LAG(price) OVER (ORDER BY id) AS prev, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM items`
-        errors outright: `Parse { msg: "Row 1 has incompatible schema" }`.
-      - `SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn, LAG(price) OVER (ORDER BY id) AS prev FROM items`
-        (reversed order) succeeds but silently **drops the `prev` column
-        from the output entirely** — 2 columns come back instead of 3.
-      - Same-spec combinations (identical `PARTITION BY`/`ORDER BY` across
-        all window functions in the `SELECT`) work correctly — this is
-        specifically about *differing* specs interacting, most reliably
-        triggered by `LAG`/`LEAD`.
-      - Likely root cause: `apply_window_and_computed_exprs`
-        (`src/dsl/executor/query.rs`) calls `apply_window_func` once per
-        `SelectExpr::Window` entry, threading `rows` through sequentially;
-        something in how a later call's schema/column-count assumptions
-        interact with an earlier call's appended column (or how `LAG`/`LEAD`
-        specifically build their result column vs. how ranking/aggregate
-        window functions build theirs) is inconsistent. Not yet root-caused
-        beyond this — needs a debugger/print-driven trace through
-        `apply_window_func` for the exact indices/schema at the point of
-        divergence.
-      - `docs/DSL_REFERENCE.md`'s Window Functions section was written to
-        only use verified-safe example combinations and calls this out as a
-        known limitation with a pointer to this entry — update that note if
-        this gets fixed.
+      produced wrong values or an outright schema-mismatch error, depending
+      on ordering.
+      **Fixed in v0.1.37.** Root cause: `apply_window_func`
+      (`src/dsl/executor/query.rs`) built the new window-result column's
+      `Field` without `.nullable()` (unlike the sibling `SelectExpr::Computed`
+      path, which does). `LAG`/`LEAD` produce `Value::Null` for boundary
+      rows, so `Tuple::new`'s schema validation rejected those rows against
+      the non-nullable field, and the code silently fell back to the
+      pre-window row via `.unwrap_or(row)` — leaving the `Vec<Tuple>` with
+      inconsistent per-row schemas, which cascaded into wrong values or
+      errors in whatever window function ran next. Fix: mark the column
+      nullable, and replace the silent `.unwrap_or(row)` with a propagated
+      `DslError` for defense in depth. `docs/DSL_REFERENCE.md`'s Window
+      Functions section restored the full combined example (previously
+      hedged with a "known limitation" note, now removed). Tests:
+      `tests/window_functions_test.rs` (8 tests, also substantially covers
+      Track C / C1's window function coverage gap).
 
 ---
 

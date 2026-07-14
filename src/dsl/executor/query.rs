@@ -862,8 +862,7 @@ fn apply_window_func(
         .unwrap_or(ValueType::Int);
 
     // Append window result to each row using the alias as the column name
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .enumerate()
         .map(|(i, row)| {
             let mut vals = row.values.clone();
@@ -873,15 +872,17 @@ fn apply_window_func(
                 .fields
                 .iter()
                 .cloned()
-                .chain(std::iter::once(crate::core::tuple::Field::new(
-                    alias,
-                    vtype.clone(),
-                )))
+                .chain(std::iter::once(
+                    crate::core::tuple::Field::new(alias, vtype.clone()).nullable(),
+                ))
                 .collect();
             let new_schema = std::sync::Arc::new(crate::core::tuple::Schema::new(new_fields));
-            Tuple::new(new_schema, vals).unwrap_or(row)
+            Tuple::new(new_schema, vals).map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: format!("Failed to append window column '{}': {}", alias, e),
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub(super) fn execute_add_computed_column(
