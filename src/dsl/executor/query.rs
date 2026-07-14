@@ -316,6 +316,41 @@ pub(super) fn execute_select(
             };
         }
     } else {
+        // A SELECT with no GROUP BY can still contain aggregate functions
+        // (a "global" aggregate over the whole result set, e.g. `SELECT
+        // SUM(price) FROM t`). Without this check, aggregate expressions
+        // were silently dropped by the plain-column projection below and
+        // the query returned the raw, unaggregated rows.
+        let has_aggr = match &s.columns {
+            SelectColumns::Named(exprs) => exprs
+                .iter()
+                .any(|e| matches!(e, SelectExpr::Aggregate { .. })),
+            SelectColumns::All => false,
+        };
+
+        if has_aggr {
+            let aggr_exprs: Vec<LogicalExpr> = match &s.columns {
+                SelectColumns::Named(exprs) => exprs
+                    .iter()
+                    .filter_map(|e| match e {
+                        SelectExpr::Aggregate { func, expr } => Some(LogicalExpr::AggregateExpr {
+                            func: agg_func_to_logical(func),
+                            expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                        }),
+                        SelectExpr::Column(_)
+                        | SelectExpr::Window { .. }
+                        | SelectExpr::Computed { .. } => None,
+                    })
+                    .collect(),
+                SelectColumns::All => vec![],
+            };
+            plan = LogicalPlan::Aggregate {
+                input: Box::new(plan),
+                group_expr: vec![],
+                aggr_expr: aggr_exprs,
+            };
+        }
+
         if let Some(having_expr) = &s.having {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
@@ -335,8 +370,10 @@ pub(super) fn execute_select(
                 offset: s.offset.unwrap_or(0),
             };
         }
-        // Only project base columns here (Window/Computed added post-execution)
-        if window_exprs.is_empty() {
+        // Only project base columns here (Window/Computed added post-execution).
+        // Skip entirely for aggregate plans — AggregateExec's schema already
+        // reflects the correct output columns.
+        if !has_aggr && window_exprs.is_empty() {
             let effective_schema = plan.schema();
             let cols: Vec<String> = match &s.columns {
                 SelectColumns::All => effective_schema
@@ -571,7 +608,7 @@ fn apply_window_and_computed_exprs(
     mut rows: Vec<Tuple>,
     _base_schema: &std::sync::Arc<crate::core::tuple::Schema>,
     window_exprs: &[SelectExpr],
-    _line_no: usize,
+    line_no: usize,
 ) -> Result<Vec<Tuple>, DslError> {
     use crate::query::physical::evaluate_expression;
 
@@ -611,7 +648,7 @@ fn apply_window_and_computed_exprs(
                     .collect();
             }
             SelectExpr::Window { func, spec, alias } => {
-                rows = apply_window_func(rows, func, spec, alias);
+                rows = apply_window_func(rows, func, spec, alias, line_no)?;
             }
             _ => {}
         }
@@ -624,8 +661,30 @@ fn apply_window_func(
     func: &WindowFunc,
     spec: &WindowSpec,
     alias: &str,
-) -> Vec<Tuple> {
+    line_no: usize,
+) -> Result<Vec<Tuple>, DslError> {
     use crate::query::physical::evaluate_expression;
+
+    if let Some(row) = rows.first() {
+        for (col, _) in &spec.order_by {
+            if let Some(field) = row.schema.get_field(col) {
+                if matches!(
+                    field.value_type,
+                    ValueType::Vector(_) | ValueType::Matrix(_, _)
+                ) {
+                    return Err(DslError::Parse {
+                        line: line_no,
+                        msg: format!(
+                            "Cannot ORDER BY column '{}' in a window function: Vector and Matrix \
+                             values have no defined ordering. Sort by a scalar expression instead \
+                             (e.g. a similarity/distance function).",
+                            col
+                        ),
+                    });
+                }
+            }
+        }
+    }
 
     let n = rows.len();
     let mut result_vals: Vec<Value> = vec![Value::Null; n];
@@ -803,7 +862,8 @@ fn apply_window_func(
         .unwrap_or(ValueType::Int);
 
     // Append window result to each row using the alias as the column name
-    rows.into_iter()
+    Ok(rows
+        .into_iter()
         .enumerate()
         .map(|(i, row)| {
             let mut vals = row.values.clone();
@@ -821,7 +881,7 @@ fn apply_window_func(
             let new_schema = std::sync::Arc::new(crate::core::tuple::Schema::new(new_fields));
             Tuple::new(new_schema, vals).unwrap_or(row)
         })
-        .collect()
+        .collect())
 }
 
 pub(super) fn execute_add_computed_column(

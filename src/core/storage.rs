@@ -188,6 +188,14 @@ impl ParquetStorage {
     pub fn metadata_exists(&self, name: &str) -> bool {
         Path::new(&self.legacy_persistent_metadata_path(name)).exists()
     }
+
+    /// Check if a delivery manifest exists for a dataset — i.e. it has been
+    /// persisted as a full dataset package (data.parquet + schema.json +
+    /// stats.json + lineage.json + manifest.json), which is what the
+    /// `/delivery` HTTP routes serve.
+    pub fn manifest_exists(&self, name: &str) -> bool {
+        Path::new(&self.dataset_manifest_path(name)).exists()
+    }
     /// Save a complete dataset package (folder-based)
     pub fn save_dataset_package(
         &self,

@@ -332,10 +332,38 @@ pub fn execute_statement(
             )))
         }
 
-        Statement::Deliver(s) => Ok(DslOutput::Message(format!(
-            "Delivery Projection for '{}' created. (Phase 1 Read-Only View)",
-            s.dataset
-        ))),
+        Statement::Deliver(s) => {
+            if db.get_dataset(&s.dataset).is_err() && db.get_tensor_dataset(&s.dataset).is_none() {
+                return Err(DslError::Engine {
+                    line: line_no,
+                    source: crate::engine::EngineError::DatasetNotFound(s.dataset.clone()),
+                });
+            }
+
+            let storage_base = if let Some(p) = &s.path {
+                p.clone()
+            } else {
+                let mut path = db.config.storage.data_dir.clone();
+                path.push(&db.active_instance().name);
+                path.to_string_lossy().into_owned()
+            };
+            let storage = ParquetStorage::new(&storage_base);
+
+            if storage.manifest_exists(&s.dataset) {
+                Ok(DslOutput::Message(format!(
+                    "Dataset '{}' is deliverable — manifest found under '{}/datasets/{}/' \
+                     (served via /delivery/datasets/{}/manifest.json).",
+                    s.dataset, storage_base, s.dataset, s.dataset
+                )))
+            } else {
+                Ok(DslOutput::Message(format!(
+                    "Dataset '{}' exists but has not been persisted yet. Run `SAVE DATASET {}` \
+                     to generate the delivery package (manifest.json, schema.json, stats.json) \
+                     served by the /delivery HTTP routes.",
+                    s.dataset, s.dataset
+                )))
+            }
+        }
 
         // ── Persistence ─────────────────────────────────────────────────────
         Statement::Save(s) => {

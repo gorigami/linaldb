@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.35] - 2026-07-12
+
+### Fixed — Silent correctness bugs (Track A of CONSISTENCY_PLAN.md)
+
+A 2026-07-12 audit of the engine/DSL/persistence layers found several
+places where invalid or unsupported operations were silently accepted
+instead of erroring, producing wrong results with no diagnostic.
+
+- **`ORDER BY` on Vector/Matrix columns** now errors instead of silently
+  leaving the sort a no-op (`Value::compare` has no defined ordering for
+  these types). Fixed at both the top-level `SELECT ... ORDER BY` path
+  (`SortExec`) and inside windowed `ORDER BY` (e.g.
+  `ROW_NUMBER() OVER (ORDER BY ...)`).
+- **`SUM`/`AVG` (incl. `SUM_VEC`/`AVG_VEC`) on dimension-mismatched
+  vectors or matrices** now error instead of silently dropping the
+  mismatched row from the aggregate — previously this could silently
+  under-count a `SUM`/corrupt an `AVG`'s denominator with no warning.
+- **`DELIVER <dataset>`** no longer returns a hardcoded success message
+  regardless of input. It now validates the dataset exists, and reports
+  whether it has actually been persisted (i.e. has a delivery manifest
+  the `/delivery` HTTP routes can serve) — pointing the user at
+  `SAVE DATASET` if not.
+- **A `SELECT` with an aggregate function and no `GROUP BY`** (e.g.
+  `SELECT SUM(price) FROM t`, `SELECT COUNT(*) FROM t`) previously
+  silently returned the raw, unaggregated table instead of computing the
+  aggregate — the plan-building code path for ungrouped `SELECT`
+  statements never checked for aggregate expressions in the select list.
+  This was found while testing the fixes above, not in the original
+  audit; it's likely the highest-severity fix in this release since it
+  affects a very common query shape.
+
+### Internal
+
+- `ParquetStorage::manifest_exists` — new public helper backing the
+  `DELIVER` fix, mirroring the existing `metadata_exists`.
+- 13 new regression tests in `tests/silent_correctness_test.rs`.
+
+---
+
 ## [0.1.34] - 2026-07-10
 
 ### Added — Pipeline persistence (`SAVE`/`LOAD PIPELINE`)

@@ -236,12 +236,20 @@ impl PhysicalPlan for SortExec {
             .columns
             .iter()
             .map(|(col, asc)| {
-                schema
-                    .get_field_index(col)
-                    .ok_or_else(|| {
-                        EngineError::InvalidOp(format!("Column not found for sorting: {}", col))
-                    })
-                    .map(|idx| (idx, *asc))
+                let idx = schema.get_field_index(col).ok_or_else(|| {
+                    EngineError::InvalidOp(format!("Column not found for sorting: {}", col))
+                })?;
+                match &schema.fields[idx].value_type {
+                    crate::core::value::ValueType::Vector(_)
+                    | crate::core::value::ValueType::Matrix(_, _) => {
+                        Err(EngineError::InvalidOp(format!(
+                            "Cannot ORDER BY column '{}': Vector and Matrix values have no defined ordering. \
+                             Sort by a scalar expression instead (e.g. a similarity/distance function).",
+                            col
+                        )))
+                    }
+                    _ => Ok((idx, *asc)),
+                }
             })
             .collect::<Result<_, _>>()?;
 
@@ -410,17 +418,27 @@ impl PhysicalPlan for AggregateExec {
                                 }
                                 (Value::Float(ref mut sum), Value::Int(v)) => *sum += *v as f32,
                                 (Value::Vector(sum_vec), Value::Vector(v)) => {
-                                    if sum_vec.len() == v.len() {
-                                        for (opt, val) in sum_vec.iter_mut().zip(v.iter()) {
-                                            *opt += val;
-                                        }
+                                    if sum_vec.len() != v.len() {
+                                        return Err(EngineError::InvalidOp(format!(
+                                            "SUM: vector dimension mismatch in aggregate — expected {}, got {}",
+                                            sum_vec.len(),
+                                            v.len()
+                                        )));
+                                    }
+                                    for (opt, val) in sum_vec.iter_mut().zip(v.iter()) {
+                                        *opt += val;
                                     }
                                 }
-                                (Value::Matrix(sum_mat), Value::Matrix(v))
-                                    if sum_mat.len() == v.len()
-                                        && !sum_mat.is_empty()
-                                        && sum_mat[0].len() == v[0].len() =>
-                                {
+                                (Value::Matrix(sum_mat), Value::Matrix(v)) => {
+                                    let expected_shape =
+                                        (sum_mat.len(), sum_mat.first().map_or(0, |r| r.len()));
+                                    let actual_shape = (v.len(), v.first().map_or(0, |r| r.len()));
+                                    if expected_shape != actual_shape {
+                                        return Err(EngineError::InvalidOp(format!(
+                                            "SUM: matrix shape mismatch in aggregate — expected {:?}, got {:?}",
+                                            expected_shape, actual_shape
+                                        )));
+                                    }
                                     for i in 0..sum_mat.len() {
                                         for j in 0..sum_mat[i].len() {
                                             sum_mat[i][j] += v[i][j];
@@ -457,24 +475,34 @@ impl PhysicalPlan for AggregateExec {
                                 }
                                 Value::Vector(ref mut sum_vec) => {
                                     if let Value::Vector(v) = &val {
-                                        if sum_vec.len() == v.len() {
-                                            for (s, val) in sum_vec.iter_mut().zip(v.iter()) {
-                                                *s += val;
-                                            }
+                                        if sum_vec.len() != v.len() {
+                                            return Err(EngineError::InvalidOp(format!(
+                                                "AVG: vector dimension mismatch in aggregate — expected {}, got {}",
+                                                sum_vec.len(),
+                                                v.len()
+                                            )));
+                                        }
+                                        for (s, val) in sum_vec.iter_mut().zip(v.iter()) {
+                                            *s += val;
                                         }
                                     }
                                 }
                                 Value::Matrix(ref mut sum_mat) => {
                                     if let Value::Matrix(v) = &val {
+                                        let expected_shape =
+                                            (sum_mat.len(), sum_mat.first().map_or(0, |r| r.len()));
+                                        let actual_shape =
+                                            (v.len(), v.first().map_or(0, |r| r.len()));
+                                        if expected_shape != actual_shape {
+                                            return Err(EngineError::InvalidOp(format!(
+                                                "AVG: matrix shape mismatch in aggregate — expected {:?}, got {:?}",
+                                                expected_shape, actual_shape
+                                            )));
+                                        }
                                         // Element-wise sum
-                                        if sum_mat.len() == v.len()
-                                            && !sum_mat.is_empty()
-                                            && sum_mat[0].len() == v[0].len()
-                                        {
-                                            for i in 0..sum_mat.len() {
-                                                for j in 0..sum_mat[i].len() {
-                                                    sum_mat[i][j] += v[i][j];
-                                                }
+                                        for i in 0..sum_mat.len() {
+                                            for j in 0..sum_mat[i].len() {
+                                                sum_mat[i][j] += v[i][j];
                                             }
                                         }
                                     }
