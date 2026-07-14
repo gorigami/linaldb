@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.37] - 2026-07-14
+
+### Fixed — Window functions silently corrupted when combined with differing OVER specs (Track E / E1)
+
+Combining multiple window functions with *different* `OVER (...)` specs in
+one `SELECT` — especially mixing `LAG`/`LEAD` with a differently-specced
+ranking or aggregate window function — could silently produce wrong values
+or an outright schema error, depending on ordering. Found while writing
+v0.1.36's window function documentation.
+
+**Root cause**: `apply_window_func` (`src/dsl/executor/query.rs`) built the
+new window-result column's `Field` without `.nullable()` — unlike the
+sibling `SelectExpr::Computed` code path, which does mark its appended
+column nullable. `LAG`/`LEAD` routinely produce `Value::Null` for boundary
+rows (the first/last `offset` rows in the window). `Tuple::new`'s schema
+validation rejected those rows against the non-nullable field, and the
+code silently fell back to the pre-window row via `.unwrap_or(row)` —
+leaving the `Vec<Tuple>` with **inconsistent per-row schemas** (some rows
+had the new column, some didn't), which cascaded into wrong values or
+schema errors in whatever window function ran next.
+
+**Fix**: mark the appended column nullable (matching the `Computed` path),
+and replace the silent `.unwrap_or(row)` fallback with a propagated
+`DslError` — if `Tuple::new` still fails for any other reason, the query
+now errors instead of silently returning a corrupted row.
+
+Adds `tests/window_functions_test.rs` (8 tests) — regression coverage for
+this bug plus general window function coverage (`ROW_NUMBER`, `RANK`,
+`DENSE_RANK` with ties, `LAG`/`LEAD`, windowed `SUM`), which had almost no
+dedicated tests before this.
+
+---
+
 ## [0.1.36] - 2026-07-14
 
 ### Documentation — Track B of CONSISTENCY_PLAN.md
