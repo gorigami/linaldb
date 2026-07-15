@@ -1447,6 +1447,21 @@ mod tests {
     }
 
     #[test]
+    fn is_read_only_pipeline_mutations_require_write_lock() {
+        // CONSISTENCY_PLAN.md Track C / C5: DEFINE/APPLY/SAVE/LOAD/DROP
+        // PIPELINE all mutate db.pipelines (or persist/restore it) and must
+        // NOT be classified read-only, or the server would run them under a
+        // read lock (src/server/mod.rs consults is_read_only to pick
+        // db_arc.read() vs db_arc.write()).
+        assert!(!parse_ok("DEFINE PIPELINE clean AS WHERE active = 1").is_read_only());
+        assert!(!parse_ok("APPLY PIPELINE clean ON products").is_read_only());
+        assert!(!parse_ok("APPLY PIPELINE clean ON products INTO top_products").is_read_only());
+        assert!(!parse_ok("SAVE PIPELINE clean").is_read_only());
+        assert!(!parse_ok("LOAD PIPELINE clean").is_read_only());
+        assert!(!parse_ok("DROP PIPELINE clean").is_read_only());
+    }
+
+    #[test]
     fn unknown_command_errors() {
         let e = parse_err("UNKNOWN foo bar");
         assert!(e.msg.contains("expected a statement keyword"));
