@@ -401,14 +401,36 @@ impl Parser {
                         self.advance();
                         let expr = self.parse_expr()?;
                         self.eat(&Token::As)?;
-                        let type_name = self.eat_ident()?;
-                        let to = match type_name.to_uppercase().as_str() {
-                            "INT" | "INTEGER" => CastTarget::Int,
-                            "FLOAT" | "DOUBLE" => CastTarget::Float,
-                            "TEXT" | "STRING" | "VARCHAR" => CastTarget::Text,
-                            "BOOL" | "BOOLEAN" => CastTarget::Bool,
-                            other => {
-                                return Err(self.error(format!("Unknown CAST target '{}'", other)))
+                        let to = match self.peek() {
+                            Some(Token::Vector) => {
+                                self.advance();
+                                self.eat(&Token::LParen)?;
+                                let n = self.eat_usize()?;
+                                self.eat(&Token::RParen)?;
+                                CastTarget::Vector(n)
+                            }
+                            Some(Token::Matrix) => {
+                                self.advance();
+                                self.eat(&Token::LParen)?;
+                                let rows = self.eat_usize()?;
+                                self.eat(&Token::Comma)?;
+                                let cols = self.eat_usize()?;
+                                self.eat(&Token::RParen)?;
+                                CastTarget::Matrix(rows, cols)
+                            }
+                            _ => {
+                                let type_name = self.eat_ident()?;
+                                match type_name.to_uppercase().as_str() {
+                                    "INT" | "INTEGER" => CastTarget::Int,
+                                    "FLOAT" | "DOUBLE" => CastTarget::Float,
+                                    "TEXT" | "STRING" | "VARCHAR" => CastTarget::Text,
+                                    "BOOL" | "BOOLEAN" => CastTarget::Bool,
+                                    other => {
+                                        return Err(
+                                            self.error(format!("Unknown CAST target '{}'", other))
+                                        )
+                                    }
+                                }
                             }
                         };
                         self.eat(&Token::RParen)?;

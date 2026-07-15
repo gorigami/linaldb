@@ -437,10 +437,12 @@ pub fn expr_to_string(expr: &Expr) -> String {
         Expr::Cast { expr, to } => {
             use crate::dsl::ast::CastTarget;
             let type_name = match to {
-                CastTarget::Int => "INT",
-                CastTarget::Float => "FLOAT",
-                CastTarget::Text => "TEXT",
-                CastTarget::Bool => "BOOL",
+                CastTarget::Int => "INT".to_string(),
+                CastTarget::Float => "FLOAT".to_string(),
+                CastTarget::Text => "TEXT".to_string(),
+                CastTarget::Bool => "BOOL".to_string(),
+                CastTarget::Vector(n) => format!("VECTOR({})", n),
+                CastTarget::Matrix(r, c) => format!("MATRIX({}, {})", r, c),
             };
             format!("CAST({} AS {})", expr_to_string(expr), type_name)
         }

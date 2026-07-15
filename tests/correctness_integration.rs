@@ -236,6 +236,66 @@ fn test_cast_to_bool() {
     );
 }
 
+// ─── Test: CAST to VECTOR/MATRIX reshapes tensor columns (v0.1.39, D1) ────────
+//
+// RESHAPE/FLATTEN exist for standalone tensor variables (`LET x = RESHAPE t
+// TO [dims]`) but are not usable inside a SQL SELECT expression — there was
+// previously no way to reshape a Vector/Matrix *column* inline in a query.
+// CAST(expr AS VECTOR(n)) / CAST(expr AS MATRIX(r, c)) fill that gap.
+
+#[test]
+fn test_cast_vector_to_matrix() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: INT, v: Vector(4))", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, [1.0, 2.0, 3.0, 4.0])", 2);
+
+    let ds = expect_table(exec(
+        &mut db,
+        "SELECT CAST(v AS MATRIX(2, 2)) AS m FROM t",
+        3,
+    ));
+    assert_eq!(
+        ds.rows[0].values[0],
+        Value::Matrix(vec![vec![1.0, 2.0], vec![3.0, 4.0]]),
+        "Vector(4) cast to Matrix(2,2) should reshape row-major"
+    );
+}
+
+#[test]
+fn test_cast_matrix_to_vector() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: INT, m: Matrix(2, 3))", 1);
+    exec(
+        &mut db,
+        "INSERT INTO t VALUES (1, [[1, 2, 3], [4, 5, 6]])",
+        2,
+    );
+
+    let ds = expect_table(exec(&mut db, "SELECT CAST(m AS VECTOR(6)) AS v FROM t", 3));
+    assert_eq!(
+        ds.rows[0].values[0],
+        Value::Vector(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "Matrix(2,3) cast to Vector(6) should flatten row-major"
+    );
+}
+
+#[test]
+fn test_cast_vector_matrix_dimension_mismatch_is_null_not_crash() {
+    // CAST doesn't resize/pad — a dimension mismatch is a graceful Null,
+    // matching the existing convention for other invalid CAST combinations
+    // (e.g. CAST(vector AS INT)), not a panic or hard error.
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: INT, v: Vector(4))", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, [1.0, 2.0, 3.0, 4.0])", 2);
+
+    let ds = expect_table(exec(
+        &mut db,
+        "SELECT CAST(v AS MATRIX(3, 3)) AS bad FROM t",
+        3,
+    ));
+    assert_eq!(ds.rows[0].values[0], Value::Null);
+}
+
 // ─── Test 6: SUBSTR 2-arg form (1-based) ─────────────────────────────────────
 
 #[test]

@@ -600,6 +600,7 @@ impl Parser {
     }
 
     // [INNER | LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN <dataset> ON <col> = <col>
+    // or                                                     ... ON COSINE_SIM(<col>, <col>) > <threshold>
     fn parse_join_clause(&mut self) -> Result<JoinClause, ParseError> {
         let kind = if self.at(&Token::Left) {
             self.advance();
@@ -633,18 +634,39 @@ impl Parser {
         let right_dataset = self.eat_ident()?;
         self.eat(&Token::On)?;
 
-        // ON <left_ref> = <right_ref>
+        // ON COSINE_SIM(<left_ref>, <right_ref>) > <threshold>  — similarity join
+        // ON <left_ref> = <right_ref>                           — equi-join
         // Each ref is either `col` or `table.col`
-        let left_col = self.parse_join_col_ref()?;
-        self.eat(&Token::Eq)?;
-        let right_col = self.parse_join_col_ref()?;
+        if self.at_ident("COSINE_SIM") {
+            self.advance();
+            self.eat(&Token::LParen)?;
+            let left_col = self.parse_join_col_ref()?;
+            self.eat(&Token::Comma)?;
+            let right_col = self.parse_join_col_ref()?;
+            self.eat(&Token::RParen)?;
+            self.eat(&Token::Gt)?;
+            let threshold = self.eat_number()? as f32;
 
-        Ok(JoinClause {
-            kind,
-            dataset: right_dataset,
-            left_col,
-            right_col,
-        })
+            Ok(JoinClause {
+                kind,
+                dataset: right_dataset,
+                left_col,
+                right_col,
+                similarity_threshold: Some(threshold),
+            })
+        } else {
+            let left_col = self.parse_join_col_ref()?;
+            self.eat(&Token::Eq)?;
+            let right_col = self.parse_join_col_ref()?;
+
+            Ok(JoinClause {
+                kind,
+                dataset: right_dataset,
+                left_col,
+                right_col,
+                similarity_threshold: None,
+            })
+        }
     }
 
     // Parse `col` or `table.col`, returning only the column part.

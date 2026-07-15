@@ -505,6 +505,25 @@ bulk `load_all_pipelines` helper, once it's wired to a DSL command).
    - IndexScan instead of full table scan
    - Significant performance improvement for filtered queries
 
+**Rewrite-rule pattern** (`query/planner.rs`, `try_optimize_filter`): both index
+optimizations follow the same shape — pattern-match a specific predicate form,
+and *only* substitute the specialized executor if a matching index actually
+exists on the referenced column; otherwise fall through to the generic
+executor, which evaluates the same predicate correctly, just without the
+index. This is deliberate duplication in service of an optimization, not an
+architectural inconsistency:
+
+- `col = literal` + a `Hash` index on `col` → `IndexScanExec`, else generic
+  `SeqScanExec` + `FilterExec` (which evaluates `col = literal` itself).
+- `COSINE_SIM(col, query_vec) > threshold` + a `Vector` index on `col` →
+  `CosineFilterExec`, else generic `FilterExec` (which evaluates
+  `COSINE_SIM(...)` itself via the normal expression evaluator).
+
+Adding a new index type/predicate pattern means adding one more branch to
+`try_optimize_filter`, not building a parallel execution path — the generic
+`FilterExec` path must still handle the predicate correctly on its own for
+the no-index case.
+
 ### Aggregation Execution
 
 1. **Grouping**: Hash-based grouping by grouping columns

@@ -91,6 +91,8 @@ pub enum CastTarget {
     Float,
     Text,
     Bool,
+    Vector(usize),
+    Matrix(usize, usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,13 +151,19 @@ pub enum LogicalPlan {
         n: usize,
         offset: usize,
     },
-    /// Join two datasets on an equi-join condition
+    /// Join two datasets on an equi-join condition, or (when
+    /// `similarity_threshold` is `Some`) a
+    /// `COSINE_SIM(left_col, right_col) > threshold` similarity condition.
     Join {
         left: Box<LogicalPlan>,
         right: Box<LogicalPlan>,
         left_col: String,
         right_col: String,
         join_type: JoinType,
+        /// The right side's dataset name — needed to look up a Vector
+        /// index on `right_col` for an index-accelerated similarity join.
+        right_dataset_name: String,
+        similarity_threshold: Option<f32>,
     },
     /// Aggregate rows
     Aggregate {
@@ -245,7 +253,16 @@ impl LogicalPlan {
                                 typ = infer_expr_type_full(inner.as_ref(), &input_schema);
                             }
                             super::logical::AggregateFunction::Avg => {
-                                typ = crate::core::value::ValueType::Float;
+                                // AVG mirrors SUM/MIN/MAX's element-wise Vector/Matrix
+                                // behavior (see AggregateExec's finalization in
+                                // physical.rs), but a scalar Int/Float input always
+                                // averages down to a Float, never an Int.
+                                let input_schema = input.schema();
+                                typ = match infer_expr_type_full(inner.as_ref(), &input_schema) {
+                                    t @ (crate::core::value::ValueType::Vector(_)
+                                    | crate::core::value::ValueType::Matrix(_, _)) => t,
+                                    _ => crate::core::value::ValueType::Float,
+                                };
                             }
                             super::logical::AggregateFunction::AvgVec
                             | super::logical::AggregateFunction::SumVec => {
@@ -293,8 +310,11 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
         | Expr::IsNotNull(_)
         | Expr::In { .. }
         | Expr::Between { .. } => ValueType::Bool,
-        Expr::AggregateExpr { func, .. } => match func {
-            AggregateFunction::Avg => ValueType::Float,
+        Expr::AggregateExpr { func, expr: inner } => match func {
+            AggregateFunction::Avg => match infer_expr_type_full(inner, schema) {
+                t @ (ValueType::Vector(_) | ValueType::Matrix(_, _)) => t,
+                _ => ValueType::Float,
+            },
             AggregateFunction::Count => ValueType::Int,
             AggregateFunction::AvgVec | AggregateFunction::SumVec => ValueType::Vector(0),
             _ => ValueType::Int,
@@ -339,6 +359,8 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             CastTarget::Int => ValueType::Int,
             CastTarget::Float => ValueType::Float,
             CastTarget::Text | CastTarget::Bool => ValueType::String,
+            CastTarget::Vector(n) => ValueType::Vector(*n),
+            CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
         },
     }
 }

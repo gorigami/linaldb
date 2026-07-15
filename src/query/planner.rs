@@ -3,8 +3,8 @@ use crate::engine::{EngineError, TensorDb};
 use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
     AggregateExec, CosineFilterExec, DistinctExec, FilterExec, IndexScanExec, LimitExec,
-    NestedLoopJoinExec, PhysicalPlan, ProjectionExec, SeqScanExec, SortExec, UnionExec,
-    VectorSearchExec,
+    NestedLoopJoinExec, PhysicalPlan, ProjectionExec, SeqScanExec, SimilarityJoinExec, SortExec,
+    UnionExec, VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -160,6 +160,8 @@ impl<'a> Planner<'a> {
                 left_col,
                 right_col,
                 join_type,
+                right_dataset_name,
+                similarity_threshold,
             } => {
                 let left_plan = self.create_physical_plan(left)?;
                 let right_plan = self.create_physical_plan(right)?;
@@ -176,14 +178,27 @@ impl<'a> Planner<'a> {
                     })
                     .collect();
                 let output_schema = Arc::new(Schema::new(nullable_fields));
-                Ok(Box::new(NestedLoopJoinExec {
-                    left: left_plan,
-                    right: right_plan,
-                    left_col: left_col.clone(),
-                    right_col: right_col.clone(),
-                    join_type: *join_type,
-                    output_schema,
-                }))
+                if let Some(threshold) = similarity_threshold {
+                    Ok(Box::new(SimilarityJoinExec {
+                        left: left_plan,
+                        right: right_plan,
+                        left_col: left_col.clone(),
+                        right_col: right_col.clone(),
+                        right_dataset_name: right_dataset_name.clone(),
+                        threshold: *threshold,
+                        join_type: *join_type,
+                        output_schema,
+                    }))
+                } else {
+                    Ok(Box::new(NestedLoopJoinExec {
+                        left: left_plan,
+                        right: right_plan,
+                        left_col: left_col.clone(),
+                        right_col: right_col.clone(),
+                        join_type: *join_type,
+                        output_schema,
+                    }))
+                }
             }
             LogicalPlan::Union { left, right, all } => {
                 let left_plan = self.create_physical_plan(left)?;
@@ -201,6 +216,14 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Pattern-matches a predicate shape and, only if a matching index
+    /// actually exists on the referenced column, substitutes a specialized
+    /// index-accelerated executor (`IndexScanExec`, `CosineFilterExec`)
+    /// for the generic scan+filter path. Returns `None` otherwise, in
+    /// which case the caller falls back to `SeqScanExec` + `FilterExec`,
+    /// which evaluates the same predicate correctly without an index — so
+    /// each specialized executor here is an optimization, not a second
+    /// implementation of the predicate's semantics.
     fn try_optimize_filter(
         &self,
         dataset_name: &str,

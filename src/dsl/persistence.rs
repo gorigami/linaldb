@@ -13,13 +13,18 @@ use std::path::{Path, PathBuf};
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
+fn instance_base_dir(db: &TensorDb) -> PathBuf {
+    let mut path = db.config.storage.data_dir.clone();
+    path.push(&db.active_instance().name);
+    path
+}
+
 fn resolve_persistence_path(db: &TensorDb, path: &str) -> String {
     let path_buf = PathBuf::from(path);
     if path_buf.is_absolute() {
         return path.to_string();
     }
-    let mut resolved = db.config.storage.data_dir.clone();
-    resolved.push(&db.active_instance().name);
+    let mut resolved = instance_base_dir(db);
     if !path.is_empty() {
         resolved.push(path);
     }
@@ -545,8 +550,7 @@ fn export_csv_core(
 // ─── Pipeline ─────────────────────────────────────────────────────────────────
 
 fn pipeline_dir(db: &TensorDb) -> std::path::PathBuf {
-    let mut path = db.config.storage.data_dir.clone();
-    path.push(&db.active_instance().name);
+    let mut path = instance_base_dir(db);
     path.push("pipelines");
     path
 }
@@ -563,7 +567,7 @@ fn save_pipeline_core(
     })?;
 
     let save_path = if let Some(p) = explicit_path {
-        PathBuf::from(p)
+        PathBuf::from(resolve_persistence_path(db, p))
     } else {
         pipeline_dir(db).join(format!("{}.json", name))
     };
@@ -602,7 +606,7 @@ fn load_pipeline_core(
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     let load_path = if let Some(p) = explicit_path {
-        PathBuf::from(p)
+        PathBuf::from(resolve_persistence_path(db, p))
     } else {
         pipeline_dir(db).join(format!("{}.json", name))
     };
@@ -650,56 +654,6 @@ fn load_pipeline_core(
     }
 }
 
-/// Save all pipelines to `<db_path>/pipelines/` and write an index file.
-pub fn save_all_pipelines(db: &TensorDb, line_no: usize) -> Result<(), DslError> {
-    if db.pipelines.is_empty() {
-        return Ok(());
-    }
-    let dir = pipeline_dir(db);
-    fs::create_dir_all(&dir).map_err(|e| DslError::Parse {
-        line: line_no,
-        msg: format!("Failed to create pipelines dir: {}", e),
-    })?;
-    let names: Vec<&String> = db.pipelines.keys().collect();
-    for name in &names {
-        save_pipeline_core(db, name, None, line_no)?;
-    }
-    let index = serde_json::json!({ "pipelines": names });
-    fs::write(
-        dir.join("index.json"),
-        serde_json::to_string_pretty(&index).unwrap(),
-    )
-    .map_err(|e| DslError::Parse {
-        line: line_no,
-        msg: format!("Failed to write pipeline index: {}", e),
-    })?;
-    Ok(())
-}
-
-/// Load all pipelines from `<db_path>/pipelines/index.json`.
-pub fn load_all_pipelines(db: &mut TensorDb, line_no: usize) -> Result<(), DslError> {
-    let index_path = pipeline_dir(db).join("index.json");
-    if !index_path.exists() {
-        return Ok(());
-    }
-    let content = fs::read_to_string(&index_path).map_err(|e| DslError::Parse {
-        line: line_no,
-        msg: format!("Failed to read pipeline index: {}", e),
-    })?;
-    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| DslError::Parse {
-        line: line_no,
-        msg: format!("Invalid pipeline index JSON: {}", e),
-    })?;
-    if let Some(arr) = json["pipelines"].as_array() {
-        for val in arr {
-            if let Some(name) = val.as_str() {
-                load_pipeline_core(db, name, None, line_no)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 // ─── Typed public API (called from executor) ──────────────────────────────────
 
 pub fn save_typed(
@@ -740,6 +694,7 @@ pub fn list_typed(
         ListTarget::Tensors => list_tensors_core(db, None, line_no),
         ListTarget::DatasetVersions(name) => list_versions_core(db, name, line_no),
         ListTarget::DatasetPackages => list_datasets_core(db, None, line_no),
+        ListTarget::Pipelines => crate::dsl::executor::execute_show_pipelines(db),
     }
 }
 

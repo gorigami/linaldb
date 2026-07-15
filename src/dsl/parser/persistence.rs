@@ -63,6 +63,10 @@ impl Parser {
                 self.advance();
                 ListTarget::Datasets
             }
+            Some(Token::Pipelines) => {
+                self.advance();
+                ListTarget::Pipelines
+            }
             Some(Token::Dataset) => {
                 self.advance();
                 if self.at(&Token::Versions) {
@@ -75,7 +79,7 @@ impl Parser {
                     ListTarget::Datasets
                 }
             }
-            _ => return Err(self.unexpected("TENSORS, DATASETS, or DATASET VERSIONS")),
+            _ => return Err(self.unexpected("TENSORS, DATASETS, PIPELINES, or DATASET VERSIONS")),
         };
         Ok(Statement::List(ListStmt { target }))
     }

@@ -49,6 +49,24 @@ fn test_show_pipelines_empty() {
     }
 }
 
+// ── 2b. LIST PIPELINES — alias for SHOW PIPELINES (CONSISTENCY_PLAN.md D7) ────
+
+#[test]
+fn test_list_pipelines_is_alias_for_show_pipelines() {
+    let mut db = TensorDb::new();
+    execute_line(&mut db, "DEFINE PIPELINE my_pipe AS SELECT id, score", 1).expect("define failed");
+
+    let show = execute_line(&mut db, "SHOW PIPELINES", 2).expect("show failed");
+    let list = execute_line(&mut db, "LIST PIPELINES", 3).expect("list failed");
+    let (DslOutput::Message(show_msg), DslOutput::Message(list_msg)) = (show, list) else {
+        panic!("expected Message output from both SHOW PIPELINES and LIST PIPELINES");
+    };
+    assert_eq!(
+        show_msg, list_msg,
+        "LIST PIPELINES should produce identical output to SHOW PIPELINES"
+    );
+}
+
 // ── 3. DESCRIBE PIPELINE ──────────────────────────────────────────────────────
 
 #[test]
