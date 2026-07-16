@@ -335,7 +335,7 @@ linal/
 ├── docs/              # Documentation
 │   ├── ARCHITECTURE.md
 │   ├── DSL_REFERENCE.md
-│   └── Tasks_implementations.md
+│   └── archive/        # Retired planning/roadmap docs (gitignored — local only, won't appear after a fresh clone)
 ├── Cargo.toml
 ├── README.md
 ├── CONTRIBUTING.md

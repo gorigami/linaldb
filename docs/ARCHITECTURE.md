@@ -822,5 +822,4 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 For more details, see:
 
 - [DSL Reference](DSL_REFERENCE.md)
-- [Tasks & Implementation](Tasks_implementations.md)
 - [Changelog](../CHANGELOG.md)
