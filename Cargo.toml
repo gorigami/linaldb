@@ -1,6 +1,6 @@
 [package]
 name = "linal"
-version = "0.1.46"
+version = "0.1.47"
 edition = "2021"
 description = "In-memory linear algebra engine for vectors, matrices and tensors"
 

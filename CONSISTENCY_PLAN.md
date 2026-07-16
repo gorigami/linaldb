@@ -153,15 +153,16 @@ known limitations) before writing examples that rely on them.
 
 ## Track I — ARCHITECTURE.md doc debt
 
-- [ ] **I1.** Fix the storage-layout description (line 441): it's not a
+- [x] **I1.** Fix the storage-layout description (line 441): it's not a
       flat `.parquet` file — `SAVE`/`IMPORT DATASET` write a per-dataset
       **directory package** (`{base}/datasets/{name}/data.parquet` plus
       sibling `schema.json`/`stats.json`/`lineage.json`/`manifest.json`,
-      per `src/core/storage.rs:109-110,200`).
-- [ ] **I2.** Add `pipeline.rs` to the executor-split description (lines
+      per `src/core/storage.rs:109-110,200`). **Fixed in v0.1.47.**
+- [x] **I2.** Add `pipeline.rs` to the executor-split description (lines
       259-271) — it's a sixth file (`execute_define_pipeline`/
-      `execute_apply_pipeline`), not five.
-- [ ] **I3.** Refresh stale counts: parser test count (58 -> 107), `Expr`
+      `execute_apply_pipeline`), not five. **Fixed in v0.1.47** — also
+      documented `execute_drop_pipeline`/`execute_describe_pipeline`.
+- [x] **I3.** Refresh stale counts: parser test count (58 -> 107), `Expr`
       variant count (10 documented -> 24 actual, missing `Int, Bool, And,
       Or, Not, IsNull, IsNotNull, In, Between, Case, Coalesce, Nullif,
       ScalarFn, Cast, MatLiteral`), `VectorFnKind` (6 -> 10, missing
@@ -170,36 +171,53 @@ known limitations) before writing examples that rely on them.
       "N+" language deliberately or a note that exact counts drift and
       point to the source as ground truth, rather than hardcoding numbers
       that go stale every few releases.
-- [ ] **I4.** Add a JOIN section: `JoinClause`/`JoinKind` (INNER/LEFT/
+      **Fixed in v0.1.47** — re-counted directly from source (`Expr` is
+      actually 25 variants, `Statement` is 36, `CallExpr` is 17 — all
+      slightly different from the audit's own estimates, re-verified by
+      reading the enums directly rather than regex-counting), added a
+      `grep`/source pointer alongside each count so it's easy to
+      re-verify instead of trusting a hardcoded number. Also removed the
+      stale `GroupBy` "operation" from the `LogicalPlan` list (never was a
+      real variant — GROUP BY is a field on `Aggregate`), found while
+      rewriting this section.
+- [x] **I4.** Add a JOIN section: `JoinClause`/`JoinKind` (INNER/LEFT/
       RIGHT/FULL), `SimilarityJoinExec`, and the v0.1.40 qualified-column
       (`table.col`) / `FROM table alias` fixes. Currently zero mentions
       despite `SimilarityJoinExec`'s own source comment pointing back at
       ARCHITECTURE.md's "Index-Aware Execution" section as its pattern
-      reference.
-- [ ] **I5.** Add a window functions section: `WindowFunc` (RowNumber,
+      reference. **Fixed in v0.1.47** — new "Join Execution" subsection
+      under Query Processing.
+- [x] **I5.** Add a window functions section: `WindowFunc` (RowNumber,
       Rank, DenseRank, Lag, Lead) — currently undocumented despite having
-      its own dedicated correctness-bug release (v0.1.37).
-- [ ] **I6.** Add `src/dsl/persistence.rs` (758 lines — all SAVE/LOAD/LIST/
+      its own dedicated correctness-bug release (v0.1.37). **Fixed in
+      v0.1.47** — new "Window Function Execution" subsection.
+- [x] **I6.** Add `src/dsl/persistence.rs` (758 lines — all SAVE/LOAD/LIST/
       IMPORT/EXPORT logic) to the DSL Module component listing (§3),
-      currently missing.
-- [ ] **I7.** Add `src/server/dataset_server.rs` (the `/delivery/*` route
+      currently missing. **Fixed in v0.1.47.**
+- [x] **I7.** Add `src/server/dataset_server.rs` (the `/delivery/*` route
       mount) to the Server Module section (§5), currently only covers
-      jobs/scheduler.
-- [ ] **I8.** Cite `src/engine/context.rs` (`ExecutionContext`) by file path
+      jobs/scheduler. **Fixed in v0.1.47.**
+- [x] **I8.** Cite `src/engine/context.rs` (`ExecutionContext`) by file path
       in the Engine Module component listing (§2) — currently described
       conceptually in the Performance Optimizations appendix but not linked
-      to its actual module.
-- [ ] **I9.** Add CASE/COALESCE/NULLIF/CAST and CTE/subquery/UNION to the
+      to its actual module. **Fixed in v0.1.47.**
+- [x] **I9.** Add CASE/COALESCE/NULLIF/CAST and CTE/subquery/UNION to the
       Expr-surface documentation — fully implemented (CHANGELOG v0.1.28/
       v0.1.36) but absent from ARCHITECTURE.md, consistent with the I3
-      `Expr` enum gap.
-- [ ] **I10 (minor).** Correct the SIMD dispatch description (lines
+      `Expr` enum gap. **Fixed in v0.1.47** — folded into the `ast.rs` and
+      `query/logical.rs` `Expr` rewrites (I3); `LogicalPlan` variant list
+      now also includes `Join`/`Union`/`Distinct` (CTEs materialize as
+      real datasets via `LogicalPlan::Scan`, so they don't need their own
+      variant — noted in the Join Execution section instead).
+- [x] **I10 (minor).** Correct the SIMD dispatch description (lines
       692-696): `CpuBackend::use_simd` only checks length (`>=1024`); the
       contiguity check happens inside `SimdBackend`'s individual op
       methods, not at the `CpuBackend` dispatch point as currently implied.
-- [ ] **I11 (minor).** Correct the "zero heap allocation" claim for the
+      **Fixed in v0.1.47.**
+- [x] **I11 (minor).** Correct the "zero heap allocation" claim for the
       `<=16` element SmallVec path (line 667) — `.to_vec()` heap-allocates
-      to satisfy the `Vec<f32>` return type.
+      to satisfy the `Vec<f32>` return type. **Fixed in v0.1.47** (both
+      occurrences of the claim).
 
 ---
 

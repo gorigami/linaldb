@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.47] - 2026-07-16
+
+### Documented — ARCHITECTURE.md gaps found by the follow-up documentation audit (Track I)
+
+Closes out Track I of `CONSISTENCY_PLAN.md` (round 2). No code changes.
+
+- Fixed the storage-layout description: dataset persistence is a per-dataset
+  **directory package** (`datasets/{name}/data.parquet` plus sibling
+  `schema.json`/`stats.json`/`lineage.json`/`manifest.json`), not a single
+  flat `.parquet` file as previously described.
+- Added the sixth executor file, `executor/pipeline.rs`, to the executor-split
+  description (previously said "five files").
+- Refreshed every stale hardcoded count (parser tests, `Expr`/`Statement`/
+  `CallExpr` variants, lexer tokens) by re-reading the source directly rather
+  than trusting the previous numbers — several were already wrong even at
+  the time they were written. Added a `grep`/source pointer next to each
+  count so it can be re-verified instead of silently drifting again.
+- Added two new "Query Processing" subsections that were previously entirely
+  undocumented despite being real, shipped features: **Join Execution**
+  (`JoinKind`, `NestedLoopJoinExec`/`SimilarityJoinExec`, the v0.1.40
+  qualified-column/table-alias fixes) and **Window Function Execution**
+  (`ROW_NUMBER`/`RANK`/`LAG`/`LEAD`/aggregate-as-window, the v0.1.37
+  nullable-schema fix, the v0.1.45 vector-aggregate fix).
+- Added `context.rs` (`ExecutionContext`) to the Engine Module listing,
+  `persistence.rs` to the DSL Module listing, and `dataset_server.rs`
+  (the `/delivery` HTTP routes) to the Server Module listing — all three
+  were real, substantial modules with zero mention.
+- Extended the `Expr` documentation (both `dsl::ast::Expr` and
+  `query::logical::Expr`) to include `Case`/`Coalesce`/`Nullif`/`Cast` and
+  the four newer `VectorFnKind` variants (`Matmul`/`Transpose`/`MatShape`/
+  `Flatten`) — previously undocumented despite being fully implemented.
+- Corrected two minor-but-wrong performance claims: `CpuBackend`'s SIMD
+  dispatch checks element count only (contiguity is checked one layer
+  down, inside `SimdBackend`), and the `<=16`-element `SmallVec` fast path
+  isn't actually zero-heap-allocation overall (the final `.to_vec()` still
+  allocates once).
+
+Full suite passes, 0 failures (no code touched by this release).
+
+---
+
 ## [0.1.46] - 2026-07-16
 
 ### Documented — DSL_REFERENCE.md gaps found by the follow-up doc audit (Track H)
