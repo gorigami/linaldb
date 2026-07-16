@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.42] - 2026-07-16
+
+### Cleaned up — follow-up to the examples/tests audit
+
+- **`examples/`**: moved the two fixture-generating Rust binaries
+  (`gen_test_data.rs`, `gen_zarr_data.rs`) out of `examples/` into
+  `tools/fixtures/`, registered as explicit `[[example]]` entries in
+  `Cargo.toml` so `cargo run --example gen_test_data` (used by CI) keeps
+  working unchanged. `examples/` now contains only `.lnl` scripts (plus
+  `README.md` and the `data/` fixture folder) — no stray `.rs` files.
+  Deleted the now-empty `gen_zarr_data_minimal.rs` reference from the
+  README table.
+- **`tests/`**: removed `dataset_validation_test.rs`, a true duplicate of
+  `dataset_integrity_test.rs::test_row_count_validation_error_message`
+  (same scenario, different variable names). Folded 3 more single-test
+  files into their natural siblings with no loss of coverage:
+  `dataset_zero_copy_test.rs` → `tensor_arc_sharing_test.rs` (both assert
+  the Arc zero-copy invariant, just at different layers — dataset-column
+  vs. raw `Tensor`); `engine_scenarios.rs` →
+  `engine_matrix_ops.rs::test_engine_binary_and_unary_scenario` (both
+  bypass the DSL and exercise `ExecutionContext` directly); `symbol_resolution.rs` →
+  `dsl_dataset_complete.rs::test_dataset_derived_column_and_persistence_round_trip`
+  (both are DSL-level dataset workflow tests). 68 → 64 test files. Full
+  suite still passes, 0 failures.
+
+---
+
 ## [0.1.41] - 2026-07-16
 
 ### Cleaned up — examples/ and tests/ audit

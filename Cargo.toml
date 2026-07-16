@@ -1,6 +1,6 @@
 [package]
 name = "linal"
-version = "0.1.41"
+version = "0.1.42"
 edition = "2021"
 description = "In-memory linear algebra engine for vectors, matrices and tensors"
 
@@ -41,6 +41,14 @@ zarrs = { version = "0.19.0", features = ["ndarray", "filesystem"] }
 default = []
 zero-copy = []  # Enable Arc-based tensor storage
 experimental = ["zero-copy"]  # Bundle experimental features
+
+[[example]]
+name = "gen_test_data"
+path = "tools/fixtures/gen_test_data.rs"
+
+[[example]]
+name = "gen_zarr_data"
+path = "tools/fixtures/gen_zarr_data.rs"
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }

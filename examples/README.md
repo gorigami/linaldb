@@ -1,5 +1,9 @@
 # Examples
 
+This directory contains only `.lnl` LINAL scripts — no other file types.
+Fixture-generating Rust binaries live in `tools/fixtures/` (registered as
+Cargo examples, so `cargo run --example gen_test_data` still works).
+
 Every `.lnl` file in this directory is a runnable LINAL script:
 
 ```sh
@@ -64,5 +68,10 @@ linal run examples/<name>.lnl
 | `managed_service_demo.lnl` | Multi-database / multi-tenant workflow |
 | `smoke_test.lnl` | Broad single-pass sanity check across many commands |
 | `hardening_test.lnl` | CLI multiline-parsing regression check (used by `tests/cli_hardening_test.rs`) |
-| `gen_test_data.rs`, `gen_zarr_data.rs` | Standalone (non-`.lnl`) Rust binaries that generate `.npy`/`.h5`/`.zarr` fixture files for manually exercising scientific ingestion — run with `cargo run --example gen_test_data` |
 | `data/` | Small fixture files (e.g. `sample_data.csv`) referenced by the examples above |
+
+Fixture-generating binaries (not `.lnl`, so they live outside this
+directory): `tools/fixtures/gen_test_data.rs` and
+`tools/fixtures/gen_zarr_data.rs` generate `.npy`/`.h5`/`.zarr` files for
+manually exercising scientific ingestion — run with `cargo run --example
+gen_test_data` / `cargo run --example gen_zarr_data`.
