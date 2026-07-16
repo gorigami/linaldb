@@ -9,6 +9,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.49] - 2026-07-16
+
+### Documented — README/CONTRIBUTING cross-consistency, closes the round-2 audit (Track K)
+
+Closes out Track K of `CONSISTENCY_PLAN.md` — the last track of the round-2
+follow-up audit (v0.1.45-v0.1.49). No code changes.
+
+- Fixed CONTRIBUTING.md's repo URL: it used `gorigami/linal.git` (wrong,
+  including a stale `cd linal` directory name) while README.md and the
+  actual git remote both say `gorigami/linaldb.git`.
+- Fixed CONTRIBUTING.md's stale "Example tests" description — since v0.1.42,
+  `examples/` holds only `.lnl` scripts; the Rust fixture generators moved
+  to `tools/fixtures/` as `[[example]]` entries in `Cargo.toml`.
+- Added `docs/DATASET_ARCHITECTURE.md` to README's Documentation Hub —
+  it was substantively rewritten back in v0.1.44 but never linked.
+- Linked `SECURITY.md` from CONTRIBUTING.md's Getting Help section — it
+  existed at the repo root but was linked from nowhere.
+- Refreshed CONTRIBUTING.md's Project Structure tree: added `tools/`,
+  `benches/`, `scripts/`, `data/`, `.github/`, `SECURITY.md`, none of
+  which were reflected after the last two reorganizing PRs.
+
+**Flagged, not fixed**: `SECURITY.md` itself gives two different contact
+emails for reporting a vulnerability in two different sections of the same
+file — an internal inconsistency worth a dedicated look, out of scope for
+a cross-doc-consistency pass since it requires knowing which address is
+actually monitored.
+
+Full suite passes, 0 failures (no code touched by this release).
+
+**This closes the round-2 consistency audit** (Tracks G-K, v0.1.45-v0.1.49)
+— `CONSISTENCY_PLAN.md` is deleted in this same release; see git history for
+the full checklist if needed later.
+
+---
+
+## [0.1.48] - 2026-07-16
+
+### Documented — DATASET_ARCHITECTURE.md and ERROR_REFERENCE.md gaps (Track J)
+
+Closes out Track J of `CONSISTENCY_PLAN.md` (round 2). No code changes.
+PR #33 (v0.1.44) rewrote both docs, but the follow-up audit found real
+inaccuracies survived that rewrite.
+
+**`docs/DATASET_ARCHITECTURE.md`**:
+- `ResourceReference` now documents both variants (`Tensor { id }` and the
+  previously-omitted `Column { dataset, column }`).
+- Fixed the `graph.rs`/`DatasetGraph` attribution: it's actually used by
+  `ATTACH` and `AUDIT DATASET`, not `BIND` (plain aliasing) or `DERIVE`
+  (unrelated tensor-expression evaluation) as previously claimed.
+- Fixed the `schema_evolution.rs` attribution: there is no `LIST VERSIONS`
+  command; the real command is `SHOW DATASET VERSIONS <name>`.
+- Fixed the `lineage.rs` attribution: `SHOW LINEAGE <name>` actually walks
+  an unrelated tensor-computation `LineageNode` type in `engine/db.rs` —
+  `core::dataset::lineage` is populated only by the scientific-ingestion
+  connectors, tracking data-*import* provenance, not `SHOW LINEAGE`'s
+  tensor-derivation DAG.
+
+**`docs/ERROR_REFERENCE.md`**:
+- Added the 2 `EngineError` variants missing from the table: `Store` and
+  `DatasetError` (the latter is user-reachable — e.g. loading a dataset
+  under a name already in use).
+- Fixed the sample Parse and Engine error messages to match actual runtime
+  `Display` output — the parser's structured `ParseError` (with byte
+  offset) is silently discarded at its only call site and replaced with a
+  generic "Unknown command" message; noted this explicitly instead of
+  documenting the discarded, richer error as if it surfaced.
+- Rewrote the "Storage Errors" section entirely: it documented the wrong
+  type (`StoreError`, the in-memory *tensor* store error) instead of the
+  actual persistence error type (`StorageError`), and included a variant
+  (`UnsupportedFormat`) that doesn't exist anywhere in source.
+
+**Flagged, not fixed**: the discarded structured parser error (with byte
+offset and expectation detail) is a real DX regression, not just a doc
+gap — worth a dedicated future PR to stop throwing it away.
+
+Full suite passes, 0 failures (no code touched by this release).
+
+---
+
+## [0.1.47] - 2026-07-16
+
+### Documented — ARCHITECTURE.md gaps found by the follow-up documentation audit (Track I)
+
+Closes out Track I of `CONSISTENCY_PLAN.md` (round 2). No code changes.
+
+- Fixed the storage-layout description: dataset persistence is a per-dataset
+  **directory package** (`datasets/{name}/data.parquet` plus sibling
+  `schema.json`/`stats.json`/`lineage.json`/`manifest.json`), not a single
+  flat `.parquet` file as previously described.
+- Added the sixth executor file, `executor/pipeline.rs`, to the executor-split
+  description (previously said "five files").
+- Refreshed every stale hardcoded count (parser tests, `Expr`/`Statement`/
+  `CallExpr` variants, lexer tokens) by re-reading the source directly rather
+  than trusting the previous numbers — several were already wrong even at
+  the time they were written. Added a `grep`/source pointer next to each
+  count so it can be re-verified instead of silently drifting again.
+- Added two new "Query Processing" subsections that were previously entirely
+  undocumented despite being real, shipped features: **Join Execution**
+  (`JoinKind`, `NestedLoopJoinExec`/`SimilarityJoinExec`, the v0.1.40
+  qualified-column/table-alias fixes) and **Window Function Execution**
+  (`ROW_NUMBER`/`RANK`/`LAG`/`LEAD`/aggregate-as-window, the v0.1.37
+  nullable-schema fix, the v0.1.45 vector-aggregate fix).
+- Added `context.rs` (`ExecutionContext`) to the Engine Module listing,
+  `persistence.rs` to the DSL Module listing, and `dataset_server.rs`
+  (the `/delivery` HTTP routes) to the Server Module listing — all three
+  were real, substantial modules with zero mention.
+- Extended the `Expr` documentation (both `dsl::ast::Expr` and
+  `query::logical::Expr`) to include `Case`/`Coalesce`/`Nullif`/`Cast` and
+  the four newer `VectorFnKind` variants (`Matmul`/`Transpose`/`MatShape`/
+  `Flatten`) — previously undocumented despite being fully implemented.
+- Corrected two minor-but-wrong performance claims: `CpuBackend`'s SIMD
+  dispatch checks element count only (contiguity is checked one layer
+  down, inside `SimdBackend`), and the `<=16`-element `SmallVec` fast path
+  isn't actually zero-heap-allocation overall (the final `.to_vec()` still
+  allocates once).
+
+Full suite passes, 0 failures (no code touched by this release).
+
+---
+
+## [0.1.46] - 2026-07-16
+
+### Documented — DSL_REFERENCE.md gaps found by the follow-up doc audit (Track H)
+
+Closes out Track H of `CONSISTENCY_PLAN.md` (round 2) — documentation debt
+in `docs/DSL_REFERENCE.md` found by the same audit that produced v0.1.45's
+Track G bug fixes. No code changes.
+
+- Corrected the `UNION`/`UNION ALL` claim: chained 3-way+ unions actually
+  work (verified live), not just a single union.
+- Documented the real default column name for aggregate-as-window functions
+  (`sum(expr)_over`, not `sum`).
+- Bumped the stale `"version": "0.1.34"` in the example pipeline JSON and
+  noted the field is informational only, never read back on load.
+- Added a new "DATASET ... FROM (Materialized View)" subsection — this
+  form was entirely undocumented; only the `COLUMNS (...)` form existed.
+- Documented the WHERE/FILTER predicate vocabulary: `IN (...)`,
+  `BETWEEN ... AND ...`, `IS NULL`/`IS NOT NULL`, `DISTINCT`, and
+  `LIMIT ... OFFSET ...` — all previously undocumented.
+- Added a new "Subqueries in FROM" subsection for `FROM (SELECT ...) AS
+  alias`.
+- Added `MAT_SHAPE`, `MATMUL`, `TRANSPOSE` to the Vector Scalar Functions
+  table (they work in `SELECT` today, alongside the pre-existing
+  standalone tensor-DSL keyword forms).
+- Documented all `EXPLAIN` target forms (`DATASET`, `SEARCH`, the optional
+  `PLAN` keyword) — the doc previously implied `EXPLAIN` only covered
+  `SELECT`.
+- Documented `LIST DATASET PACKAGES` (alias of `LIST DATASETS`).
+- Documented that `#` and `//` are valid line-comment markers alongside
+  `--`.
+- Documented that the `CSV` keyword in `EXPORT [CSV] name TO "path"` is
+  optional.
+- H1/H2 (bare-aggregate alias and `SUM_VEC`/`AVG_VEC OVER` doc examples)
+  turned out to already be correct as of v0.1.45's Track G fixes — verified
+  live, no change needed.
+
+Full suite passes, 0 failures (no code touched by this release).
+
+---
+
 ## [0.1.45] - 2026-07-16
 
 ### Fixed — silent correctness bugs found by a follow-up documentation audit (Track G)
