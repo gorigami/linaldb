@@ -7,6 +7,12 @@
 
 SHOW "--- Phase 2 Persistence & Lifecycle Demo ---"
 
+// 0. Run in an isolated database so this demo is safe to re-run and
+// doesn't collide with data left behind by other scripts.
+DROP DATABASE IF EXISTS persistence_demo
+CREATE DATABASE persistence_demo
+USE persistence_demo
+
 // 1. Create a fresh dataset
 DATASET users COLUMNS (
     id: Int,
@@ -51,9 +57,11 @@ LIST DATASET VERSIONS users_v2
 
 // 6. Reload from disk
 // This will restore the dataset and its persistent metadata
-LOAD DATASET restored_users FROM "users"
+LOAD DATASET restored_users FROM "users.parquet"
 
 SHOW "Restored Dataset Metadata:"
 SHOW DATASET METADATA restored_users
 
 SHOW "--- Demo Complete ---"
+
+USE default

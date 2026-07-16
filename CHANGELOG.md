@@ -9,6 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.43] - 2026-07-16
+
+### Fixed — CI: smoke tests invoked the wrong binary profile
+
+- `tests/examples_cli_smoke_test.rs` and `tests/cli_hardening_test.rs`
+  hardcoded `target/debug/linal` as the binary path. CI runs
+  `cargo test --release`, so every test in `examples_cli_smoke_test.rs`
+  failed on the open PR ("No such file or directory") — passed locally
+  only because a debug build happened to already exist. Fixed both to use
+  `env!("CARGO_BIN_EXE_linal")`, which Cargo resolves to the correct path
+  for whichever profile actually built the test binary. Verified by
+  running the exact CI invocation locally (`cargo test --release -j 1`
+  with the same `--skip` flags).
+
+---
+
+## [0.1.42] - 2026-07-16
+
+### Cleaned up — follow-up to the examples/tests audit
+
+- **`examples/`**: moved the two fixture-generating Rust binaries
+  (`gen_test_data.rs`, `gen_zarr_data.rs`) out of `examples/` into
+  `tools/fixtures/`, registered as explicit `[[example]]` entries in
+  `Cargo.toml` so `cargo run --example gen_test_data` (used by CI) keeps
+  working unchanged. `examples/` now contains only `.lnl` scripts (plus
+  `README.md` and the `data/` fixture folder) — no stray `.rs` files.
+  Deleted the now-empty `gen_zarr_data_minimal.rs` reference from the
+  README table.
+- **`tests/`**: removed `dataset_validation_test.rs`, a true duplicate of
+  `dataset_integrity_test.rs::test_row_count_validation_error_message`
+  (same scenario, different variable names). Folded 3 more single-test
+  files into their natural siblings with no loss of coverage:
+  `dataset_zero_copy_test.rs` → `tensor_arc_sharing_test.rs` (both assert
+  the Arc zero-copy invariant, just at different layers — dataset-column
+  vs. raw `Tensor`); `engine_scenarios.rs` →
+  `engine_matrix_ops.rs::test_engine_binary_and_unary_scenario` (both
+  bypass the DSL and exercise `ExecutionContext` directly); `symbol_resolution.rs` →
+  `dsl_dataset_complete.rs::test_dataset_derived_column_and_persistence_round_trip`
+  (both are DSL-level dataset workflow tests). 68 → 64 test files. Full
+  suite still passes, 0 failures.
+
+---
+
+## [0.1.41] - 2026-07-16
+
+### Cleaned up — examples/ and tests/ audit
+
+- **`examples/`**: fixed 3 example scripts that referenced dead engine
+  state (`benchmark.lnl`'s `DROP DATABASE` on a DB that didn't exist yet,
+  `export_import_csv.lnl`'s missing CSV fixture and legacy-`IMPORT CSV`
+  path-resolution mismatch, `persistence_demo.lnl`'s `LOAD DATASET` path);
+  deleted 3 that used syntax the parser no longer accepts at all
+  (`end_to_end.lnl`, `test_persistence.lnl`, `verify_dataset_export.lnl`);
+  deleted a dead scratch script (`gen_zarr_data_minimal.rs`, a 6-line
+  no-op); added `pipelines_and_search.lnl` to cover window functions,
+  `CAST`-to-tensor, index-accelerated similarity `JOIN`, and pipelines —
+  previously undemonstrated. Every example now has a smoke-test assertion
+  (`tests/examples_cli_smoke_test.rs`, new) that it runs clean, in
+  addition to the deeper correctness assertions already in
+  `tests/examples_integration.rs`. See `examples/README.md` (new) for the
+  convention going forward.
+- **`tests/`**: merged 2 pairs of near-duplicate single-test files into
+  their larger siblings (`dataset_dsl_test.rs` +
+  `comprehensive_tensor_dataset_test.rs` → `tensor_dataset_dsl_test.rs`;
+  `lazy_dsl_test.rs` → folded into `lazy_evaluation_test.rs`, renamed
+  `lazy_expression_test.rs`); renamed 5 more files whose names collided
+  across unrelated features — most notably "indexing", which meant both
+  tensor element slicing (`tensor_indexing_server_test.rs`,
+  `tensor_expression_indexing_server_test.rs`) and the DB index feature
+  (`dataset_index_feature_test.rs`) — and "zero copy"
+  (`tensor_arc_sharing_test.rs` vs. `dataset_zero_copy_test.rs`, formerly
+  distinguished only by a plural `s`). No test coverage was removed; full
+  suite still passes (71 binaries, 0 failures).
+
+---
+
 ## [0.1.40] - 2026-07-16
 
 ### Fixed — Track F of CONSISTENCY_PLAN.md: qualified columns, table aliasing, FLATTEN in SELECT

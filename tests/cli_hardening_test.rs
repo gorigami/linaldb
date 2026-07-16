@@ -4,13 +4,20 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+
+// test_cli_init wipes the whole ./data dir, which races with every other
+// test below that reads/writes a subdirectory of it. Serialize them.
+static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 fn get_bin() -> String {
-    "target/debug/linal".to_string()
+    env!("CARGO_BIN_EXE_linal").to_string()
 }
 
 #[test]
 fn test_cli_init() {
+    let _guard = DATA_DIR_LOCK.lock().unwrap();
+
     // Ensure clean state
     let _ = fs::remove_file("linal.toml");
     let _ = fs::remove_dir_all("./data");
@@ -34,6 +41,8 @@ fn test_cli_init() {
 
 #[test]
 fn test_cli_run_multiline() {
+    let _guard = DATA_DIR_LOCK.lock().unwrap();
+
     // Clean up leftover state from previous runs so CREATE DATABASE is idempotent.
     let _ = fs::remove_dir_all("./data/hardening_db");
 

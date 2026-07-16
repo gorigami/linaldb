@@ -1,0 +1,73 @@
+# pipelines_and_search.lnl
+#
+# Demonstrates features that had no example coverage before: window
+# functions, CAST-to-tensor reshaping inside a query, index-accelerated
+# similarity JOIN, and named reusable pipelines.
+
+DROP DATABASE IF EXISTS pipelines_and_search
+CREATE DATABASE pipelines_and_search
+USE pipelines_and_search
+
+# --- 1. Setup: a product catalog with fixed-size embeddings ---
+
+DATASET products COLUMNS (
+    id: INT,
+    name: STRING,
+    category: STRING,
+    price: FLOAT,
+    embedding: VECTOR(6)
+)
+
+INSERT INTO products VALUES (1, "Laptop",     "electronics", 1200.0, [0.9, 0.1, 0.0, 0.2, 0.0, 0.1])
+INSERT INTO products VALUES (2, "Headphones", "electronics",  150.0, [0.8, 0.2, 0.0, 0.1, 0.1, 0.0])
+INSERT INTO products VALUES (3, "Monitor",    "electronics",  400.0, [0.1, 0.9, 0.2, 0.0, 0.0, 0.1])
+INSERT INTO products VALUES (4, "Desk",       "furniture",    300.0, [0.0, 0.1, 0.9, 0.1, 0.2, 0.0])
+INSERT INTO products VALUES (5, "Chair",      "furniture",    120.0, [0.0, 0.0, 0.8, 0.2, 0.1, 0.1])
+INSERT INTO products VALUES (6, "Bookshelf",  "furniture",     90.0, [0.1, 0.0, 0.7, 0.3, 0.0, 0.0])
+
+# --- 2. Window functions ---
+# Ranking and a running total within each category.
+
+# Note: `linal run` splits statements on newlines outside of balanced
+# parentheses, so a multi-clause SELECT like this stays on one line.
+SHOW "--- Window Functions ---"
+SELECT id, name, category, price, ROW_NUMBER() OVER (ORDER BY price DESC) AS rn, RANK() OVER (PARTITION BY category ORDER BY price DESC) AS rk, SUM(price) OVER (PARTITION BY category ORDER BY id) AS running_total FROM products
+
+# --- 3. CAST-to-tensor: reshape a Vector column inline in a query ---
+# 6 elements <-> a 2x3 matrix, both directions.
+
+SHOW "--- CAST(Vector AS Matrix) and back ---"
+SELECT id, CAST(embedding AS MATRIX(2, 3)) AS embedding_grid FROM products LIMIT 1
+SELECT id, CAST(CAST(embedding AS MATRIX(2, 3)) AS VECTOR(6)) AS round_trip FROM products LIMIT 1
+
+# --- 4. Index-accelerated similarity JOIN ---
+# A vector index on the right-hand side lets JOIN match rows by cosine
+# similarity instead of equality.
+
+DATASET queries COLUMNS (qid: INT, qname: STRING, qvec: VECTOR(6))
+INSERT INTO queries VALUES (1, "gaming setup", [0.85, 0.15, 0.0, 0.15, 0.05, 0.05])
+INSERT INTO queries VALUES (2, "home office",  [0.05, 0.05, 0.85, 0.15, 0.1, 0.05])
+
+CREATE VECTOR INDEX emb_idx ON products(embedding)
+
+SHOW "--- Similarity JOIN (cosine similarity > 0.7) ---"
+SELECT queries.qname, products.name, products.category FROM queries JOIN products ON COSINE_SIM(queries.qvec, products.embedding) > 0.7
+
+# --- 5. Pipelines: named, reusable, and persistable transformation chains ---
+
+DEFINE PIPELINE top_electronics AS WHERE category = "electronics" THEN ORDER BY price DESC THEN LIMIT 2
+
+SHOW PIPELINES
+DESCRIBE PIPELINE top_electronics
+
+APPLY PIPELINE top_electronics ON products INTO top_electronics_result
+SHOW "--- Pipeline Result ---"
+SELECT * FROM top_electronics_result
+
+SAVE PIPELINE top_electronics
+LOAD PIPELINE top_electronics
+DROP PIPELINE top_electronics
+
+SHOW "--- Demo Complete ---"
+
+USE default

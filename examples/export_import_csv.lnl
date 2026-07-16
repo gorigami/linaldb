@@ -7,11 +7,15 @@ USE phase1_test
 
 // 1. Import from CSV (Legacy)
 // The engine should infer id:Int, name:String, value:Float, active:Bool
-IMPORT CSV FROM "./data/sample_data.csv" AS frameworks
+// Note: legacy IMPORT CSV resolves paths relative to the active instance's
+// data dir (./data/<instance>), so we go back up to the repo root.
+IMPORT CSV FROM "../../examples/data/sample_data.csv" AS frameworks
 
 // 1a. Scientific Ingestion (New)
-// Loads into ephemeral tensors and registers a dataset view
-USE DATASET FROM "./data/sample_data.csv" AS frameworks_fast
+// Loads into ephemeral tensors and registers a dataset view.
+// This path requires all-numeric columns (it converts to tensors), so it
+// uses a separate numeric-only CSV rather than the mixed-type one above.
+USE DATASET FROM "./examples/data/sample_numeric.csv" AS frameworks_fast
 
 // 2. Show registered datasets
 SHOW ALL DATASETS
@@ -27,7 +31,7 @@ MATERIALIZE frameworks
 EXPORT CSV frameworks TO "./data/exported_frameworks.csv"
 
 // 6. Verify export exists (manual check or listing)
-LIST DATASETS FROM "data"
+LIST DATASETS
 
 // 7. Test RESET SESSION
 RESET SESSION
