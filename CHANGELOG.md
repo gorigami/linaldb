@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.46] - 2026-07-16
+
+### Documented — DSL_REFERENCE.md gaps found by the follow-up doc audit (Track H)
+
+Closes out Track H of `CONSISTENCY_PLAN.md` (round 2) — documentation debt
+in `docs/DSL_REFERENCE.md` found by the same audit that produced v0.1.45's
+Track G bug fixes. No code changes.
+
+- Corrected the `UNION`/`UNION ALL` claim: chained 3-way+ unions actually
+  work (verified live), not just a single union.
+- Documented the real default column name for aggregate-as-window functions
+  (`sum(expr)_over`, not `sum`).
+- Bumped the stale `"version": "0.1.34"` in the example pipeline JSON and
+  noted the field is informational only, never read back on load.
+- Added a new "DATASET ... FROM (Materialized View)" subsection — this
+  form was entirely undocumented; only the `COLUMNS (...)` form existed.
+- Documented the WHERE/FILTER predicate vocabulary: `IN (...)`,
+  `BETWEEN ... AND ...`, `IS NULL`/`IS NOT NULL`, `DISTINCT`, and
+  `LIMIT ... OFFSET ...` — all previously undocumented.
+- Added a new "Subqueries in FROM" subsection for `FROM (SELECT ...) AS
+  alias`.
+- Added `MAT_SHAPE`, `MATMUL`, `TRANSPOSE` to the Vector Scalar Functions
+  table (they work in `SELECT` today, alongside the pre-existing
+  standalone tensor-DSL keyword forms).
+- Documented all `EXPLAIN` target forms (`DATASET`, `SEARCH`, the optional
+  `PLAN` keyword) — the doc previously implied `EXPLAIN` only covered
+  `SELECT`.
+- Documented `LIST DATASET PACKAGES` (alias of `LIST DATASETS`).
+- Documented that `#` and `//` are valid line-comment markers alongside
+  `--`.
+- Documented that the `CSV` keyword in `EXPORT [CSV] name TO "path"` is
+  optional.
+- H1/H2 (bare-aggregate alias and `SUM_VEC`/`AVG_VEC OVER` doc examples)
+  turned out to already be correct as of v0.1.45's Track G fixes — verified
+  live, no change needed.
+
+Full suite passes, 0 failures (no code touched by this release).
+
+---
+
 ## [0.1.45] - 2026-07-16
 
 ### Fixed — silent correctness bugs found by a follow-up documentation audit (Track G)

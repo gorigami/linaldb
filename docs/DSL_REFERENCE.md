@@ -2,6 +2,8 @@
 
 **LINAL Script** is a high-performance, SQL-inspired language for tensor algebra and relational analytics. This document serves as the complete technical specification for all keywords, operators, and built-in functions.
 
+Line comments start with `--`, `#`, or `//` (all three are equivalent) and run to the end of the line. Blank lines are ignored.
+
 ---
 
 ## 1. Data Types & Literals
@@ -90,6 +92,27 @@ DATASET diagnostics COLUMNS (
 )
 ```
 
+### DATASET ... FROM (Materialized View)
+
+A second `DATASET` form builds a new dataset from an existing one by running a
+query and materializing the result under a new name — equivalent to `SELECT
+... FROM <source> ... ` but persisted as a real dataset instead of returned
+inline:
+
+```sql
+DATASET seniors FROM employees FILTER age >= 60
+
+DATASET top_scores FROM diagnostics
+    FILTER region = "west"
+    SELECT region, AVG(score)
+    GROUP BY region
+    HAVING AVG(score) > 0.5
+    ORDER BY region
+    LIMIT 10
+```
+
+`DATASET <name> FROM <source> [FILTER|WHERE <expr>] [SELECT <cols>] [GROUP BY <cols>] [HAVING <expr>] [ORDER BY <cols>] [LIMIT <n>] [OFFSET <n>]` — all clauses after `FROM <source>` are optional and behave the same as their `SELECT` statement equivalents (§4).
+
 ---
 
 ## 3. Numerical DSL (Core Algebra)
@@ -164,6 +187,9 @@ Use inside SELECT columns, WHERE predicates, or ORDER BY:
 | `DOT(a, b)` | `Vector, Vector → Float` | Scalar | Dot product `∑ aᵢbᵢ` |
 | `VEC_ADD(a, b)` | `Vector, Vector → Vector` | Same dim | Element-wise addition |
 | `VEC_SCALE(v, s)` | `Vector, Float → Vector` | Same dim | Multiply all elements by `s` |
+| `MAT_SHAPE(m)` | `Matrix → String` | e.g. `"2x2"` | Shape of a matrix value as `"rows x cols"` |
+| `MATMUL(a, b)` | `Matrix, Matrix/Vector → Matrix/Vector` | Product | Standard matrix multiplication (also usable inside `SELECT`, unlike the standalone `MATMUL a b` keyword form in §3) |
+| `TRANSPOSE(m)` | `Matrix → Matrix` | Swapped dims | Transpose a matrix value (also usable inside `SELECT`) |
 
 **Typical similarity search**:
 
@@ -211,6 +237,34 @@ LIMIT 10
 
 - **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `AVG_VEC`, `SUM_VEC`. A `SELECT` with an aggregate and no `GROUP BY` computes a single "global" aggregate row over the whole result set (e.g. `SELECT COUNT(*) FROM t`).
 - **Filtering**: `WHERE` or `FILTER` can be used interchangeably.
+- **`DISTINCT`**: `SELECT DISTINCT <cols> FROM ...` removes duplicate rows from the result.
+- **`LIMIT`/`OFFSET`**: `LIMIT <n>` caps the row count; `OFFSET <n>` skips the first `n` rows before applying `LIMIT` (both may be used together or independently).
+
+**Predicate vocabulary** (usable in `WHERE`/`FILTER`/`HAVING`):
+
+```sql
+SELECT * FROM items WHERE category IN ('a', 'b', 'c')
+SELECT * FROM items WHERE price BETWEEN 5 AND 25
+SELECT * FROM items WHERE tag IS NULL
+SELECT * FROM items WHERE tag IS NOT NULL
+SELECT * FROM items LIMIT 10 OFFSET 20
+```
+
+- `<expr> IN (<v1>, <v2>, ...)`: true if `<expr>` equals any of the listed values.
+- `<expr> BETWEEN <low> AND <high>`: inclusive range check, equivalent to `<expr> >= <low> AND <expr> <= <high>`.
+- `<expr> IS NULL` / `<expr> IS NOT NULL`: null checks.
+
+### Subqueries in FROM
+
+A `SELECT`'s `FROM` clause can be another `SELECT`, wrapped in parentheses
+and given an alias:
+
+```sql
+SELECT * FROM (SELECT id, price FROM items WHERE price > 5) AS cheap
+```
+
+`FROM (<SELECT>) AS <alias>` executes the inner query first and treats its
+result as the outer query's source dataset, referenced by `<alias>`.
 
 ### INSERT / UPDATE / DELETE
 
@@ -278,7 +332,7 @@ SELECT id FROM users_b
 ```
 
 - `WITH <name> AS (<SELECT>), ...` materializes each CTE as a temporary dataset (by that name) before the main query runs, then removes it once the statement completes — the name is not available in later statements. Avoid reusing the name of an existing real dataset for a CTE, since the CTE temporarily creates a dataset under that name for the duration of the statement.
-- `UNION` deduplicates matching rows; `UNION ALL` keeps duplicates. Only a single `UNION`/`UNION ALL` per `SELECT` is supported (not chained 3-way unions).
+- `UNION` deduplicates matching rows; `UNION ALL` keeps duplicates. `UNION`/`UNION ALL` clauses can be chained (`A UNION B UNION C`, three-way and beyond) — each right-hand side is itself a full `SELECT`, so chaining just recurses.
 
 ### Window Functions
 
@@ -312,7 +366,7 @@ FROM items
 - Offset functions: `LAG(col [, offset])`, `LEAD(col [, offset])` — `offset` defaults to `1`.
 - Aggregate-as-window: any of `SUM`, `AVG`, `COUNT`, `MIN`, `MAX` (or `SUM_VEC`/`AVG_VEC`) followed by `OVER (...)` computes a running aggregate within the window instead of collapsing to one row.
 - `OVER (...)` accepts an optional `PARTITION BY col [, col ...]` and an optional `ORDER BY col [ASC|DESC] [, ...]` — at least one of the two should be present for a meaningful window; `ORDER BY` on a Vector/Matrix column inside `OVER (...)` is rejected (see §1 — these types have no defined ordering).
-- The result column defaults to a lowercase function name (e.g. `row_number`, `rank`) unless aliased with `AS`.
+- Unaliased default column names: ranking/offset functions use the lowercase function name (e.g. `row_number`, `rank`, `lag`); aggregate-as-window functions instead default to `<func>(expr)_over` (e.g. `sum(expr)_over`) — always give an explicit `AS alias` rather than relying on either default.
 
 ### CASE, COALESCE, NULLIF, CAST
 
@@ -378,7 +432,7 @@ Load and save data across different formats.
 - `IMPORT DATASET FROM "path" [AS name]`: Load and normalize external data into a persistent LINAL Dataset Package.
   - Supports CSV, HDF5, Numpy, and Zarr.
 - `IMPORT CSV FROM "path" AS name`: (Legacy) Auto-infer schema and load CSV into a relational dataset.
-- `EXPORT CSV name TO "path"`: Save dataset to CSV.
+- `EXPORT [CSV] name TO "path"`: Save dataset to CSV. The `CSV` keyword is optional — `EXPORT name TO "path"` behaves identically.
 - `SAVE DATASET name [TO "path"]`: Persist to Parquet (includes metadata/lineage).
 - `LOAD DATASET name [FROM "path"]`: Restore a persisted dataset.
 - `SAVE TENSOR name [TO "path"]`: Persist a tensor to JSON.
@@ -386,6 +440,7 @@ Load and save data across different formats.
 - `SAVE PIPELINE name [TO "path"]`: Serialize a named pipeline to JSON. Defaults to `<data_dir>/<db>/pipelines/<name>.json`.
 - `LOAD PIPELINE name [FROM "path"]`: Restore a pipeline from its JSON file by re-parsing the stored DSL source. Overwrites any in-memory definition with the same name.
 - `LIST DATASETS [FROM "path"]`: Show available datasets in the current database context.
+- `LIST DATASET PACKAGES`: Equivalent to `LIST DATASETS` — lists the same persisted dataset packages.
 - `LIST TENSORS [FROM "path"]`: Show available tensors in the current storage path.
 - `LIST DATASET VERSIONS <name>`: Show version history and schema evolution log for a persisted dataset.
 
@@ -446,10 +501,10 @@ Steps are chained with `THEN`:
 Pipelines are stored as human-readable JSON containing the original DSL source:
 
 ```json
-{ "name": "clean", "source": "DEFINE PIPELINE clean AS WHERE active = 1 THEN LIMIT 10", "version": "0.1.34" }
+{ "name": "clean", "source": "DEFINE PIPELINE clean AS WHERE active = 1 THEN LIMIT 10", "version": "0.1.46" }
 ```
 
-On load, the source is re-parsed to reconstruct the pipeline exactly. The file is editable — any valid `DEFINE PIPELINE` DSL can replace the source field.
+The `version` field records the LINAL version that saved the pipeline (`env!("CARGO_PKG_VERSION")` at save time) — it's informational only, not a compatibility gate. On load, the source is re-parsed to reconstruct the pipeline exactly. The file is editable — any valid `DEFINE PIPELINE` DSL can replace the source field.
 
 ---
 
@@ -550,7 +605,11 @@ SHOW "--- Begin training phase ---"
 
 ### Query Planning
 
-- `EXPLAIN <query>`: Show the logical execution plan for a SELECT query.
+- `EXPLAIN [PLAN] <target>`: Show the logical and physical execution plan. The optional `PLAN` keyword is accepted but doesn't change behavior. `<target>` is one of:
+  - `EXPLAIN [PLAN] SELECT ...`: plan for a `SELECT` query.
+  - `EXPLAIN [PLAN] DATASET <name>`: plan for a plain dataset scan, or, if followed by `FROM <source> ...`, for a `DATASET ... FROM` materialized-view query (§2).
+  - `EXPLAIN [PLAN] SEARCH ...`: plan for any of the three `SEARCH` forms (§7).
+  - `EXPLAIN <name>`: shorthand for `EXPLAIN DATASET <name>`.
 - `AUDIT DATASET <name>`: Perform a deep health check on the reference graph — detects dangling tensor references.
 - `DELIVER <dataset> [TO '<path>']`: Check whether a dataset is deliverable over the `/delivery` HTTP routes (§10). Errors if the dataset doesn't exist. If it exists but hasn't been persisted yet, reports that and points to `SAVE DATASET`; if a delivery manifest is found (default path `<data_dir>/<db>/datasets/<name>/manifest.json`, or the directory given by `TO`), confirms it's ready to serve.
 

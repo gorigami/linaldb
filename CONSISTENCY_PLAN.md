@@ -93,44 +93,61 @@ fix, v0.1.39 architecture debt, v0.1.40 JOIN projection/FLATTEN) not fully
 reflected. Note: G1/G2 above must be fixed (or explicitly documented as
 known limitations) before writing examples that rely on them.
 
-- [ ] **H1.** Document that bare (non-windowed) aggregates ignore `AS`
+- [x] **H1.** Document that bare (non-windowed) aggregates ignore `AS`
       aliases (until/unless G2 is fixed, in which case just verify the
       existing doc examples are accurate instead).
-- [ ] **H2.** Fix/verify the `SUM_VEC`/`AVG_VEC ... OVER (...)` window
+      **Moot as of v0.1.45** — G2 fixed the alias handling itself, so the
+      existing `AVG_VEC(...) AS centroid` / `SUM_VEC(...) AS total` doc
+      examples are now accurate as written. Verified live (`AVG_VEC(...)
+      AS centroid` now actually produces a `centroid` column). No doc
+      change needed.
+- [x] **H2.** Fix/verify the `SUM_VEC`/`AVG_VEC ... OVER (...)` window
       example (line 313) once G1 is fixed — currently documents broken
       behavior as working.
-- [ ] **H3.** Correct the claim that only a single `UNION`/`UNION ALL` is
+      **Moot as of v0.1.45** — G1 fixed the underlying behavior, so the
+      claim is now true. Verified live. No doc change needed.
+- [x] **H3.** Correct the claim that only a single `UNION`/`UNION ALL` is
       supported (line 281) — chained 3-way+ unions actually work (verified
-      live); update wording.
-- [ ] **H4.** Document the actual default alias format for aggregate-as-
+      live); update wording. **Fixed in v0.1.46.**
+- [x] **H4.** Document the actual default alias format for aggregate-as-
       window functions (`sum(expr)_over`, not `sum`) — line 315 is wrong.
-- [ ] **H5.** Bump the stale `"version": "0.1.34"` in the example pipeline
+      **Fixed in v0.1.46.**
+- [x] **H5.** Bump the stale `"version": "0.1.34"` in the example pipeline
       JSON (line 449) to track the current release, or note it's
-      illustrative and version-independent.
-- [ ] **H6.** Document the materialized-view `DATASET <name> FROM <source>
+      illustrative and version-independent. **Fixed in v0.1.46** — bumped
+      to 0.1.46 and added a note that the field is informational only
+      (confirmed: `load_pipeline_core` never reads it back).
+- [x] **H6.** Document the materialized-view `DATASET <name> FROM <source>
       [FILTER|WHERE ...] [SELECT ...] [GROUP BY ...] [HAVING ...]
       [ORDER BY ...] [LIMIT ...] [OFFSET ...]` form — currently only the
       `COLUMNS (...)` form is documented (doc §"DATASET", lines 80-91).
-- [ ] **H7.** Document `IN (...)`, `BETWEEN ... AND ...`, `IS NULL`/
+      **Fixed in v0.1.46** — new "DATASET ... FROM (Materialized View)"
+      subsection.
+- [x] **H7.** Document `IN (...)`, `BETWEEN ... AND ...`, `IS NULL`/
       `IS NOT NULL`, `DISTINCT`, and standalone/chained `OFFSET` in the
       WHERE/FILTER predicate vocabulary — all real, all currently
-      undocumented (zero doc mentions).
-- [ ] **H8.** Document `FROM (SELECT ...) AS alias` subquery support in the
-      FROM clause.
-- [ ] **H9.** Add `MAT_SHAPE(v)`, `MATMUL(a, b)`, `TRANSPOSE(a)` to the
+      undocumented (zero doc mentions). **Fixed in v0.1.46.**
+- [x] **H8.** Document `FROM (SELECT ...) AS alias` subquery support in the
+      FROM clause. **Fixed in v0.1.46** — new "Subqueries in FROM"
+      subsection.
+- [x] **H9.** Add `MAT_SHAPE(v)`, `MATMUL(a, b)`, `TRANSPOSE(a)` to the
       "Vector Scalar Functions" table (lines 159-166) — all work as SQL
       SELECT-context functions today, only `NORMALIZE`/`L2_NORM`/
       `COSINE_SIM`/`DOT`/`VEC_ADD`/`VEC_SCALE` are currently listed.
-- [ ] **H10.** Document `EXPLAIN DATASET <name> [FROM <clause>]`,
+      **Fixed in v0.1.46.**
+- [x] **H10.** Document `EXPLAIN DATASET <name> [FROM <clause>]`,
       `EXPLAIN SEARCH ...`, and the optional `EXPLAIN PLAN` prefix — line
-      553 currently implies `EXPLAIN` only covers `SELECT`.
-- [ ] **H11.** Document `LIST DATASET PACKAGES` in the Persistence &
+      553 currently implies `EXPLAIN` only covers `SELECT`. **Fixed in
+      v0.1.46.**
+- [x] **H11.** Document `LIST DATASET PACKAGES` in the Persistence &
       Ingestion section (lines 372-399), alongside `LIST DATASETS`/
-      `LIST TENSORS`/`LIST DATASET VERSIONS`.
-- [ ] **H12.** Document that `#` and `//` are also valid line-comment
+      `LIST TENSORS`/`LIST DATASET VERSIONS`. **Fixed in v0.1.46.**
+- [x] **H12.** Document that `#` and `//` are also valid line-comment
       markers, not just `--` (all examples currently only use `--`).
-- [ ] **H13.** Note that the `CSV` keyword in `EXPORT [CSV] <name> TO
-      <path>` is optional (line 381 only shows the `CSV` form).
+      **Fixed in v0.1.46.**
+- [x] **H13.** Note that the `CSV` keyword in `EXPORT [CSV] <name> TO
+      <path>` is optional (line 381 only shows the `CSV` form). **Fixed in
+      v0.1.46.**
 
 ---
 
