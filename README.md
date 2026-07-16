@@ -137,6 +137,7 @@ curl -X POST "http://localhost:8080/jobs" -d "SHOW ALL"
 LINALDB is extensively documented to help you scale from local experiments to production services.
 
 - **[Architecture](docs/ARCHITECTURE.md)**: Deep dive into the internal engine design.
+- **[Dataset Architecture](docs/DATASET_ARCHITECTURE.md)**: How the two dataset implementations (row-based and zero-copy reference graph) work and interoperate.
 - **[DSL Reference](docs/DSL_REFERENCE.md)**: Complete guide to keywords, operators, and syntax.
 - **[Examples](examples/README.md)**: Runnable `.lnl` scripts covering every major feature area.
 - **[Error Reference](docs/ERROR_REFERENCE.md)**: Troubleshooting guide for engine and DSL errors.

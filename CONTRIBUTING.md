@@ -36,14 +36,14 @@ We are committed to providing a welcoming and inclusive environment. Please be r
 2. **Clone your fork**:
 
    ```bash
-   git clone https://github.com/yourusername/linal.git
-   cd linal
+   git clone https://github.com/yourusername/linaldb.git
+   cd linaldb
    ```
 
 3. **Add upstream remote**:
 
    ```bash
-   git remote add upstream https://github.com/gorigami/linal.git
+   git remote add upstream https://github.com/gorigami/linaldb.git
    ```
 
 4. **Build the project**:
@@ -215,7 +215,8 @@ pub fn dot_1d(a: &[f32], b: &[f32]) -> f32 {
 
 - **Unit tests**: In same file as code (in `#[cfg(test)]` module)
 - **Integration tests**: In `tests/` directory
-- **Example tests**: In `examples/` directory (run with `cargo test --examples`)
+- **`.lnl` example scripts**: In `examples/` directory (DSL scripts, not Rust — see `examples/README.md`; run via the `linal` CLI, exercised by `tests/examples_cli_smoke_test.rs` and `tests/examples_integration.rs`)
+- **Fixture generators**: In `tools/fixtures/` (Rust binaries registered as `[[example]]` entries in `Cargo.toml` — run with `cargo run --example gen_test_data` / `gen_zarr_data`)
 
 ### Writing Tests
 
@@ -322,7 +323,7 @@ cargo test --test '*'
 ## Project Structure
 
 ```text
-linal/
+linaldb/
 ├── src/
 │   ├── core/          # Core data structures
 │   ├── engine/        # Execution engine
@@ -331,14 +332,21 @@ linal/
 │   ├── server/        # HTTP server
 │   └── utils/         # Utility functions
 ├── tests/             # Integration tests
-├── examples/          # Example scripts
+├── examples/          # Example .lnl scripts
+├── tools/
+│   └── fixtures/      # Rust fixture generators (registered as [[example]] in Cargo.toml)
+├── benches/           # Criterion benchmarks
+├── scripts/           # Repo maintenance scripts (e.g. GitHub branch-protection setup)
+├── data/              # Persisted datasets/tensors (gitignored — local only, created on first SAVE/init)
 ├── docs/              # Documentation
 │   ├── ARCHITECTURE.md
 │   ├── DSL_REFERENCE.md
 │   └── archive/        # Retired planning/roadmap docs (gitignored — local only, won't appear after a fresh clone)
+├── .github/           # CI workflows
 ├── Cargo.toml
 ├── README.md
 ├── CONTRIBUTING.md
+├── SECURITY.md
 └── LICENSE
 ```
 
@@ -374,6 +382,7 @@ linal/
 - **Issues**: Open an issue on GitHub for bugs or feature requests
 - **Discussions**: Use GitHub Discussions for questions
 - **Documentation**: Check `docs/` directory for detailed information
+- **Security**: See [SECURITY.md](SECURITY.md) for how to report a vulnerability — don't use a public issue for that
 
 ---
 

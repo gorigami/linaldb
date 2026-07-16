@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.49] - 2026-07-16
+
+### Documented — README/CONTRIBUTING cross-consistency, closes the round-2 audit (Track K)
+
+Closes out Track K of `CONSISTENCY_PLAN.md` — the last track of the round-2
+follow-up audit (v0.1.45-v0.1.49). No code changes.
+
+- Fixed CONTRIBUTING.md's repo URL: it used `gorigami/linal.git` (wrong,
+  including a stale `cd linal` directory name) while README.md and the
+  actual git remote both say `gorigami/linaldb.git`.
+- Fixed CONTRIBUTING.md's stale "Example tests" description — since v0.1.42,
+  `examples/` holds only `.lnl` scripts; the Rust fixture generators moved
+  to `tools/fixtures/` as `[[example]]` entries in `Cargo.toml`.
+- Added `docs/DATASET_ARCHITECTURE.md` to README's Documentation Hub —
+  it was substantively rewritten back in v0.1.44 but never linked.
+- Linked `SECURITY.md` from CONTRIBUTING.md's Getting Help section — it
+  existed at the repo root but was linked from nowhere.
+- Refreshed CONTRIBUTING.md's Project Structure tree: added `tools/`,
+  `benches/`, `scripts/`, `data/`, `.github/`, `SECURITY.md`, none of
+  which were reflected after the last two reorganizing PRs.
+
+**Flagged, not fixed**: `SECURITY.md` itself gives two different contact
+emails for reporting a vulnerability in two different sections of the same
+file — an internal inconsistency worth a dedicated look, out of scope for
+a cross-doc-consistency pass since it requires knowing which address is
+actually monitored.
+
+Full suite passes, 0 failures (no code touched by this release).
+
+**This closes the round-2 consistency audit** (Tracks G-K, v0.1.45-v0.1.49)
+— `CONSISTENCY_PLAN.md` is deleted in this same release; see git history for
+the full checklist if needed later.
+
+---
+
 ## [0.1.48] - 2026-07-16
 
 ### Documented — DATASET_ARCHITECTURE.md and ERROR_REFERENCE.md gaps (Track J)
