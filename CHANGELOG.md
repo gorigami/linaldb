@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.48] - 2026-07-16
+
+### Documented — DATASET_ARCHITECTURE.md and ERROR_REFERENCE.md gaps (Track J)
+
+Closes out Track J of `CONSISTENCY_PLAN.md` (round 2). No code changes.
+PR #33 (v0.1.44) rewrote both docs, but the follow-up audit found real
+inaccuracies survived that rewrite.
+
+**`docs/DATASET_ARCHITECTURE.md`**:
+- `ResourceReference` now documents both variants (`Tensor { id }` and the
+  previously-omitted `Column { dataset, column }`).
+- Fixed the `graph.rs`/`DatasetGraph` attribution: it's actually used by
+  `ATTACH` and `AUDIT DATASET`, not `BIND` (plain aliasing) or `DERIVE`
+  (unrelated tensor-expression evaluation) as previously claimed.
+- Fixed the `schema_evolution.rs` attribution: there is no `LIST VERSIONS`
+  command; the real command is `SHOW DATASET VERSIONS <name>`.
+- Fixed the `lineage.rs` attribution: `SHOW LINEAGE <name>` actually walks
+  an unrelated tensor-computation `LineageNode` type in `engine/db.rs` —
+  `core::dataset::lineage` is populated only by the scientific-ingestion
+  connectors, tracking data-*import* provenance, not `SHOW LINEAGE`'s
+  tensor-derivation DAG.
+
+**`docs/ERROR_REFERENCE.md`**:
+- Added the 2 `EngineError` variants missing from the table: `Store` and
+  `DatasetError` (the latter is user-reachable — e.g. loading a dataset
+  under a name already in use).
+- Fixed the sample Parse and Engine error messages to match actual runtime
+  `Display` output — the parser's structured `ParseError` (with byte
+  offset) is silently discarded at its only call site and replaced with a
+  generic "Unknown command" message; noted this explicitly instead of
+  documenting the discarded, richer error as if it surfaced.
+- Rewrote the "Storage Errors" section entirely: it documented the wrong
+  type (`StoreError`, the in-memory *tensor* store error) instead of the
+  actual persistence error type (`StorageError`), and included a variant
+  (`UnsupportedFormat`) that doesn't exist anywhere in source.
+
+**Flagged, not fixed**: the discarded structured parser error (with byte
+offset and expectation detail) is a real DX regression, not just a doc
+gap — worth a dedicated future PR to stop throwing it away.
+
+Full suite passes, 0 failures (no code touched by this release).
+
+---
+
 ## [0.1.47] - 2026-07-16
 
 ### Documented — ARCHITECTURE.md gaps found by the follow-up documentation audit (Track I)

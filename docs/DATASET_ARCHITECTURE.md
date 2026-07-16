@@ -53,12 +53,12 @@ pub struct Dataset {
 
 | File | Purpose |
 |---|---|
-| `reference.rs` | `ResourceReference` — the enum a column resolves to (currently a `Tensor { id }` variant; the zero-copy indirection this whole layer exists for) |
+| `reference.rs` | `ResourceReference` — the enum a column resolves to: either `Tensor { id }` (a direct tensor reference) or `Column { dataset, column }` (a reference to another dataset's column, enabling views/virtual datasets); the zero-copy indirection this whole layer exists for |
 | `registry.rs` | `DatasetRegistry` — owns the `HashMap<String, Dataset>` for a runtime scope (a `DatabaseInstance` or `ExecutionContext`) |
-| `graph.rs` | `DatasetGraph` — resolves references across a `DatasetRegistry`, the traversal layer behind `BIND`/`ATTACH`/`DERIVE` |
+| `graph.rs` | `DatasetGraph` — resolves references across a `DatasetRegistry`. Actually used by `ATTACH` (linking a tensor into a dataset column) and `AUDIT DATASET` (walking the graph to detect dangling references); **not** used by `BIND` (plain name/entry aliasing, no graph involved — `src/engine/db.rs:bind_resource`) or `DERIVE` (pure tensor-expression evaluation via `eval_let`, unrelated to this module) |
 | `schema.rs` | `DatasetSchema`, `ColumnSchema`, `ColumnRole` — column-level typing for the reference-graph model |
-| `schema_evolution.rs` | `SchemaVersion`, `Migration` — non-breaking schema versioning, backs `LIST VERSIONS` / schema history |
-| `lineage.rs` | `DatasetLineage`, `LineageNode` — a DAG of derivation history (dataset name, content hash, operation, parent nodes), backs `SHOW LINEAGE` |
+| `schema_evolution.rs` | `SchemaVersion`, `Migration` — non-breaking schema versioning, backs `SHOW DATASET VERSIONS <name>` (aliased as `LIST DATASET VERSIONS <name>`; there is no bare `LIST VERSIONS` command) |
+| `lineage.rs` | `DatasetLineage`, `LineageNode` — a DAG of *data-import* provenance (dataset name, content hash, operation, parent nodes), populated by the scientific-ingestion connectors (CSV/HDF5/Numpy/Zarr) and `core/storage.rs`. **Not** what `SHOW LINEAGE <name>` displays — that command walks a different, tensor-computation `LineageNode` type defined in `src/engine/db.rs` (tracks how a tensor was derived via `ADD`/`MATMUL`/etc., not dataset import history) |
 | `manifest.rs` | `DatasetManifest` — the delivery contract for a portable LINAL dataset package (name, version, hash, entrypoints) |
 | `stats.rs` | `DatasetStats`, `ColumnStats` — row counts and per-column summaries |
 | `metadata.rs` | `DatasetMetadata`, `DatasetOrigin` — the `metadata` field on `Dataset` above; provenance and free-form metadata set via `SET DATASET METADATA` |

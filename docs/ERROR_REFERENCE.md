@@ -13,6 +13,8 @@ Engine errors occur during the internal execution of algebraic or data operation
 | `NameNotFound` | Referred to a tensor variable that is not in the store. | Verify the variable name or check if the tensor was deleted. |
 | `InvalidOp` | Attempted an operation that is mathematically impossible (e.g., MATMUL with incompatible shapes). | Verify dimensions (e.g., Matrix A: 2x3, Matrix B: 3x5 for MATMUL). |
 | `DatasetNotFound` | Referred to a dataset that does not exist in the active database. | Check your spelling or run `SHOW ALL DATASETS`. |
+| `DatasetError` | Wraps a `DatasetStoreError` from the in-memory dataset store — e.g. `NameAlreadyExists` (creating/loading a dataset under a name already in use), `DatasetNotFound`, `InvalidDataset`. | For `NameAlreadyExists`, drop/rename the existing dataset first, or pick a different name. |
+| `Store` | Wraps a `StoreError` from the in-memory *tensor* store: `ShapeMismatch`, `TensorNotFound`, `InvalidTensor`. Distinct from persistence/disk errors — see §3 below. | Check the tensor's shape/existence with `SHOW SHAPE <name>` / `SHOW ALL TENSORS`. |
 | `ConstraintViolation` | *(Reserved)* Intended for type/schema constraint violations. Currently not emitted — type mismatches surface as `InvalidOp`. | Check the input types against the `SHOW SCHEMA` output. |
 | `ReferenceError` | *(Reserved)* Intended for failures resolving zero-copy reference graph links. Currently not emitted — reference errors surface as `InvalidOp`. | Run `AUDIT DATASET <name>` to check for dangling references. |
 | `ExecutionError` | A generic failure in the computational kernel or parallel execution. | Check for resource exhaustion or complex tensor layouts. |
@@ -25,35 +27,40 @@ DSL errors occur during the parsing or initial routing of your script commands.
 
 ### Parse Error
 
-Happens when the command doesn't match LINAL's expected grammar. As of v0.1.15, the engine runs a full Logos lexer + recursive-descent parser first and reports structured errors with a byte offset:
+Happens when the command doesn't match LINAL's expected grammar. The engine runs a full Logos lexer + recursive-descent parser first, which internally produces a structured `ParseError { offset, msg }` with a byte offset and expectation detail — but the only call site (`execute_line_with_context`, `src/dsl/mod.rs`) discards that structured error entirely on failure and reports a generic message instead:
 
 ```
-Parse error at line 3, offset 14: expected `=`, found identifier `FROM`
+[line 3] Parse error: Unknown command: GET * FROM users
 ```
 
 - **Example**: `GET * FROM users` (unknown command — `GET` is not a LINAL keyword)
 - **Example**: `DEFINE t AS TENSOR(2,2) VALUES [...]` (old paren syntax; use brackets: `TENSOR [2, 2]`)
-- **Fix**: Refer to [DSL_REFERENCE.md](DSL_REFERENCE.md) for correct syntax and type keywords.
+- **Fix**: Refer to [DSL_REFERENCE.md](DSL_REFERENCE.md) for correct syntax and type keywords. The error message won't tell you *what* was expected at the failure point (that detail is currently thrown away) — treat it as "this line didn't parse," not a precise diagnostic.
 
-As of v0.1.24 all 27+ statement variants are handled in the typed pipeline — there is no legacy string-dispatch fallback. An unrecognized command returns a `ParseError` directly.
+All `Statement` variants are handled in the typed pipeline — there is no legacy string-dispatch fallback. An unrecognized command falls through to the generic `DslError::Parse { msg: "Unknown command: ..." }` shown above, not a structured `ParseError`.
 
 ### Engine Error (from DSL)
 
-Wraps an `EngineError` with a source line number. Occurs when the grammar is valid but the operation fails at runtime (e.g., shape mismatch in `MATMUL`).
+Wraps an `EngineError` with a source line number. Occurs when the grammar is valid but the operation fails at runtime (e.g., shape mismatch in `MATMUL`). Actual `Display` format:
 
 ```
-Engine error at line 5: Invalid operation: shape mismatch: [3] vs [4]
+[line 5] Engine error: Invalid operation: shape mismatch: [3] vs [4]
 ```
 
 ---
 
-## 3. Storage Errors (`StoreError`)
+## 3. Storage Errors (`StorageError`)
 
-Errors related to Parquet/JSON persistence or disk access.
+Errors related to Parquet/JSON persistence or disk access (`src/core/storage.rs`) — distinct from the in-memory tensor `StoreError` covered under `EngineError::Store` in §1. These surface through `SAVE`/`LOAD`/`IMPORT`/`EXPORT`/`LIST` commands (`src/dsl/persistence.rs`), wrapped as a `DslError::Parse` with the `StorageError`'s `Display` text as the message — not as a `DslError::Engine`.
 
-- **`SerializationError`**: Failed to convert data to disk format.
-- **`IOError`**: Permissions issue or disk full when saving to `./data`.
-- **`UnsupportedFormat`**: Attempted to load a file that is not a valid Parquet or LINAL JSON.
+| Error | Description |
+|-------|-------------|
+| `Io` | Permissions issue or disk full when reading/writing to `./data` (or the configured `data_dir`). |
+| `Serialization` | Failed to convert data to/from JSON (schema, stats, lineage, manifest, or legacy metadata files). |
+| `Parquet` | Failed to read or write the dataset's `data.parquet` file. |
+| `Arrow` | Failed converting between LINAL's row/tuple representation and Arrow's columnar `RecordBatch`. |
+| `DatasetNotFound` | Attempted to `LOAD`/read a dataset package that doesn't exist on disk. |
+| `TensorNotFound` | Attempted to `LOAD`/read a tensor JSON file that doesn't exist on disk. |
 
 ---
 

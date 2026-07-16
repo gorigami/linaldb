@@ -226,45 +226,52 @@ known limitations) before writing examples that rely on them.
 PR #33 rewrote `DATASET_ARCHITECTURE.md` and touched `ERROR_REFERENCE.md`,
 but the follow-up audit found both still have real inaccuracies.
 
-- [ ] **J1.** `ResourceReference` doc (line 56) omits the `Column {
-      dataset, column }` variant — only documents `Tensor { id }`.
-- [ ] **J2.** Fix the `graph.rs` / `DatasetGraph` attribution (line 58):
+- [x] **J1.** `ResourceReference` doc (line 56) omits the `Column {
+      dataset, column }` variant — only documents `Tensor { id }`. **Fixed
+      in v0.1.48.**
+- [x] **J2.** Fix the `graph.rs` / `DatasetGraph` attribution (line 58):
       it's actually only used by `ATTACH` and `AUDIT`, not `BIND` (plain
       aliasing, no graph involved) or `DERIVE` (pure tensor-expression
-      eval, unrelated module).
-- [ ] **J3.** Fix `schema_evolution.rs` attribution (line 60): there is no
+      eval, unrelated module). **Fixed in v0.1.48.**
+- [x] **J3.** Fix `schema_evolution.rs` attribution (line 60): there is no
       `LIST VERSIONS` command — the real command is `SHOW DATASET VERSIONS
-      <name>`.
-- [ ] **J4.** Fix `lineage.rs` attribution (line 61): `SHOW LINEAGE` uses
+      <name>`. **Fixed in v0.1.48.**
+- [x] **J4.** Fix `lineage.rs` attribution (line 61): `SHOW LINEAGE` uses
       an unrelated `LineageNode` type in `src/engine/db.rs`, not
       `core::dataset::lineage`. The latter is actually consumed only by
       import connectors (csv/hdf5/numpy/zarr) and `core/storage.rs` to
-      track data-import provenance.
-- [ ] **J5.** Add the 2 missing `EngineError` variants to ERROR_REFERENCE.md
+      track data-import provenance. **Fixed in v0.1.48.**
+- [x] **J5.** Add the 2 missing `EngineError` variants to ERROR_REFERENCE.md
       (lines 13-18): `Store(StoreError)` and `DatasetError
       (DatasetStoreError)` — the latter is confirmed user-reachable (e.g.
-      loading a dataset whose name already exists).
-- [ ] **J6.** Fix the sample Parse error (lines 30-32): the parser's
+      loading a dataset whose name already exists). **Fixed in v0.1.48.**
+- [x] **J6.** Fix the sample Parse error (lines 30-32): the parser's
       structured `ParseError` (with byte offset) is actually discarded at
       the only call site (`src/dsl/mod.rs:222`) and replaced with a generic
       `[line N] Parse error: Unknown command: <raw line>` — no offset, no
       specific "expected X found Y" detail ever surfaces. Either fix the
       doc to match reality, or (better, and worth considering as a Track G
       item) stop discarding the rich parser error in the first place.
-- [ ] **J7.** Fix the "unrecognized command returns a ParseError directly"
+      **Doc fixed in v0.1.48** (matched to reality). Not root-caused/fixed
+      in code this round — worth a dedicated future PR, since a discarded
+      structured parse error with byte offset is a real DX regression, not
+      just a doc gap; flagging here for visibility.
+- [x] **J7.** Fix the "unrecognized command returns a ParseError directly"
       claim (line 38) to match the actual generic-`DslError::Parse`
-      behavior described in J6.
-- [ ] **J8.** Fix the sample Engine error (lines 44-46): actual `Display`
+      behavior described in J6. **Fixed in v0.1.48.**
+- [x] **J8.** Fix the sample Engine error (lines 44-46): actual `Display`
       format is `[line N] Engine error: <msg>`, not `"Engine error at line
       N:"` — same class of bug PR #33 was meant to fix elsewhere, missed
-      here.
-- [ ] **J9.** Rewrite the "Storage Errors" section (lines 50-56) entirely:
+      here. **Fixed in v0.1.48.**
+- [x] **J9.** Rewrite the "Storage Errors" section (lines 50-56) entirely:
       it documents the wrong type (`StoreError`, the *tensor* store error —
       `ShapeMismatch`/`TensorNotFound`/`InvalidTensor`) instead of the
       actual persistence error type `StorageError`
       (`src/core/storage.rs:24-42`: `Io`, `Serialization`, `Parquet`,
       `Arrow`, `DatasetNotFound`, `TensorNotFound`). The doc's
       `UnsupportedFormat` variant doesn't exist anywhere in source.
+      **Fixed in v0.1.48** — also noted these route through
+      `DslError::Parse`, not `DslError::Engine`.
 
 ---
 
