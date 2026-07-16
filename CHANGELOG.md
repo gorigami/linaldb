@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.40] - 2026-07-16
+
+### Fixed — Track F of CONSISTENCY_PLAN.md: qualified columns, table aliasing, FLATTEN in SELECT
+
+Closes out the consistency/correctness audit started 2026-07-12 (Tracks
+A–F, 31 items). This release fixes two bugs found while verifying Track
+D's JOIN documentation — one of them was silently corrupting far more than
+just JOIN output.
+
+- **Any unaliased computed SELECT expression was silently dropped from
+  the output.** Not specific to qualified columns — `SELECT id, price * 2
+  FROM t` (no `AS`) used to return only `id`. Root cause:
+  `apply_window_and_computed_exprs` names an unaliased computed column
+  `__cmp_{idx}` when appending it to each row, but the final SELECT-order
+  projection step looked it up under the unrelated literal string
+  `"expr"` — the lookup failed and the column was silently filtered out.
+  Fixed by making both sites use the same naming scheme.
+- **`table.col` always evaluated to `NULL`.** It parses to
+  `Expr::Field { base, field }`, which the SQL row evaluator had no case
+  for and fell through to a generic `Null` default. Fixed by resolving it
+  to the bare column name, matching how the JOIN `ON` clause already
+  treats `table.col` (qualifier accepted for readability, only the column
+  name is used to resolve the value).
+- **`FROM table alias` / `JOIN table alias ON ...` didn't parse at all.**
+  Added optional `[AS] <alias>` parsing after a dataset name in both
+  clauses. The alias itself isn't tracked for disambiguation (per the
+  point above) — documented as a limitation.
+- **`FLATTEN(col)` inside `SELECT` silently evaluated to `NULL`.** Same
+  underlying shape as the `table.col` bug: `NORMALIZE`/`MATMUL`/`TRANSPOSE`
+  have a dual-branch parser (`NAME(x)` → SQL-context function,
+  bare `NAME x` → tensor-DSL keyword) that `FLATTEN` never got, so
+  `FLATTEN(v)` fell into the tensor-DSL path, which the SQL evaluator
+  doesn't handle. Added the same dual-branch parsing, wired through type
+  inference and the physical evaluator. `RESHAPE` inside `SELECT` is left
+  as a parse error and documented rather than fixed the same way —
+  `CAST(expr AS VECTOR(n)/MATRIX(r,c))` (v0.1.39) already covers
+  arbitrary-shape reshaping inside a query.
+
+The `DSL_REFERENCE.md` JOIN example that shipped broken in Track B
+(`SELECT o.id, u.name FROM orders o JOIN users u ON ...`) now works
+verbatim and has been restored as the primary example.
+
+New tests: `tests/qualified_column_test.rs` (7 tests), plus 3 more added
+to `tests/correctness_integration.rs` for `FLATTEN`.
+
+### Removed
+
+`CONSISTENCY_PLAN.md` — the working document tracking this audit. All 6
+tracks (A: silent correctness bugs, B: documentation debt, C: test
+coverage, D: architecture/design debt, E: window function bug, F: this
+release) are complete; deleting it per its own stated completion process.
+
+---
+
 ## [0.1.39] - 2026-07-15
 
 ### Added — Track D of CONSISTENCY_PLAN.md (architecture/design debt)

@@ -450,8 +450,7 @@ FROM docs GROUP BY category
 
 - **Format**: Human-readable JSON (`{name, source, version}`) — the pipeline's original DSL source text is stored alongside its parsed steps, not just the parsed AST.
 - **Round-trip**: `SAVE PIPELINE` writes `source`; `LOAD PIPELINE` re-parses it via the same typed parser used for live DSL execution, reconstructing the steps rather than deserializing them directly. This makes the file hand-editable — any valid `DEFINE PIPELINE` DSL can replace the `source` field.
-- **Path convention**: Defaults to `<data_dir>/<db>/pipelines/<name>.json`; unlike tensors/datasets, an explicit `TO`/`FROM` path is used as-is rather than resolved relative to `data_dir`.
-- **Bulk helpers**: `save_all_pipelines`/`load_all_pipelines` exist (writing/reading an `index.json` manifest) but, as of v0.1.35, are not yet wired to any DSL command or to startup/shutdown — see `CONSISTENCY_PLAN.md` if that file still exists in the repo.
+- **Path convention**: Defaults to `<data_dir>/<db>/pipelines/<name>.json`. An explicit `TO`/`FROM` path is resolved the same way as tensors/datasets — absolute paths are used as-is, relative paths resolve against `<data_dir>/<db>/`.
 
 #### Tensor-First Datasets (In-Memory)
 
@@ -485,8 +484,8 @@ name found. This only makes existing database names selectable via `USE`; it
 does **not** load any dataset, tensor, or pipeline content — there is
 currently no metadata scan and no lazy-load-on-first-access mechanism for any
 persisted object kind. Datasets, tensors, and pipelines must each be restored
-explicitly with `LOAD DATASET` / `LOAD TENSOR` / `LOAD PIPELINE` (or the
-bulk `load_all_pipelines` helper, once it's wired to a DSL command).
+explicitly with `LOAD DATASET` / `LOAD TENSOR` / `LOAD PIPELINE` — there is
+no bulk "load everything" command for any object kind.
 
 ---
 

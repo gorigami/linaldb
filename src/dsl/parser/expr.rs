@@ -311,6 +311,20 @@ impl Parser {
                 }
                 return self.parse_call_expr();
             }
+            // FLATTEN(col) → SQL vector fn; FLATTEN tensor → tensor algebra
+            Some(Token::Flatten) => {
+                if self.peek_at(1) == Some(&Token::LParen) {
+                    self.advance();
+                    self.advance();
+                    let arg = self.parse_expr()?;
+                    self.eat(&Token::RParen)?;
+                    return Ok(Expr::VectorFn {
+                        func: VectorFnKind::Flatten,
+                        args: vec![arg],
+                    });
+                }
+                return self.parse_call_expr();
+            }
             Some(Token::Add)
             | Some(Token::Subtract)
             | Some(Token::Multiply)
@@ -318,7 +332,6 @@ impl Parser {
             | Some(Token::Correlate)
             | Some(Token::Similarity)
             | Some(Token::Distance)
-            | Some(Token::Flatten)
             | Some(Token::Sum)
             | Some(Token::Mean)
             | Some(Token::Stdev)

@@ -296,6 +296,56 @@ fn test_cast_vector_matrix_dimension_mismatch_is_null_not_crash() {
     assert_eq!(ds.rows[0].values[0], Value::Null);
 }
 
+// ─── Test: FLATTEN(expr) works inside SELECT (v0.1.40, Track F / F2) ─────────
+//
+// FLATTEN(col) previously parsed successfully inside a SELECT list but
+// always evaluated to NULL — NORMALIZE/MATMUL/TRANSPOSE had a dual-branch
+// (NAME(x) -> SQL VectorFn, bare NAME x -> tensor-DSL CallExpr) that FLATTEN
+// never got, so `FLATTEN(v)` fell through to the tensor-DSL CallExpr path,
+// which the SQL row evaluator (dsl_expr_to_logical_expr) doesn't handle and
+// silently defaults to NULL.
+
+#[test]
+fn test_flatten_vector_in_select() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: INT, v: Vector(4))", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, [1.0, 2.0, 3.0, 4.0])", 2);
+
+    let ds = expect_table(exec(&mut db, "SELECT FLATTEN(v) AS fv FROM t", 3));
+    assert_eq!(
+        ds.rows[0].values[0],
+        Value::Vector(vec![1.0, 2.0, 3.0, 4.0]),
+        "FLATTEN on an already-flat Vector is a no-op"
+    );
+}
+
+#[test]
+fn test_flatten_matrix_in_select() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: INT, m: Matrix(2, 2))", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, [[1, 2], [3, 4]])", 2);
+
+    let ds = expect_table(exec(&mut db, "SELECT FLATTEN(m) AS fm FROM t", 3));
+    assert_eq!(
+        ds.rows[0].values[0],
+        Value::Vector(vec![1.0, 2.0, 3.0, 4.0]),
+        "FLATTEN(matrix) should flatten row-major"
+    );
+}
+
+#[test]
+fn test_flatten_bare_tensor_dsl_still_works() {
+    // Guard against the SQL-context fix breaking the pre-existing
+    // tensor-DSL form: `LET x = FLATTEN t` (no parens).
+    let mut db = TensorDb::new();
+    exec(&mut db, "MATRIX mm = [[1, 2], [3, 4]]", 1);
+    let out = exec(&mut db, "LET flat_mm = FLATTEN mm", 2);
+    match out {
+        DslOutput::Message(msg) => assert!(msg.contains("flat_mm")),
+        other => panic!("expected Message output, got: {other:?}"),
+    }
+}
+
 // ─── Test 6: SUBSTR 2-arg form (1-based) ─────────────────────────────────────
 
 #[test]

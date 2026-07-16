@@ -1097,6 +1097,11 @@ pub fn evaluate_expression(
                     Some(Value::Vector(v)) => Value::String(format!("{}x1", v.len())),
                     _ => Value::Null,
                 },
+                VectorFnKind::Flatten => match vals.first() {
+                    Some(Value::Vector(v)) => Value::Vector(v.clone()),
+                    Some(Value::Matrix(m)) => Value::Vector(m.iter().flatten().copied().collect()),
+                    _ => Value::Null,
+                },
             }
         }
         _ => Value::Null,

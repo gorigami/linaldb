@@ -430,8 +430,12 @@ pub(super) fn execute_select(
         let extended_schema = if let Some(first_row) = result_rows.first() {
             first_row.schema.clone()
         } else {
-            // Fallback: build schema from inference (no rows to peek at)
+            // Fallback: build schema from inference (no rows to peek at).
+            // Unaliased Computed names must match apply_window_and_computed_exprs's
+            // `__cmp_{idx}` scheme (idx counting only Computed entries, in the
+            // same window_exprs order) for the lookup below to find them.
             let mut fields = base_schema.fields.clone();
+            let mut computed_idx = 0usize;
             for we in &window_exprs {
                 let (col_name, vtype) = match we {
                     SelectExpr::Window { alias, func, .. } => {
@@ -448,7 +452,10 @@ pub(super) fn execute_select(
                         (alias.clone(), vtype)
                     }
                     SelectExpr::Computed { alias, expr } => {
-                        let name = alias.clone().unwrap_or_else(|| "expr".to_string());
+                        let name = alias
+                            .clone()
+                            .unwrap_or_else(|| format!("__cmp_{}", computed_idx));
+                        computed_idx += 1;
                         let vtype = infer_expr_result_type(expr);
                         (name, vtype)
                     }
@@ -459,24 +466,35 @@ pub(super) fn execute_select(
             std::sync::Arc::new(crate::core::tuple::Schema::new(fields))
         };
 
-        // Now project to match the SELECT column order
+        // Now project to match the SELECT column order. Unaliased Computed
+        // exprs must be named identically to how apply_window_and_computed_exprs
+        // named them when appending the column (`__cmp_{idx}`, idx counting
+        // only Computed entries in order) — a mismatch here means the
+        // lookup below silently drops the column from the output entirely.
         let ordered_cols: Vec<String> = match &s.columns {
             SelectColumns::All => extended_schema
                 .fields
                 .iter()
                 .map(|f| f.name.clone())
                 .collect(),
-            SelectColumns::Named(exprs) => exprs
-                .iter()
-                .map(|e| match e {
-                    SelectExpr::Column(name) => name.clone(),
-                    SelectExpr::Window { alias, .. } => alias.clone(),
-                    SelectExpr::Computed { alias, .. } => {
-                        alias.clone().unwrap_or_else(|| "expr".to_string())
-                    }
-                    SelectExpr::Aggregate { .. } => "agg".to_string(),
-                })
-                .collect(),
+            SelectColumns::Named(exprs) => {
+                let mut computed_idx = 0usize;
+                exprs
+                    .iter()
+                    .map(|e| match e {
+                        SelectExpr::Column(name) => name.clone(),
+                        SelectExpr::Window { alias, .. } => alias.clone(),
+                        SelectExpr::Computed { alias, .. } => {
+                            let name = alias
+                                .clone()
+                                .unwrap_or_else(|| format!("__cmp_{}", computed_idx));
+                            computed_idx += 1;
+                            name
+                        }
+                        SelectExpr::Aggregate { .. } => "agg".to_string(),
+                    })
+                    .collect()
+            }
         };
         let col_indices: Vec<usize> = ordered_cols
             .iter()
@@ -597,9 +615,10 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),
         Expr::MatLiteral(_) => ValueType::Matrix(0, 0),
         Expr::VectorFn { func, .. } => match func {
-            VectorFnKind::Normalize | VectorFnKind::VecAdd | VectorFnKind::VecScale => {
-                ValueType::Vector(0)
-            }
+            VectorFnKind::Normalize
+            | VectorFnKind::VecAdd
+            | VectorFnKind::VecScale
+            | VectorFnKind::Flatten => ValueType::Vector(0),
             VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
             VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
             VectorFnKind::MatShape => ValueType::String,
@@ -1026,6 +1045,11 @@ pub(super) fn agg_func_to_logical(f: &AggFuncAst) -> AggregateFunction {
 pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
     match e {
         Expr::Ref(name) => LogicalExpr::Column(name.clone()),
+        // `table.col` — the table qualifier is only meaningful for JOIN's
+        // ON clause (which also strips it, see parse_join_col_ref); a
+        // single row here is already the merged output of the JOIN, so
+        // resolve by the bare column name, same as an unqualified Ref.
+        Expr::Field { field, .. } => LogicalExpr::Column(field.clone()),
         Expr::Int(n) => LogicalExpr::Literal(Value::Int(*n)),
         Expr::Scalar(f) => LogicalExpr::Literal(Value::Float(*f as f32)),
         Expr::StringLit(s) => LogicalExpr::Literal(Value::String(s.clone())),
@@ -1142,6 +1166,7 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 VectorFnKind::Matmul => LVk::Matmul,
                 VectorFnKind::Transpose => LVk::Transpose,
                 VectorFnKind::MatShape => LVk::MatShape,
+                VectorFnKind::Flatten => LVk::Flatten,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,

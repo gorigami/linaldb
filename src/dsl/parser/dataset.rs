@@ -441,7 +441,16 @@ impl Parser {
                 return Err(self.error("Expected SELECT inside subquery"));
             }
         } else {
-            DatasetSource::Named(self.eat_ident()?)
+            let name = self.eat_ident()?;
+            // Optional `[AS] alias` — accepted so `table.col`/`alias.col`
+            // parses in SELECT/ON, but the alias itself isn't tracked:
+            // column resolution always uses the bare column name (see
+            // dsl_expr_to_logical_expr's Expr::Field handling), matching
+            // the existing JOIN ON-clause convention. Not sufficient to
+            // disambiguate a self-join's two sides beyond the built-in
+            // `r_`-prefix collision renaming.
+            self.parse_optional_table_alias();
+            DatasetSource::Named(name)
         };
 
         // Parse zero or more JOIN clauses
@@ -632,6 +641,7 @@ impl Parser {
         };
 
         let right_dataset = self.eat_ident()?;
+        self.parse_optional_table_alias();
         self.eat(&Token::On)?;
 
         // ON COSINE_SIM(<left_ref>, <right_ref>) > <threshold>  — similarity join
@@ -677,6 +687,18 @@ impl Parser {
             Ok(self.eat_ident()?)
         } else {
             Ok(first)
+        }
+    }
+
+    // Optional `[AS] <alias>` after a dataset name in FROM/JOIN. Consumes
+    // and discards the alias token(s) if present — see the FROM-clause
+    // call site for why the alias itself isn't tracked.
+    fn parse_optional_table_alias(&mut self) {
+        if self.at(&Token::As) {
+            self.advance();
+            let _ = self.eat_ident();
+        } else if matches!(self.peek(), Some(Token::Ident(_))) {
+            let _ = self.eat_ident();
         }
     }
 
