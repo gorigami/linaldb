@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.44] - 2026-07-16
+
+### Cleaned up — documentation audit against the mission statement
+
+Held every doc against the mission statement ("a high-performance,
+in-memory analytical engine... SQL-inspired DSL that treats vectors,
+matrices, and multi-dimensional tensors as first-class citizens") and the
+current codebase.
+
+- **Deleted** `DOCUMENTATION_ALIGNMENT_REPORT.md` (root) — a one-time
+  audit snapshot pinned to "Codebase Version: v0.1.14", ~28 versions and
+  a full architecture migration stale; its own recommendations were
+  already carried out (the `docs/archive/` convention it proposed exists
+  and holds exactly the files it named).
+- **Deleted** `docs/SCIENTIFIC_DATASET_INGESTION_PLAN.md` — titled
+  "COMPLETED", every phase checked off, fully redundant with the living
+  `docs/DSL_REFERENCE.md` scientific-ingestion section.
+- **Deleted** `docs/EXAMPLES.md` — linked to `examples/end_to_end.lnl`
+  (deleted in v0.1.41), used non-portable absolute `file:///` paths, and
+  fully duplicated the freshly-written `examples/README.md`.
+- **Archived** `docs/BENCHMARKS.md` → `docs/archive/` (gitignored, local
+  only — same convention as the rest of `docs/archive/`) — dated
+  2026-01-02 against "v0.1.10 (unreleased)", presenting ~6 months of
+  stale numbers as current was actively misleading.
+- **Rewrote** `docs/DATASET_ARCHITECTURE.md` — fixed a wrong file path
+  (`dataset/dataset.rs` doesn't exist; it's `dataset/mod.rs`), added the
+  `metadata` field the struct actually has, and documented all 9
+  previously-unmentioned submodules (`reference.rs`, `registry.rs`,
+  `graph.rs`, `schema.rs`, `schema_evolution.rs`, `lineage.rs`,
+  `manifest.rs`, `stats.rs`, `metadata.rs`).
+- **Fixed real bugs in `README.md`**: the Quick Start used the wrong
+  binary name (`linaldb` instead of `linal`) in all 4 CLI invocations —
+  every command as written failed with "command not found" — and linked
+  to `examples/end_to_end.lnl`, which no longer exists. Also updated the
+  Documentation Hub links to drop the two removed/archived docs and point
+  at `examples/README.md` instead.
+- **Fixed dangling links**: `docs/ARCHITECTURE.md` and `CONTRIBUTING.md`
+  both referenced `Tasks_implementations.md` at its pre-archive path.
+- **Fixed a cosmetic mismatch** in `docs/ERROR_REFERENCE.md`: the sample
+  error message used Rust's `Debug` format instead of the real `Display`
+  output engine errors actually print.
+
+Full suite passes, 0 failures.
+
+---
+
 ## [0.1.43] - 2026-07-16
 
 ### Fixed — CI: smoke tests invoked the wrong binary profile

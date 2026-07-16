@@ -31,13 +31,13 @@ git clone https://github.com/gorigami/linaldb.git
 cd linaldb && cargo build --release
 
 # 1. Start the interactive REPL
-./target/release/linaldb repl
+./target/release/linal repl
 
 # 2. Run a smoke test script
-./target/release/linaldb run examples/end_to_end.lnl
+./target/release/linal run examples/example.lnl
 
 # 3. Start the managed server
-./target/release/linaldb serve --port 8080
+./target/release/linal serve --port 8080
 ```
 
 ---
@@ -124,7 +124,7 @@ Multi-platform server with parallel execution and background workload management
 
 ```bash
 # Check server health
-linaldb server status
+linal server status
 
 # Submit a long-running job to the background
 curl -X POST "http://localhost:8080/jobs" -d "SHOW ALL"
@@ -138,8 +138,7 @@ LINALDB is extensively documented to help you scale from local experiments to pr
 
 - **[Architecture](docs/ARCHITECTURE.md)**: Deep dive into the internal engine design.
 - **[DSL Reference](docs/DSL_REFERENCE.md)**: Complete guide to keywords, operators, and syntax.
-- **[Performance & Benchmarks](docs/BENCHMARKS.md)**: How we achieve 2.5x speedups via SIMD and Rayon.
-- **[Example Gallery](docs/EXAMPLES.md)**: Curated snippets for common ML and analytical workflows.
+- **[Examples](examples/README.md)**: Runnable `.lnl` scripts covering every major feature area.
 - **[Error Reference](docs/ERROR_REFERENCE.md)**: Troubleshooting guide for engine and DSL errors.
 
 ---

@@ -27,9 +27,9 @@ pub struct Dataset {
 - **Memory**: Copies data for transformations
 - **Status**: **Active** - this is what the engine uses
 
-### 2. `dataset/dataset.rs` - **Integrated View Layer**
+### 2. `dataset/mod.rs` - **Integrated View Layer**
 
-**Location**: `src/core/dataset/dataset.rs`
+**Location**: `src/core/dataset/mod.rs`
 
 **Structure**:
 
@@ -38,6 +38,7 @@ pub struct Dataset {
     pub name: String,
     pub schema: DatasetSchema,
     pub columns: HashMap<String, ResourceReference>,  // ← References, not copies
+    pub metadata: Option<DatasetMetadata>,
 }
 ```
 
@@ -47,6 +48,20 @@ pub struct Dataset {
 - **Zero-copy**: Uses `ResourceReference` (views over existing data)
 - **Memory efficient**: No data duplication
 - **Status**: **Integrated Production Layer** - handles `BIND`, `ATTACH`, and `DERIVE`.
+
+**Submodules** (`src/core/dataset/`):
+
+| File | Purpose |
+|---|---|
+| `reference.rs` | `ResourceReference` — the enum a column resolves to (currently a `Tensor { id }` variant; the zero-copy indirection this whole layer exists for) |
+| `registry.rs` | `DatasetRegistry` — owns the `HashMap<String, Dataset>` for a runtime scope (a `DatabaseInstance` or `ExecutionContext`) |
+| `graph.rs` | `DatasetGraph` — resolves references across a `DatasetRegistry`, the traversal layer behind `BIND`/`ATTACH`/`DERIVE` |
+| `schema.rs` | `DatasetSchema`, `ColumnSchema`, `ColumnRole` — column-level typing for the reference-graph model |
+| `schema_evolution.rs` | `SchemaVersion`, `Migration` — non-breaking schema versioning, backs `LIST VERSIONS` / schema history |
+| `lineage.rs` | `DatasetLineage`, `LineageNode` — a DAG of derivation history (dataset name, content hash, operation, parent nodes), backs `SHOW LINEAGE` |
+| `manifest.rs` | `DatasetManifest` — the delivery contract for a portable LINAL dataset package (name, version, hash, entrypoints) |
+| `stats.rs` | `DatasetStats`, `ColumnStats` — row counts and per-column summaries |
+| `metadata.rs` | `DatasetMetadata`, `DatasetOrigin` — the `metadata` field on `Dataset` above; provenance and free-form metadata set via `SET DATASET METADATA` |
 
 ## Why Both Exist? (Hybrid Architecture)
 

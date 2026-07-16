@@ -42,7 +42,7 @@ As of v0.1.24 all 27+ statement variants are handled in the typed pipeline — t
 Wraps an `EngineError` with a source line number. Occurs when the grammar is valid but the operation fails at runtime (e.g., shape mismatch in `MATMUL`).
 
 ```
-Engine error at line 5: InvalidOp("shape mismatch: [3] vs [4]")
+Engine error at line 5: Invalid operation: shape mismatch: [3] vs [4]
 ```
 
 ---
