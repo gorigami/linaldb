@@ -11,7 +11,7 @@ use toon_format::encode_default;
 
 #[derive(Parser)]
 #[command(name = "LINAL")]
-#[command(version = "0.1.9")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "LINAL: Linear Algebra Analytical Engine", long_about = None)]
 struct Cli {
     #[command(subcommand)]

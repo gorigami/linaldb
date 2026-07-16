@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.45] - 2026-07-16
+
+### Fixed — silent correctness bugs found by a follow-up documentation audit (Track G)
+
+A second doc-vs-engine audit (this time against `docs/DSL_REFERENCE.md`,
+`ARCHITECTURE.md`, `DATASET_ARCHITECTURE.md`, and `ERROR_REFERENCE.md`
+individually, not just the top-level docs v0.1.44 covered) surfaced two live
+engine bugs while verifying doc examples by execution, plus one CLI bug.
+Tracked as Track G in `CONSISTENCY_PLAN.md` (round 2).
+
+- **`SUM_VEC(col) OVER (...)` / `AVG_VEC(col) OVER (...)` silently returned
+  `0.0`** instead of an element-wise running aggregate on vector columns.
+  Root cause: the parser collapses `SumVec`/`AvgVec` into the generic
+  `WindowFunc::Sum`/`Avg` (same as plain `SUM`/`AVG`, matching how the
+  non-windowed accumulator already treats them), but the window executor
+  (`apply_window_func`, `src/dsl/executor/query.rs`) only ever accumulated
+  `Int`/`Float`, defaulting `Value::Vector`/`Value::Matrix` to `0.0`. Added
+  `window_running_sum`, a vector/matrix-aware running accumulator mirroring
+  `AggregateExec`'s grouped SUM/AVG logic (`src/query/physical.rs`), that
+  errors on dimension/shape mismatch instead of silently zeroing. Also fixed
+  the window column's output-type inference, which had the same blind spot
+  (defaulted anything non-scalar to `Int`).
+- **Bare (non-windowed) aggregates silently ignored `AS alias`** — `SELECT
+  SUM(price) AS total FROM t` always named the output column `SUM(price)`,
+  never `total`. The parser explicitly discarded the alias
+  (`src/dsl/parser/dataset.rs`). `SelectExpr::Aggregate` and
+  `query::logical::Expr::AggregateExpr` both gained an `alias: Option<String>`
+  field, threaded through to the schema-naming logic
+  (`query::logical::LogicalPlan::schema`), so the alias is now honored end
+  to end.
+- **Found while fixing the alias bug**: a `SELECT` mixing a bare aggregate
+  with a window function in the same list (no `GROUP BY`, e.g. `SELECT
+  SUM(price) AS total, ROW_NUMBER() OVER (...) AS rn FROM t`) could silently
+  drop the aggregate column from the final projection — the post-processing
+  step looked up the column by a hardcoded `"agg"` placeholder instead of
+  its real output name. Fixed by looking up the actual name from the
+  aggregate physical plan's schema (which also naturally picks up the alias
+  fix above).
+- **`linal --version` reported a hardcoded, stale `0.1.9`** (`src/main.rs`)
+  while `Cargo.toml` was at `0.1.44` — 35 releases out of date. Now sourced
+  from `env!("CARGO_PKG_VERSION")`.
+
+New regression coverage in `tests/silent_correctness_test.rs` (Track G
+section) and `tests/cli_hardening_test.rs`. Full suite passes, 0 failures.
+
+Documentation debt found by the same audit (missing/stale coverage in
+`DSL_REFERENCE.md`, `ARCHITECTURE.md`, `DATASET_ARCHITECTURE.md`,
+`ERROR_REFERENCE.md`, `README.md`/`CONTRIBUTING.md`) is tracked separately
+as Tracks H-K in `CONSISTENCY_PLAN.md` — no doc-only changes in this release.
+
+---
+
 ## [0.1.44] - 2026-07-16
 
 ### Cleaned up — documentation audit against the mission statement

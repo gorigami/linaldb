@@ -9,6 +9,15 @@
 //   - A4: SELECT with an aggregate function and no GROUP BY (e.g.
 //         `SELECT SUM(price) FROM t`) silently returned the raw,
 //         unaggregated table instead of computing the aggregate
+//
+// Round 2 (Track G):
+//   - G1: SUM_VEC/AVG_VEC OVER (...) window aggregates silently returned
+//         0.0 instead of an element-wise running aggregate
+//   - G2: bare (non-windowed) aggregates with `AS alias` silently ignored
+//         the alias, always naming the output column after the function call
+//   - G3: a SELECT mixing a bare aggregate with a window function (no
+//         GROUP BY) could silently drop the aggregate column from the
+//         final projection
 
 use linal::core::config::EngineConfig;
 use linal::dsl::{execute_line, DslOutput};
@@ -307,6 +316,195 @@ fn test_bare_aggregate_on_empty_table_returns_no_rows() {
     let out = exec(&mut db, "SELECT SUM(price) AS total FROM nums", 2);
     match out {
         DslOutput::Table(ds) => assert_eq!(ds.len(), 0),
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+// ── G1: SUM_VEC/AVG_VEC OVER (...) must actually aggregate, not zero out ─────
+
+#[test]
+fn test_sum_vec_over_window_is_cumulative_not_zero() {
+    let mut db = TensorDb::new();
+    exec(
+        &mut db,
+        "DATASET docs COLUMNS (id: INT, category: STRING, embedding: Vector(2))",
+        1,
+    );
+    exec(&mut db, "INSERT INTO docs VALUES (1, 'a', [1.0, 2.0])", 2);
+    exec(&mut db, "INSERT INTO docs VALUES (2, 'a', [3.0, 4.0])", 3);
+
+    let out = exec(
+        &mut db,
+        "SELECT id, SUM_VEC(embedding) OVER (PARTITION BY category ORDER BY id) AS running \
+         FROM docs",
+        4,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            assert_eq!(ds.len(), 2);
+            let running_idx = ds.schema.get_field_index("running").expect("running col");
+            match &ds.rows[0].values[running_idx] {
+                linal::core::value::Value::Vector(v) => assert_eq!(v, &vec![1.0f32, 2.0f32]),
+                other => panic!("Expected Vector, got {other:?} — SUM_VEC OVER silently zeroed"),
+            }
+            match &ds.rows[1].values[running_idx] {
+                linal::core::value::Value::Vector(v) => assert_eq!(v, &vec![4.0f32, 6.0f32]),
+                other => panic!("Expected Vector, got {other:?} — SUM_VEC OVER silently zeroed"),
+            }
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_avg_vec_over_window_is_running_average_not_zero() {
+    let mut db = TensorDb::new();
+    exec(
+        &mut db,
+        "DATASET docs COLUMNS (id: INT, category: STRING, embedding: Vector(2))",
+        1,
+    );
+    exec(&mut db, "INSERT INTO docs VALUES (1, 'a', [2.0, 4.0])", 2);
+    exec(&mut db, "INSERT INTO docs VALUES (2, 'a', [4.0, 8.0])", 3);
+
+    let out = exec(
+        &mut db,
+        "SELECT id, AVG_VEC(embedding) OVER (PARTITION BY category ORDER BY id) AS running_avg \
+         FROM docs",
+        4,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            let idx = ds.schema.get_field_index("running_avg").expect("col");
+            match &ds.rows[1].values[idx] {
+                linal::core::value::Value::Vector(v) => assert_eq!(v, &vec![3.0f32, 6.0f32]),
+                other => panic!("Expected Vector, got {other:?} — AVG_VEC OVER silently zeroed"),
+            }
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_plain_sum_over_window_still_works() {
+    // Guard against over-broad fixes: scalar SUM() OVER (...) must be unaffected.
+    let mut db = TensorDb::new();
+    exec(
+        &mut db,
+        "DATASET items COLUMNS (id: INT, category: STRING, price: FLOAT)",
+        1,
+    );
+    exec(&mut db, "INSERT INTO items VALUES (1, 'a', 10.0)", 2);
+    exec(&mut db, "INSERT INTO items VALUES (2, 'a', 20.0)", 3);
+
+    let out = exec(
+        &mut db,
+        "SELECT id, SUM(price) OVER (PARTITION BY category ORDER BY id) AS running FROM items",
+        4,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            let idx = ds.schema.get_field_index("running").expect("running col");
+            assert_eq!(
+                ds.rows[1].values[idx],
+                linal::core::value::Value::Float(30.0)
+            );
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+// ── G2: bare (non-windowed) aggregates must honor `AS alias` ─────────────────
+
+#[test]
+fn test_bare_sum_honors_as_alias() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET nums COLUMNS (id: INT, price: FLOAT)", 1);
+    exec(&mut db, "INSERT INTO nums VALUES (1, 10.0)", 2);
+
+    let out = exec(&mut db, "SELECT SUM(price) AS total FROM nums", 2);
+    match out {
+        DslOutput::Table(ds) => {
+            assert_eq!(
+                ds.schema.get_field_index("total"),
+                Some(0),
+                "aliased bare aggregate must be named 'total', got schema: {:?}",
+                ds.schema
+            );
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_bare_sum_vec_honors_as_alias() {
+    let mut db = TensorDb::new();
+    exec(
+        &mut db,
+        "DATASET docs COLUMNS (id: INT, embedding: Vector(2))",
+        1,
+    );
+    exec(&mut db, "INSERT INTO docs VALUES (1, [1.0, 2.0])", 2);
+
+    let out = exec(
+        &mut db,
+        "SELECT SUM_VEC(embedding) AS centroid FROM docs",
+        3,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            assert!(
+                ds.schema.get_field_index("centroid").is_some(),
+                "aliased bare SUM_VEC must be named 'centroid', got schema: {:?}",
+                ds.schema
+            );
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_bare_aggregate_without_alias_still_uses_function_name() {
+    // Guard against over-broad fixes: unaliased bare aggregates keep the
+    // existing FUNC(col) naming convention.
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET nums COLUMNS (id: INT, price: FLOAT)", 1);
+    exec(&mut db, "INSERT INTO nums VALUES (1, 10.0)", 2);
+
+    let out = exec(&mut db, "SELECT SUM(price) FROM nums", 2);
+    match out {
+        DslOutput::Table(ds) => {
+            assert_eq!(ds.schema.fields[0].name, "SUM(price)");
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+// ── G3: mixing a bare aggregate with a window function must not drop the
+//        aggregate column from the final projection ────────────────────────
+
+#[test]
+fn test_bare_aggregate_survives_alongside_window_function() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET nums COLUMNS (id: INT, price: FLOAT)", 1);
+    exec(&mut db, "INSERT INTO nums VALUES (1, 10.0)", 2);
+    exec(&mut db, "INSERT INTO nums VALUES (2, 20.0)", 3);
+
+    let out = exec(
+        &mut db,
+        "SELECT SUM(price) AS total, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM nums",
+        4,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            assert!(
+                ds.schema.get_field_index("total").is_some(),
+                "bare aggregate 'total' must survive projection alongside a window \
+                 function, got schema: {:?}",
+                ds.schema
+            );
+            assert!(ds.schema.get_field_index("rn").is_some());
+        }
         other => panic!("Expected Table output, got: {other:?}"),
     }
 }

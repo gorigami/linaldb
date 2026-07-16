@@ -31,6 +31,7 @@ fn test_aggregation_execution_workflow() {
         aggr_expr: vec![Expr::AggregateExpr {
             func: AggregateFunction::Sum,
             expr: Box::new(Expr::Column("amount".to_string())),
+            alias: None,
         }],
     };
 

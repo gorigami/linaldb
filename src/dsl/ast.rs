@@ -349,6 +349,8 @@ pub enum SelectExpr {
     Aggregate {
         func: AggFuncAst,
         expr: Box<Expr>,
+        /// Optional `AS alias` — honored by the resulting output column name.
+        alias: Option<String>,
     },
     /// Window function: `fn() OVER (PARTITION BY … ORDER BY …) AS alias`
     Window {

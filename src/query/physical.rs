@@ -328,59 +328,59 @@ impl PhysicalPlan for AggregateExec {
 
                 for expr in &self.aggr_expr {
                     match expr {
-                        crate::query::logical::Expr::AggregateExpr { func, expr: inner } => {
-                            match func {
-                                crate::query::logical::AggregateFunction::Count => {
-                                    regular_accs.push(Value::Int(0));
-                                    avg_accumulators.push((Value::Null, 0));
-                                }
-                                crate::query::logical::AggregateFunction::Sum
-                                | crate::query::logical::AggregateFunction::SumVec => {
-                                    let val = evaluate_expression(inner, &row);
-                                    if let Value::Vector(v) = val {
-                                        regular_accs.push(Value::Vector(vec![0.0; v.len()]));
-                                    } else if let Value::Matrix(m) = val {
-                                        if m.is_empty() {
-                                            regular_accs.push(Value::Matrix(vec![]));
-                                        } else {
-                                            let r = m.len();
-                                            let c = m[0].len();
-                                            regular_accs.push(Value::Matrix(vec![vec![0.0; c]; r]));
-                                        }
-                                    } else {
-                                        regular_accs.push(Value::Int(0));
-                                    }
-                                    avg_accumulators.push((Value::Null, 0));
-                                }
-                                crate::query::logical::AggregateFunction::Min => {
-                                    regular_accs.push(Value::Null);
-                                    avg_accumulators.push((Value::Null, 0));
-                                }
-                                crate::query::logical::AggregateFunction::Max => {
-                                    regular_accs.push(Value::Null);
-                                    avg_accumulators.push((Value::Null, 0));
-                                }
-                                crate::query::logical::AggregateFunction::Avg
-                                | crate::query::logical::AggregateFunction::AvgVec => {
-                                    let val = evaluate_expression(inner, &row);
-                                    let initial_sum = if let Value::Vector(v) = val {
-                                        Value::Vector(vec![0.0; v.len()])
-                                    } else if let Value::Matrix(m) = val {
-                                        if m.is_empty() {
-                                            Value::Matrix(vec![])
-                                        } else {
-                                            let r = m.len();
-                                            let c = m[0].len();
-                                            Value::Matrix(vec![vec![0.0; c]; r])
-                                        }
-                                    } else {
-                                        Value::Float(0.0)
-                                    };
-                                    avg_accumulators.push((initial_sum, 0));
-                                    regular_accs.push(Value::Null);
-                                }
+                        crate::query::logical::Expr::AggregateExpr {
+                            func, expr: inner, ..
+                        } => match func {
+                            crate::query::logical::AggregateFunction::Count => {
+                                regular_accs.push(Value::Int(0));
+                                avg_accumulators.push((Value::Null, 0));
                             }
-                        }
+                            crate::query::logical::AggregateFunction::Sum
+                            | crate::query::logical::AggregateFunction::SumVec => {
+                                let val = evaluate_expression(inner, &row);
+                                if let Value::Vector(v) = val {
+                                    regular_accs.push(Value::Vector(vec![0.0; v.len()]));
+                                } else if let Value::Matrix(m) = val {
+                                    if m.is_empty() {
+                                        regular_accs.push(Value::Matrix(vec![]));
+                                    } else {
+                                        let r = m.len();
+                                        let c = m[0].len();
+                                        regular_accs.push(Value::Matrix(vec![vec![0.0; c]; r]));
+                                    }
+                                } else {
+                                    regular_accs.push(Value::Int(0));
+                                }
+                                avg_accumulators.push((Value::Null, 0));
+                            }
+                            crate::query::logical::AggregateFunction::Min => {
+                                regular_accs.push(Value::Null);
+                                avg_accumulators.push((Value::Null, 0));
+                            }
+                            crate::query::logical::AggregateFunction::Max => {
+                                regular_accs.push(Value::Null);
+                                avg_accumulators.push((Value::Null, 0));
+                            }
+                            crate::query::logical::AggregateFunction::Avg
+                            | crate::query::logical::AggregateFunction::AvgVec => {
+                                let val = evaluate_expression(inner, &row);
+                                let initial_sum = if let Value::Vector(v) = val {
+                                    Value::Vector(vec![0.0; v.len()])
+                                } else if let Value::Matrix(m) = val {
+                                    if m.is_empty() {
+                                        Value::Matrix(vec![])
+                                    } else {
+                                        let r = m.len();
+                                        let c = m[0].len();
+                                        Value::Matrix(vec![vec![0.0; c]; r])
+                                    }
+                                } else {
+                                    Value::Float(0.0)
+                                };
+                                avg_accumulators.push((initial_sum, 0));
+                                regular_accs.push(Value::Null);
+                            }
+                        },
                         _ => {
                             regular_accs.push(Value::Null);
                             avg_accumulators.push((Value::Null, 0));
@@ -396,6 +396,7 @@ impl PhysicalPlan for AggregateExec {
                 if let crate::query::logical::Expr::AggregateExpr {
                     func,
                     expr: inner_expr,
+                    ..
                 } = expr
                 {
                     // Eval inner expr

@@ -53,10 +53,11 @@ pub fn execute_explain(
                         exprs
                             .iter()
                             .filter_map(|e| match e {
-                                SelectExpr::Aggregate { func, expr } => {
+                                SelectExpr::Aggregate { func, expr, alias } => {
                                     Some(LogicalExpr::AggregateExpr {
                                         func: agg_func_to_logical(func),
                                         expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                        alias: alias.clone(),
                                     })
                                 }
                                 SelectExpr::Column(_)
@@ -182,10 +183,11 @@ pub fn execute_explain(
                     SelectColumns::Named(exprs) => exprs
                         .iter()
                         .filter_map(|e| match e {
-                            SelectExpr::Aggregate { func, expr } => {
+                            SelectExpr::Aggregate { func, expr, alias } => {
                                 Some(LogicalExpr::AggregateExpr {
                                     func: agg_func_to_logical(func),
                                     expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                    alias: alias.clone(),
                                 })
                             }
                             SelectExpr::Column(_)
