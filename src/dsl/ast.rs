@@ -672,6 +672,9 @@ pub enum VectorFnKind {
     Matmul,
     Transpose,
     MatShape,
+    /// `FLATTEN(expr)` — flatten a Matrix (or a no-op on an already-flat
+    /// Vector) row-major into a 1D Vector.
+    Flatten,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -73,6 +73,7 @@ pub enum VectorFnKind {
     Matmul,
     Transpose,
     MatShape,
+    Flatten,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,9 +327,10 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             ValueType::Matrix(r, c)
         }
         Expr::VectorFn { func, .. } => match func {
-            VectorFnKind::Normalize | VectorFnKind::VecAdd | VectorFnKind::VecScale => {
-                ValueType::Vector(0)
-            }
+            VectorFnKind::Normalize
+            | VectorFnKind::VecAdd
+            | VectorFnKind::VecScale
+            | VectorFnKind::Flatten => ValueType::Vector(0),
             VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
             VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
             VectorFnKind::MatShape => ValueType::String,
