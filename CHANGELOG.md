@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.43] - 2026-07-16
+
+### Fixed — CI: smoke tests invoked the wrong binary profile
+
+- `tests/examples_cli_smoke_test.rs` and `tests/cli_hardening_test.rs`
+  hardcoded `target/debug/linal` as the binary path. CI runs
+  `cargo test --release`, so every test in `examples_cli_smoke_test.rs`
+  failed on the open PR ("No such file or directory") — passed locally
+  only because a debug build happened to already exist. Fixed both to use
+  `env!("CARGO_BIN_EXE_linal")`, which Cargo resolves to the correct path
+  for whichever profile actually built the test binary. Verified by
+  running the exact CI invocation locally (`cargo test --release -j 1`
+  with the same `--skip` flags).
+
+---
+
 ## [0.1.42] - 2026-07-16
 
 ### Cleaned up — follow-up to the examples/tests audit

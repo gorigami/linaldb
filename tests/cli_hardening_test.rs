@@ -11,7 +11,7 @@ use std::sync::Mutex;
 static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 fn get_bin() -> String {
-    "target/debug/linal".to_string()
+    env!("CARGO_BIN_EXE_linal").to_string()
 }
 
 #[test]
