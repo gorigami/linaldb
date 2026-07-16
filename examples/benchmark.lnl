@@ -12,7 +12,7 @@ SHOW ""
 # ============================================================================
 
 # Clean up any existing benchmark database
-DROP DATABASE benchmark_db
+DROP DATABASE IF EXISTS benchmark_db
 
 CREATE DATABASE benchmark_db
 USE benchmark_db

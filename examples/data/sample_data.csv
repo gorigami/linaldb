@@ -1,0 +1,6 @@
+id,name,value,active
+1,alpha,0.42,true
+2,beta,0.71,false
+3,gamma,0.15,true
+4,delta,0.93,true
+5,epsilon,0.58,false

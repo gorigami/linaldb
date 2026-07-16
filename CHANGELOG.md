@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.41] - 2026-07-16
+
+### Cleaned up — examples/ and tests/ audit
+
+- **`examples/`**: fixed 3 example scripts that referenced dead engine
+  state (`benchmark.lnl`'s `DROP DATABASE` on a DB that didn't exist yet,
+  `export_import_csv.lnl`'s missing CSV fixture and legacy-`IMPORT CSV`
+  path-resolution mismatch, `persistence_demo.lnl`'s `LOAD DATASET` path);
+  deleted 3 that used syntax the parser no longer accepts at all
+  (`end_to_end.lnl`, `test_persistence.lnl`, `verify_dataset_export.lnl`);
+  deleted a dead scratch script (`gen_zarr_data_minimal.rs`, a 6-line
+  no-op); added `pipelines_and_search.lnl` to cover window functions,
+  `CAST`-to-tensor, index-accelerated similarity `JOIN`, and pipelines —
+  previously undemonstrated. Every example now has a smoke-test assertion
+  (`tests/examples_cli_smoke_test.rs`, new) that it runs clean, in
+  addition to the deeper correctness assertions already in
+  `tests/examples_integration.rs`. See `examples/README.md` (new) for the
+  convention going forward.
+- **`tests/`**: merged 2 pairs of near-duplicate single-test files into
+  their larger siblings (`dataset_dsl_test.rs` +
+  `comprehensive_tensor_dataset_test.rs` → `tensor_dataset_dsl_test.rs`;
+  `lazy_dsl_test.rs` → folded into `lazy_evaluation_test.rs`, renamed
+  `lazy_expression_test.rs`); renamed 5 more files whose names collided
+  across unrelated features — most notably "indexing", which meant both
+  tensor element slicing (`tensor_indexing_server_test.rs`,
+  `tensor_expression_indexing_server_test.rs`) and the DB index feature
+  (`dataset_index_feature_test.rs`) — and "zero copy"
+  (`tensor_arc_sharing_test.rs` vs. `dataset_zero_copy_test.rs`, formerly
+  distinguished only by a plural `s`). No test coverage was removed; full
+  suite still passes (71 binaries, 0 failures).
+
+---
+
 ## [0.1.40] - 2026-07-16
 
 ### Fixed — Track F of CONSISTENCY_PLAN.md: qualified columns, table aliasing, FLATTEN in SELECT
