@@ -237,18 +237,22 @@ DELETE FROM users WHERE active = false
 ### JOIN
 
 ```sql
-SELECT o.id, u.name
-FROM orders o
-JOIN users u ON o.user_id = u.id
+SELECT id, name FROM orders JOIN users ON orders.user_id = users.uid
 
 SELECT * FROM a LEFT JOIN b ON a.key = b.key
 SELECT * FROM a RIGHT JOIN b ON a.key = b.key
 SELECT * FROM a FULL JOIN b ON a.key = b.key
+
+-- Index-accelerated similarity join (v0.1.39): joins on cosine similarity
+-- instead of equality, using a Vector index on the right dataset's column
+-- when one exists (falls back to a brute-force comparison otherwise)
+SELECT aid, bid FROM a JOIN b ON COSINE_SIM(a.v, b.v) > 0.8
 ```
 
 - Kinds: `[INNER] JOIN`, `LEFT [OUTER] JOIN`, `RIGHT [OUTER] JOIN`, `FULL [OUTER] JOIN`. Multiple `JOIN` clauses may be chained on one `SELECT`.
-- `ON` supports scalar equality only (`<left> = <right>`) — no similarity/vector join.
+- `ON` supports scalar equality (`<left> = <right>`) or, for two `Vector` columns, similarity (`COSINE_SIM(<left>, <right>) > <threshold>`) — no other comparison operator (`>=`, `<`, etc.) is supported for the similarity form yet.
 - Each side of `ON` may be written as `col` or `table.col`; the table qualifier is accepted for readability but only the column name is used to resolve the value, so column names must be unique across the joined datasets.
+- **Known limitation**: table-qualified columns (`table.col`) are only understood inside the `ON` clause — the `SELECT` column list and `FROM ... AS alias`/`FROM table alias` syntax do not support qualified/aliased references (`SELECT a.id FROM a JOIN b ...` does not resolve). Select plain, non-colliding column names, or use `SELECT *` and rely on the `r_`-prefix collision-renaming for duplicate names across the two joined datasets.
 
 ### Common Table Expressions (CTEs) & UNION
 
@@ -320,11 +324,16 @@ SELECT id, CASE status WHEN 1 THEN "active" WHEN 0 THEN "inactive" ELSE "unknown
 SELECT id, COALESCE(nickname, name, "anonymous") AS display_name FROM users
 SELECT id, NULLIF(score, 0) AS score_or_null FROM results   -- NULL if score = 0
 SELECT id, CAST(price AS INT) AS price_int FROM items
+
+-- Reshape a Vector/Matrix column inline in a query
+SELECT id, CAST(flat_embedding AS MATRIX(2, 2)) AS as_matrix FROM t
+SELECT id, CAST(grid AS VECTOR(6)) AS flattened FROM t
 ```
 
 - `CASE [operand] WHEN <cond> THEN <expr> [WHEN ... THEN ...] [ELSE <expr>] END` — with an operand, each `WHEN` value is compared for equality against it; without one, each `WHEN` is a standalone boolean condition.
 - `COALESCE(a, b, ...)` returns the first non-`NULL` argument (2+ args). `NULLIF(a, b)` (alias `IFNULL`) returns `NULL` if `a = b`, else `a`.
-- `CAST(expr AS <type>)` — target types: `INT`/`INTEGER`, `FLOAT`/`DOUBLE`, `TEXT`/`STRING`/`VARCHAR`, `BOOL`/`BOOLEAN`. There is no `CAST` target for `Vector`/`Matrix`/`Tensor` — casting between tensor shapes/scalars is not supported.
+- `CAST(expr AS <type>)` — scalar target types: `INT`/`INTEGER`, `FLOAT`/`DOUBLE`, `TEXT`/`STRING`/`VARCHAR`, `BOOL`/`BOOLEAN`.
+- `CAST(expr AS VECTOR(n))` / `CAST(expr AS MATRIX(r, c))` — reshape/flatten a `Vector`/`Matrix` value to the given shape, row-major. The source and target must have the same total element count (`r * c == n` when converting between the two, or an exact length/shape match for same-kind casts); a mismatch returns `NULL` rather than resizing or erroring, consistent with other invalid `CAST` combinations. This is the only way to reshape a tensor column *inside* a query — the standalone `RESHAPE`/`FLATTEN` keywords (§3) only operate on tensor variables outside of `SELECT`.
 
 ### String Functions
 

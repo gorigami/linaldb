@@ -91,30 +91,6 @@ fn test_pipeline_load_nonexistent_returns_error() {
     );
 }
 
-// ── 4. save_all_pipelines / load_all_pipelines ────────────────────────────────
-
-#[test]
-fn test_save_all_load_all_pipelines() {
-    use linal::dsl::persistence::{load_all_pipelines, save_all_pipelines};
-
-    let dir = TempDir::new().unwrap();
-
-    {
-        let mut db = make_db(dir.path());
-        execute_line(&mut db, "DEFINE PIPELINE p1 AS SELECT id", 1).unwrap();
-        execute_line(&mut db, "DEFINE PIPELINE p2 AS LIMIT 10", 2).unwrap();
-        save_all_pipelines(&db, 1).unwrap();
-    }
-
-    let mut db = make_db(dir.path());
-    load_all_pipelines(&mut db, 1).unwrap();
-
-    assert!(db.pipelines.contains_key("p1"), "p1 should be restored");
-    assert!(db.pipelines.contains_key("p2"), "p2 should be restored");
-    assert!(db.pipelines["p1"].source.contains("SELECT id"));
-    assert!(db.pipelines["p2"].source.contains("LIMIT"));
-}
-
 // ── 5. LOAD PIPELINE overwrites the in-memory definition ─────────────────────
 
 #[test]
@@ -245,4 +221,35 @@ fn test_pipeline_vector_ops_roundtrip() {
     } else {
         panic!("expected Table output from SELECT");
     }
+}
+
+// ── 7. Relative TO/FROM paths resolve against data_dir, like TENSOR/DATASET ──
+
+#[test]
+fn test_pipeline_relative_explicit_path_resolves_against_data_dir() {
+    // CONSISTENCY_PLAN.md Track D / D5: pipeline's explicit TO/FROM paths
+    // used to be taken as-is (CWD-relative), unlike TENSOR/DATASET, whose
+    // explicit relative paths resolve against `<data_dir>/<db>/`. This
+    // pins the now-consistent behavior.
+    let dir = TempDir::new().unwrap();
+    let mut db = make_db(dir.path());
+
+    execute_line(
+        &mut db,
+        "DEFINE PIPELINE rel AS WHERE active = 1 THEN LIMIT 5",
+        1,
+    )
+    .unwrap();
+    execute_line(&mut db, "SAVE PIPELINE rel TO 'backups/rel.json'", 2).unwrap();
+
+    let expected_path = dir.path().join("default").join("backups").join("rel.json");
+    assert!(
+        expected_path.exists(),
+        "relative TO path should resolve under <data_dir>/<db>/, expected file at {:?}",
+        expected_path
+    );
+
+    let mut db2 = make_db(dir.path());
+    execute_line(&mut db2, "LOAD PIPELINE rel FROM 'backups/rel.json'", 3).unwrap();
+    assert!(db2.pipelines.contains_key("rel"));
 }

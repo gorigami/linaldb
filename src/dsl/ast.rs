@@ -297,9 +297,14 @@ pub struct SelectStmt {
 pub struct JoinClause {
     pub kind: JoinKind,
     pub dataset: String,
-    /// Equi-join condition: `left_col = right_col`
+    /// For an equi-join: `left_col = right_col`. For a similarity join
+    /// (`similarity_threshold` is `Some`): the two Vector columns compared
+    /// via `COSINE_SIM(left_col, right_col) > threshold`.
     pub left_col: String,
     pub right_col: String,
+    /// `Some(threshold)` for `ON COSINE_SIM(a.col, b.col) > threshold`;
+    /// `None` for a plain equi-join.
+    pub similarity_threshold: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +464,9 @@ pub enum ListTarget {
     Datasets,
     DatasetVersions(String),
     DatasetPackages,
+    /// `LIST PIPELINES` — alias for `SHOW PIPELINES`, added for naming
+    /// symmetry with `LIST TENSORS`/`LIST DATASETS`.
+    Pipelines,
 }
 
 #[derive(Debug, Clone)]
@@ -682,6 +690,10 @@ pub enum CastTarget {
     Float,
     Text,
     Bool,
+    /// `CAST(expr AS VECTOR(n))` — reshape/flatten to a Vector of length `n`.
+    Vector(usize),
+    /// `CAST(expr AS MATRIX(r, c))` — reshape/flatten to a Matrix of shape `r x c`.
+    Matrix(usize, usize),
 }
 
 /// Infix arithmetic operators (symbols: `+`, `-`, `*`, `/`).

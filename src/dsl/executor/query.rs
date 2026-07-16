@@ -250,6 +250,8 @@ pub(super) fn execute_select(
             left_col: join.left_col.clone(),
             right_col: join.right_col.clone(),
             join_type,
+            right_dataset_name: join.dataset.clone(),
+            similarity_threshold: join.similarity_threshold,
         };
     }
 
@@ -589,6 +591,8 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             CastTarget::Float => ValueType::Float,
             CastTarget::Text => ValueType::String,
             CastTarget::Bool => ValueType::Bool,
+            CastTarget::Vector(n) => ValueType::Vector(*n),
+            CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),
         Expr::MatLiteral(_) => ValueType::Matrix(0, 0),
@@ -1110,6 +1114,8 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 CastTarget::Float => LCast::Float,
                 CastTarget::Text => LCast::Text,
                 CastTarget::Bool => LCast::Bool,
+                CastTarget::Vector(n) => LCast::Vector(*n),
+                CastTarget::Matrix(r, c) => LCast::Matrix(*r, *c),
             };
             LogicalExpr::Cast {
                 expr: Box::new(dsl_expr_to_logical_expr(expr)),

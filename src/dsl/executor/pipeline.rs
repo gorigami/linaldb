@@ -114,7 +114,7 @@ pub(super) fn execute_describe_pipeline(
     Ok(DslOutput::Message(out.trim_end().to_string()))
 }
 
-pub(super) fn execute_show_pipelines(db: &TensorDb) -> Result<DslOutput, DslError> {
+pub(crate) fn execute_show_pipelines(db: &TensorDb) -> Result<DslOutput, DslError> {
     if db.pipelines.is_empty() {
         return Ok(DslOutput::Message("No pipelines defined.".into()));
     }

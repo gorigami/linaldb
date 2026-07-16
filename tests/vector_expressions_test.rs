@@ -189,6 +189,67 @@ fn test_avg_vec_group_by() {
 }
 
 #[test]
+fn test_plain_avg_and_sum_work_on_vector_columns() {
+    // CONSISTENCY_PLAN.md Track D / D4: the executor already merges
+    // Sum/SumVec and Avg/AvgVec into the same accumulator logic, and SUM
+    // already worked without the _VEC suffix — but AVG's schema-inference
+    // hardcoded Float regardless of input type, so `AVG(vector_col)` used
+    // to fail with "Type mismatch... expected FLOAT, got VECTOR" even
+    // though the executor could compute it fine. Fixed by inferring AVG's
+    // result type the same way SUM/MIN/MAX do.
+    let mut db = db_with_embeddings();
+
+    let sum_rows = query_rows(
+        &mut db,
+        "SELECT category, SUM(embedding) AS total FROM docs GROUP BY category ORDER BY category",
+    );
+    assert_eq!(sum_rows.len(), 2);
+    for row in &sum_rows {
+        assert!(
+            matches!(&row[1], Value::Vector(v) if v.len() == 3),
+            "plain SUM should return a 3-dim vector, got {:?}",
+            row[1]
+        );
+    }
+
+    let avg_rows = query_rows(
+        &mut db,
+        "SELECT category, AVG(embedding) AS centroid FROM docs GROUP BY category ORDER BY category",
+    );
+    assert_eq!(avg_rows.len(), 2);
+    for row in &avg_rows {
+        assert!(
+            matches!(&row[1], Value::Vector(v) if v.len() == 3),
+            "plain AVG should return a 3-dim vector, got {:?}",
+            row[1]
+        );
+    }
+}
+
+#[test]
+fn test_avg_on_scalar_column_still_returns_float_not_int() {
+    // Guard against the D4 fix over-broadening: AVG on a scalar Int column
+    // must still produce a Float (fractional averages), not an Int.
+    let mut db = TensorDb::new();
+    execute_script(
+        &mut db,
+        r#"
+DATASET nums COLUMNS (id: Int, cat: String, price: Int)
+INSERT INTO nums VALUES (1, "a", 10)
+INSERT INTO nums VALUES (2, "a", 21)
+"#,
+    )
+    .expect("setup failed");
+
+    let rows = query_rows(
+        &mut db,
+        "SELECT cat, AVG(price) AS avg FROM nums GROUP BY cat",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][1], Value::Float(15.5));
+}
+
+#[test]
 fn test_sum_vec_group_by() {
     let mut db = db_with_embeddings();
     let rows = query_rows(

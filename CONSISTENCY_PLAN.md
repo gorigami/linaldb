@@ -165,34 +165,84 @@ of what's actually implemented. Low-risk, high-value, no code changes.
 
 These need a design decision before implementation, not just a bug fix.
 
-- [ ] **D1.** `CAST` has zero `Vector`/`Matrix`/`Tensor` support — entirely
+- [x] **D1.** `CAST` has zero `Vector`/`Matrix`/`Tensor` support — entirely
       scalar-only (`CastTarget` enum, `src/dsl/ast.rs:680-685`). Decide:
       add tensor-aware casting, or explicitly document it as out of scope.
-- [ ] **D2.** `JOIN` only supports scalar equality — no similarity/ANN join,
+      **Implemented in v0.1.39.** Deep-dive found the "redundant with
+      RESHAPE/FLATTEN" assumption was wrong: `RESHAPE` can't be used inside
+      a `SELECT` at all (hard parse error), and `FLATTEN` parses in
+      `SELECT` but silently returns `NULL` (tracked as Track F / F2) — so
+      there was no working way to reshape a Vector/Matrix *column* inline
+      in a query. Added `CAST(expr AS VECTOR(n))` /
+      `CAST(expr AS MATRIX(r, c))`, reshaping/flattening row-major;
+      dimension mismatch returns `NULL` (consistent with other invalid
+      `CAST` combinations) rather than erroring. Tests in
+      `tests/correctness_integration.rs`.
+- [x] **D2.** `JOIN` only supports scalar equality — no similarity/ANN join,
       and it's an undocumented limitation. Decide: document as a known
       limitation, or scope a similarity-join feature.
-- [ ] **D3.** `WHERE`-clause vector filtering has two parallel execution
+      **Implemented in v0.1.39**, index-accelerated per the project's
+      efficiency-first philosophy: `JOIN <ds> ON COSINE_SIM(a.col, b.col) >
+      threshold`. New `SimilarityJoinExec` (`src/query/physical.rs`) uses a
+      `Vector` index on the right dataset's join column when one exists
+      (`Index::search`, same pattern as `CosineFilterExec`), falling back
+      to brute-force O(n·m) otherwise; both paths verified to produce
+      identical results. Supports INNER/LEFT/RIGHT/FULL. Tests in
+      `tests/similarity_join_test.rs`.
+- [x] **D3.** `WHERE`-clause vector filtering has two parallel execution
       paths for the same conceptual operation — generic `FilterExec` (with
       `COSINE_SIM` as a predicate function) vs. index-driven
       `CosineFilterExec` (`src/query/physical.rs:597-655`). Consolidate or
       document why both exist.
-- [ ] **D4.** Aggregate surface is inconsistent: `SUM`/`AVG` need
+      **Documented in v0.1.39, no code change** — re-reading confirmed this
+      is a deliberate optimizer rewrite-rule pattern (substitute an
+      index-accelerated executor only when a matching index exists,
+      otherwise the generic path still evaluates the predicate correctly
+      on its own), the same pattern `IndexScanExec` uses for hash-indexed
+      equality. Documented in `ARCHITECTURE.md`'s "Index-Aware Execution"
+      and a doc comment on `Planner::try_optimize_filter`.
+- [x] **D4.** Aggregate surface is inconsistent: `SUM`/`AVG` need
       vector-suffixed variants (`SumVec`/`AvgVec`) while `MIN`/`MAX` got
       unified/polymorphic naming. Decide whether to unify `SUM`/`AVG` syntax
       or document the asymmetry as intentional.
-- [ ] **D5.** Pipeline persistence bypasses the shared
+      **Turned out to be a real bug, fixed in v0.1.39** — not just a naming
+      question. The executor already merges `Sum`/`SumVec` (and
+      `Avg`/`AvgVec`) into the same accumulator logic, and `SUM(vector_col)`
+      already worked without the `_VEC` suffix. But `AVG`'s schema-inference
+      (`query/logical.rs`) hardcoded `Float` regardless of input type
+      (unlike `SUM`/`MIN`/`MAX`, which correctly infer from the column), so
+      `AVG(vector_col)` errored with a type mismatch even though the
+      executor could compute it fine. Fixed by inferring `AVG`'s result
+      type the same way, with a Vector/Matrix-aware branch that still
+      returns `Float` for scalar input (not `Int`, matching the actual
+      runtime averaging behavior). Tests in `tests/vector_expressions_test.rs`.
+- [x] **D5.** Pipeline persistence bypasses the shared
       `resolve_persistence_path` helper that `TENSOR`/`DATASET` use, and
       hand-rolls its own `pipeline_dir()` path logic
       (`src/dsl/persistence.rs:547-568` vs. `16-30`). Route through the
       shared helper, or document the intentional divergence.
-- [ ] **D6.** `save_all_pipelines`/`load_all_pipelines` are dead code — no
+      **Fixed in v0.1.39.** Extracted a shared `instance_base_dir` helper
+      (dedupes the `data_dir`/instance-name composition), and routed
+      pipeline's explicit `TO`/`FROM` paths through `resolve_persistence_path`
+      so relative paths now resolve against `<data_dir>/<db>/`, consistent
+      with `TENSOR`/`DATASET` (previously CWD-relative — no documented
+      example relied on that behavior, so this was safe to change). Test
+      in `tests/pipeline_persistence_test.rs`.
+- [x] **D6.** `save_all_pipelines`/`load_all_pipelines` are dead code — no
       DSL command (e.g. `SAVE ALL PIPELINES`) invokes them, and no
       startup/shutdown lifecycle calls them either (note: this matches
       tensors/datasets, which also have no auto load/save wiring — so this
       may be "add the DSL command" rather than "fix a regression"). Either
       wire them to something reachable or remove them.
-- [ ] **D7.** Add `list_pipelines_core`/`LIST PIPELINES` for parity with
+      **Removed in v0.1.39** — no object kind (tensor, dataset, or
+      pipeline) has a bulk "SAVE ALL" DSL command, so adding one only for
+      pipelines would itself be inconsistent. Removed the two functions and
+      their test.
+- [x] **D7.** Add `list_pipelines_core`/`LIST PIPELINES` for parity with
       `LIST TENSORS`/`LIST DATASETS`, if genuinely missing.
+      **Added in v0.1.39** as a thin alias for the existing
+      `SHOW PIPELINES` (`ListTarget::Pipelines` dispatches to the same
+      `execute_show_pipelines`). Test in `tests/pipeline_test.rs`.
 
 ---
 
@@ -221,7 +271,40 @@ These need a design decision before implementation, not just a bug fix.
 
 ---
 
+## Track F — Found while implementing Track D (v0.1.39)
+
+- [ ] **F1.** Table-qualified columns (`table.col`) are only understood
+      inside a `JOIN ... ON` clause. The `SELECT` column list does not
+      resolve them at all — `SELECT a.id, b.name FROM a JOIN b ON ...`
+      returns an empty schema/row (not an error, just silently wrong/empty
+      output). Worse: `FROM orders o JOIN users u ON o.user_id = u.id`
+      (table aliasing) fails to parse entirely
+      (`"Unknown command: SELECT o.id, ..."`). This affects even a plain
+      equi-join, not just the new similarity join — reproduced directly:
+      `SELECT a.id, b.id FROM a JOIN b ON a.id = b.id` →
+      `Schema { fields: [], field_indices: {} }`. A Track B doc example
+      (`SELECT o.id, u.name FROM orders o JOIN users u ON ...`) shipped
+      with this exact bug, undetected because that example wasn't
+      individually re-verified after the surrounding JOIN section was
+      drafted — fixed in v0.1.39 by rewriting the example to avoid
+      aliasing/qualified projection and adding a "Known limitation" note.
+      Not root-caused or fixed here — worth a dedicated session, since
+      `table.col` projection is a pretty basic SQL expectation.
+- [ ] **F2.** `FLATTEN(col)` inside a `SELECT` list parses successfully but
+      always evaluates to `NULL` (schema inferred as `Float`, should be
+      `Vector`/scalar depending on input). `RESHAPE(...)` inside `SELECT`
+      doesn't even parse (`"Unknown command"`). Both are only wired for the
+      standalone tensor-DSL context (`LET x = RESHAPE t TO [dims]`), not
+      the `parse_select_expr` computed-expression path (unlike `NORMALIZE`,
+      `MATMUL`, `TRANSPOSE`, which do work in `SELECT`). `CAST(... AS
+      VECTOR(n)/MATRIX(r,c))` (Track D / D1) now covers the same use case
+      via a different syntax, so this is lower priority, but the silent
+      `NULL` for `FLATTEN` in particular is a footgun worth fixing or at
+      minimum erroring on instead of silently returning `NULL`.
+
+---
+
 ## Completion
 
-- [ ] All tracks (A, B, C, D, E) fully checked off
+- [ ] All tracks (A, B, C, D, E, F) fully checked off
 - [ ] Final PR deletes this file (`CONSISTENCY_PLAN.md`)

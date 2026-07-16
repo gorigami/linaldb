@@ -955,6 +955,32 @@ pub fn evaluate_expression(
                     Value::String(s) => Value::Bool(!s.is_empty()),
                     _ => Value::Null,
                 },
+                // Reshape/flatten between Vector and Matrix. Total element
+                // count must match exactly — CAST doesn't resize or pad,
+                // it only reinterprets the same data under a new shape.
+                CastTarget::Vector(n) => match val {
+                    Value::Vector(v) if v.len() == *n => Value::Vector(v),
+                    Value::Matrix(m) => {
+                        let flat: Vec<f32> = m.into_iter().flatten().collect();
+                        if flat.len() == *n {
+                            Value::Vector(flat)
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    _ => Value::Null,
+                },
+                CastTarget::Matrix(r, c) => match val {
+                    Value::Matrix(m) if m.len() == *r && m.iter().all(|row| row.len() == *c) => {
+                        Value::Matrix(m)
+                    }
+                    Value::Vector(v) if v.len() == r * c => {
+                        let rows: Vec<Vec<f32>> =
+                            v.chunks(*c).map(|chunk| chunk.to_vec()).collect();
+                        Value::Matrix(rows)
+                    }
+                    _ => Value::Null,
+                },
             }
         }
         crate::query::logical::Expr::VecLiteral(vals) => {
@@ -988,14 +1014,7 @@ pub fn evaluate_expression(
                 },
                 VectorFnKind::CosineSim => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
-                        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-                        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-                        if na == 0.0 || nb == 0.0 {
-                            Value::Float(0.0)
-                        } else {
-                            Value::Float(dot / (na * nb))
-                        }
+                        Value::Float(cosine_sim(a, b))
                     }
                     _ => Value::Null,
                 },
@@ -1239,6 +1258,227 @@ impl PhysicalPlan for NestedLoopJoinExec {
     }
 }
 
+/// Nested-loop similarity join — INNER/LEFT/RIGHT/FULL join where the
+/// condition is `COSINE_SIM(left_col, right_col) > threshold` instead of
+/// equality. Uses a `Vector` index on the right dataset's `right_col`
+/// (if one exists) to accelerate each left row's match search via
+/// `Index::search`, the same index-or-fallback pattern as
+/// `CosineFilterExec`/`IndexScanExec` (see ARCHITECTURE.md's "Index-Aware
+/// Execution" and `Planner::try_optimize_filter`); falls back to a
+/// brute-force O(n·m) comparison when no matching index exists.
+#[derive(Debug)]
+pub struct SimilarityJoinExec {
+    pub left: Box<dyn PhysicalPlan>,
+    pub right: Box<dyn PhysicalPlan>,
+    pub left_col: String,
+    pub right_col: String,
+    /// Needed to look up a `Vector` index on `right_col` for the
+    /// index-accelerated path.
+    pub right_dataset_name: String,
+    pub threshold: f32,
+    pub join_type: crate::query::logical::JoinType,
+    pub output_schema: Arc<Schema>,
+}
+
+impl SimilarityJoinExec {
+    /// For each left row, the right-row indices where
+    /// `COSINE_SIM(left, right) > threshold`.
+    fn compute_matches(
+        &self,
+        db: &TensorDb,
+        left_rows: &[Tuple],
+        right_rows: &[Tuple],
+        left_col_idx: usize,
+        right_col_idx: usize,
+    ) -> Result<Vec<Vec<usize>>, EngineError> {
+        let vector_index = db
+            .get_dataset(&self.right_dataset_name)
+            .ok()
+            .and_then(|ds| ds.get_index(&self.right_col))
+            .filter(|idx| idx.index_type() == crate::core::index::IndexType::Vector);
+
+        if let Some(index) = vector_index {
+            use crate::core::tensor::{Shape, TensorId, TensorMetadata};
+            let k = right_rows.len().max(1);
+
+            left_rows
+                .iter()
+                .map(|left_row| {
+                    let crate::core::value::Value::Vector(lv) = &left_row.values[left_col_idx]
+                    else {
+                        return Ok(vec![]);
+                    };
+                    let n = lv.len();
+                    let id = TensorId::new();
+                    let meta = TensorMetadata::new(id, None);
+                    let query_tensor =
+                        crate::core::tensor::Tensor::new(id, Shape::new(vec![n]), lv.clone(), meta)
+                            .map_err(EngineError::InvalidOp)?;
+                    let results = index
+                        .search(&query_tensor, k)
+                        .map_err(EngineError::InvalidOp)?;
+                    Ok(results
+                        .into_iter()
+                        .filter(|(_, score)| *score > self.threshold)
+                        .map(|(id, _)| id)
+                        .collect())
+                })
+                .collect()
+        } else {
+            Ok(left_rows
+                .iter()
+                .map(|left_row| {
+                    let crate::core::value::Value::Vector(lv) = &left_row.values[left_col_idx]
+                    else {
+                        return vec![];
+                    };
+                    right_rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(ri, right_row)| match &right_row.values[right_col_idx] {
+                            crate::core::value::Value::Vector(rv) if rv.len() == lv.len() => {
+                                (cosine_sim(lv, rv) > self.threshold).then_some(ri)
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect())
+        }
+    }
+}
+
+impl PhysicalPlan for SimilarityJoinExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.output_schema.clone()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        use crate::query::logical::JoinType;
+        use std::collections::{HashMap, HashSet};
+
+        let left_rows = self.left.execute(db)?;
+        let right_rows = self.right.execute(db)?;
+        let out_schema = self.output_schema.clone();
+        let left_schema = self.left.schema();
+        let right_schema = self.right.schema();
+
+        let left_col_idx = left_schema.get_field_index(&self.left_col).ok_or_else(|| {
+            EngineError::InvalidOp(format!(
+                "Join column '{}' not found in left dataset",
+                self.left_col
+            ))
+        })?;
+        let right_col_idx = right_schema
+            .get_field_index(&self.right_col)
+            .ok_or_else(|| {
+                EngineError::InvalidOp(format!(
+                    "Join column '{}' not found in right dataset",
+                    self.right_col
+                ))
+            })?;
+
+        let left_nulls: Vec<crate::core::value::Value> = left_schema
+            .fields
+            .iter()
+            .map(|_| crate::core::value::Value::Null)
+            .collect();
+        let right_nulls: Vec<crate::core::value::Value> = right_schema
+            .fields
+            .iter()
+            .map(|_| crate::core::value::Value::Null)
+            .collect();
+
+        let matches =
+            self.compute_matches(db, &left_rows, &right_rows, left_col_idx, right_col_idx)?;
+
+        let mut output = Vec::new();
+        let mut matched_right: HashSet<usize> = HashSet::new();
+
+        match self.join_type {
+            JoinType::Inner | JoinType::Left | JoinType::Full => {
+                for (li, left_row) in left_rows.iter().enumerate() {
+                    let right_indices = &matches[li];
+                    if right_indices.is_empty() {
+                        if matches!(self.join_type, JoinType::Left | JoinType::Full) {
+                            let mut combined = left_row.values.clone();
+                            combined.extend_from_slice(&right_nulls);
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                        }
+                    } else {
+                        for &ri in right_indices {
+                            let combined = merge_row_values(
+                                left_row,
+                                &right_rows[ri],
+                                &left_schema,
+                                &right_schema,
+                            );
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                            if self.join_type == JoinType::Full {
+                                matched_right.insert(ri);
+                            }
+                        }
+                    }
+                }
+                if self.join_type == JoinType::Full {
+                    for (ri, right_row) in right_rows.iter().enumerate() {
+                        if !matched_right.contains(&ri) {
+                            let mut combined = left_nulls.clone();
+                            combined.extend_from_slice(&right_row.values);
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                        }
+                    }
+                }
+            }
+            JoinType::Right => {
+                let mut right_to_left: HashMap<usize, Vec<usize>> = HashMap::new();
+                for (li, right_indices) in matches.iter().enumerate() {
+                    for &ri in right_indices {
+                        right_to_left.entry(ri).or_default().push(li);
+                    }
+                }
+                for (ri, right_row) in right_rows.iter().enumerate() {
+                    match right_to_left.get(&ri) {
+                        Some(left_indices) => {
+                            for &li in left_indices {
+                                let combined = merge_row_values(
+                                    &left_rows[li],
+                                    right_row,
+                                    &left_schema,
+                                    &right_schema,
+                                );
+                                output.push(
+                                    Tuple::new(out_schema.clone(), combined)
+                                        .map_err(EngineError::InvalidOp)?,
+                                );
+                            }
+                        }
+                        None => {
+                            let mut combined = left_nulls.clone();
+                            combined.extend_from_slice(&right_row.values);
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(output)
+    }
+}
+
 /// UNION / UNION ALL Executor
 #[derive(Debug)]
 pub struct UnionExec {
@@ -1298,6 +1538,17 @@ impl PhysicalPlan for DistinctExec {
             })
             .collect();
         Ok(deduped)
+    }
+}
+
+fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
     }
 }
 

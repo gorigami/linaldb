@@ -19,6 +19,7 @@ mod show;
 
 pub use eval::expr_to_string;
 pub use explain::execute_explain;
+pub(crate) use pipeline::execute_show_pipelines;
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 

@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.39] - 2026-07-15
+
+### Added — Track D of CONSISTENCY_PLAN.md (architecture/design debt)
+
+All 7 items resolved in one pass — some were fixed, some were bugs found
+during investigation (not just naming/design questions), some were
+documented as intentional, and one was removed as dead code.
+
+- **D1 — `CAST` to `VECTOR(n)`/`MATRIX(r, c)`**: reshape/flatten a
+  Vector/Matrix column inline in a query (row-major, dimension mismatch
+  returns `NULL`). A deep-dive found `RESHAPE`/`FLATTEN` — thought to make
+  this redundant — don't actually work inside `SELECT` at all (see "Found
+  while implementing this release" below), so this fills a real gap.
+- **D2 — index-accelerated similarity `JOIN`**: `JOIN <ds> ON
+  COSINE_SIM(a.col, b.col) > threshold`. New `SimilarityJoinExec` uses a
+  `Vector` index on the right dataset's column when one exists, falling
+  back to brute-force O(n·m) otherwise — same index-or-fallback pattern as
+  the existing `CosineFilterExec`. Supports INNER/LEFT/RIGHT/FULL.
+- **D4 — `AVG(vector_col)` bug fix**: `SUM(vector_col)` already worked
+  without the `_VEC` suffix (the executor already merges `Sum`/`SumVec`),
+  but `AVG`'s schema-inference hardcoded `Float` regardless of input type,
+  so `AVG(vector_col)` errored with a type mismatch even though the
+  executor could compute it. Fixed to infer the result type like
+  `SUM`/`MIN`/`MAX` do, while still correctly returning `Float` (not `Int`)
+  for scalar input.
+- **D5 — pipeline persistence path consistency**: relative `SAVE`/`LOAD
+  PIPELINE ... TO/FROM` paths now resolve against `<data_dir>/<db>/`,
+  matching `TENSOR`/`DATASET` (previously CWD-relative).
+- **D7 — `LIST PIPELINES`**: alias for `SHOW PIPELINES`, for naming parity
+  with `LIST TENSORS`/`LIST DATASETS`.
+- **D3, D6**: no functional change. D3 (the `FilterExec`/`CosineFilterExec`
+  split) was confirmed to be a deliberate, correctly-implemented optimizer
+  rewrite-rule pattern, not an inconsistency — documented in
+  `ARCHITECTURE.md` and a source doc comment. D6
+  (`save_all_pipelines`/`load_all_pipelines`) was dead code with no DSL
+  command reaching it, and no other object kind has a bulk "SAVE ALL"
+  command either — removed rather than wired up.
+
+### Found while implementing this release (not fixed here)
+
+- `RESHAPE(...)` inside a `SELECT` list doesn't parse at all, and
+  `FLATTEN(col)` parses but always evaluates to `NULL` — both are only
+  wired for the standalone tensor-DSL context, not the SQL `SELECT`
+  computed-expression path. `CAST(... AS VECTOR/MATRIX)` above now covers
+  the same use case, so this is lower priority, but the silent `NULL` is
+  a footgun.
+- Table-qualified columns (`table.col`) are only understood inside a
+  `JOIN ... ON` clause — the `SELECT` column list doesn't resolve them at
+  all (`SELECT a.id FROM a JOIN b ...` silently returns an empty
+  schema/row), and `FROM table alias` aliasing doesn't parse. A Track B
+  doc example shipped with exactly this bug, undetected because it wasn't
+  individually re-verified — now fixed in `DSL_REFERENCE.md`.
+
+Both tracked as Track F (F1, F2) in `CONSISTENCY_PLAN.md`.
+
+---
+
 ## [0.1.38] - 2026-07-14
 
 ### Testing — Close out Track C of CONSISTENCY_PLAN.md (test coverage gaps)
