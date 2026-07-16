@@ -1404,10 +1404,10 @@ mod tests {
             panic!()
         };
         assert!(
-            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Sum, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "price"))
+            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Sum, expr, .. } if matches!(expr.as_ref(), Expr::Ref(c) if c == "price"))
         );
         assert!(
-            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Avg, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "qty"))
+            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Avg, expr, .. } if matches!(expr.as_ref(), Expr::Ref(c) if c == "qty"))
         );
     }
 
@@ -1419,7 +1419,7 @@ mod tests {
             panic!()
         };
         assert!(
-            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Count, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "*"))
+            matches!(&cols[0], SelectExpr::Aggregate { func: AggFuncAst::Count, expr, .. } if matches!(expr.as_ref(), Expr::Ref(c) if c == "*"))
         );
     }
 
@@ -1432,7 +1432,7 @@ mod tests {
         };
         assert!(matches!(&cols[0], SelectExpr::Column(c) if c == "category"));
         assert!(
-            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Max, expr } if matches!(expr.as_ref(), Expr::Ref(c) if c == "price"))
+            matches!(&cols[1], SelectExpr::Aggregate { func: AggFuncAst::Max, expr, .. } if matches!(expr.as_ref(), Expr::Ref(c) if c == "price"))
         );
     }
 

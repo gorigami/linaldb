@@ -38,6 +38,8 @@ pub enum Expr {
     AggregateExpr {
         func: AggregateFunction,
         expr: Box<Expr>,
+        /// Optional output column name from `AS alias` in the DSL.
+        alias: Option<String>,
     },
     /// `CASE [operand] WHEN cond THEN result … [ELSE default] END`
     Case {
@@ -236,13 +238,21 @@ impl LogicalPlan {
                 }
                 // 2. Aggregates
                 for expr in aggr_expr {
-                    if let Expr::AggregateExpr { func, expr: inner } = expr {
-                        let col_name = match inner.as_ref() {
-                            Expr::Column(n) => n.clone(),
-                            _ => "val".to_string(),
+                    if let Expr::AggregateExpr {
+                        func,
+                        expr: inner,
+                        alias,
+                    } = expr
+                    {
+                        let name = if let Some(a) = alias {
+                            a.clone()
+                        } else {
+                            let col_name = match inner.as_ref() {
+                                Expr::Column(n) => n.clone(),
+                                _ => "val".to_string(),
+                            };
+                            format!("{}({})", format!("{:?}", func).to_uppercase(), col_name)
                         };
-                        let name =
-                            format!("{}({})", format!("{:?}", func).to_uppercase(), col_name);
                         let mut typ = crate::core::value::ValueType::Int; // Default
 
                         // Infer for SUM/MIN/MAX if inner is likely Vector (not perfect, but MVP)
@@ -311,7 +321,9 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
         | Expr::IsNotNull(_)
         | Expr::In { .. }
         | Expr::Between { .. } => ValueType::Bool,
-        Expr::AggregateExpr { func, expr: inner } => match func {
+        Expr::AggregateExpr {
+            func, expr: inner, ..
+        } => match func {
             AggregateFunction::Avg => match infer_expr_type_full(inner, schema) {
                 t @ (ValueType::Vector(_) | ValueType::Matrix(_, _)) => t,
                 _ => ValueType::Float,

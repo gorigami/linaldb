@@ -14,6 +14,25 @@ fn get_bin() -> String {
     env!("CARGO_BIN_EXE_linal").to_string()
 }
 
+// Regression test for CONSISTENCY_PLAN.md Track G4: `--version` used to be a
+// hardcoded literal ("0.1.9") in src/main.rs, decoupled from Cargo.toml and
+// stale by 35 releases. Now sourced from env!("CARGO_PKG_VERSION").
+#[test]
+fn test_cli_version_matches_cargo_toml() {
+    let output = Command::new(get_bin())
+        .arg("--version")
+        .output()
+        .expect("Failed to execute --version");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = env!("CARGO_PKG_VERSION");
+    assert!(
+        stdout.contains(expected),
+        "expected `linal --version` output to contain '{expected}', got: {stdout}"
+    );
+}
+
 #[test]
 fn test_cli_init() {
     let _guard = DATA_DIR_LOCK.lock().unwrap();

@@ -50,10 +50,13 @@ pub(super) fn execute_create_dataset_from(
                 exprs
                     .iter()
                     .filter_map(|e| match e {
-                        SelectExpr::Aggregate { func, expr } => Some(LogicalExpr::AggregateExpr {
-                            func: agg_func_to_logical(func),
-                            expr: Box::new(dsl_expr_to_logical_expr(expr)),
-                        }),
+                        SelectExpr::Aggregate { func, expr, alias } => {
+                            Some(LogicalExpr::AggregateExpr {
+                                func: agg_func_to_logical(func),
+                                expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                alias: alias.clone(),
+                            })
+                        }
                         SelectExpr::Column(_)
                         | SelectExpr::Window { .. }
                         | SelectExpr::Computed { .. } => None,
@@ -74,10 +77,13 @@ pub(super) fn execute_create_dataset_from(
             let aggr_exprs: Vec<LogicalExpr> = exprs
                 .into_iter()
                 .filter_map(|e| match e {
-                    SelectExpr::Aggregate { func, expr } => Some(LogicalExpr::AggregateExpr {
-                        func: agg_func_to_logical(&func),
-                        expr: Box::new(dsl_expr_to_logical_expr(&expr)),
-                    }),
+                    SelectExpr::Aggregate { func, expr, alias } => {
+                        Some(LogicalExpr::AggregateExpr {
+                            func: agg_func_to_logical(&func),
+                            expr: Box::new(dsl_expr_to_logical_expr(&expr)),
+                            alias,
+                        })
+                    }
                     SelectExpr::Column(_)
                     | SelectExpr::Window { .. }
                     | SelectExpr::Computed { .. } => None,
@@ -282,10 +288,13 @@ pub(super) fn execute_select(
             SelectColumns::Named(exprs) => exprs
                 .iter()
                 .filter_map(|e| match e {
-                    SelectExpr::Aggregate { func, expr } => Some(LogicalExpr::AggregateExpr {
-                        func: agg_func_to_logical(func),
-                        expr: Box::new(dsl_expr_to_logical_expr(expr)),
-                    }),
+                    SelectExpr::Aggregate { func, expr, alias } => {
+                        Some(LogicalExpr::AggregateExpr {
+                            func: agg_func_to_logical(func),
+                            expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                            alias: alias.clone(),
+                        })
+                    }
                     SelectExpr::Column(_)
                     | SelectExpr::Window { .. }
                     | SelectExpr::Computed { .. } => None,
@@ -335,10 +344,13 @@ pub(super) fn execute_select(
                 SelectColumns::Named(exprs) => exprs
                     .iter()
                     .filter_map(|e| match e {
-                        SelectExpr::Aggregate { func, expr } => Some(LogicalExpr::AggregateExpr {
-                            func: agg_func_to_logical(func),
-                            expr: Box::new(dsl_expr_to_logical_expr(expr)),
-                        }),
+                        SelectExpr::Aggregate { func, expr, alias } => {
+                            Some(LogicalExpr::AggregateExpr {
+                                func: agg_func_to_logical(func),
+                                expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                alias: alias.clone(),
+                            })
+                        }
                         SelectExpr::Column(_)
                         | SelectExpr::Window { .. }
                         | SelectExpr::Computed { .. } => None,
@@ -479,6 +491,14 @@ pub(super) fn execute_select(
                 .collect(),
             SelectColumns::Named(exprs) => {
                 let mut computed_idx = 0usize;
+                // Aggregate fields land in base_schema in the same relative
+                // order they appear here (this branch only runs without a
+                // GROUP BY, so base_schema's fields are exactly the
+                // aggregate outputs, one per Aggregate entry below) — look
+                // up the real output name (honors G2's AS alias) instead of
+                // a placeholder, or the column is silently dropped by the
+                // get_field_index lookup a few lines down.
+                let mut agg_idx = 0usize;
                 exprs
                     .iter()
                     .map(|e| match e {
@@ -491,7 +511,15 @@ pub(super) fn execute_select(
                             computed_idx += 1;
                             name
                         }
-                        SelectExpr::Aggregate { .. } => "agg".to_string(),
+                        SelectExpr::Aggregate { .. } => {
+                            let name = base_schema
+                                .fields
+                                .get(agg_idx)
+                                .map(|f| f.name.clone())
+                                .unwrap_or_else(|| "agg".to_string());
+                            agg_idx += 1;
+                            name
+                        }
                     })
                     .collect()
             }
@@ -815,28 +843,34 @@ fn apply_window_func(
                     }
                 }
                 WindowFunc::Sum(inner) => {
+                    // SUM_VEC/AVG_VEC collapse into this same WindowFunc::Sum/Avg
+                    // at parse time (parser/dataset.rs), so this must handle
+                    // Vector/Matrix element-wise, not just Int/Float — otherwise
+                    // vector window aggregates silently zero out.
                     let logical = dsl_expr_to_logical_expr(inner);
-                    let sum: f64 = sorted_indices[..=rank_0]
+                    let vals: Vec<Value> = sorted_indices[..=rank_0]
                         .iter()
-                        .map(|&i| match evaluate_expression(&logical, &rows[i]) {
-                            Value::Int(n) => n as f64,
-                            Value::Float(f) => f as f64,
-                            _ => 0.0,
-                        })
-                        .sum();
-                    Value::Float(sum as f32)
+                        .map(|&i| evaluate_expression(&logical, &rows[i]))
+                        .collect();
+                    window_running_sum(&vals, line_no)?
                 }
                 WindowFunc::Avg(inner) => {
                     let logical = dsl_expr_to_logical_expr(inner);
-                    let sum: f64 = sorted_indices[..=rank_0]
+                    let vals: Vec<Value> = sorted_indices[..=rank_0]
                         .iter()
-                        .map(|&i| match evaluate_expression(&logical, &rows[i]) {
-                            Value::Int(n) => n as f64,
-                            Value::Float(f) => f as f64,
-                            _ => 0.0,
-                        })
-                        .sum();
-                    Value::Float((sum / (rank_0 + 1) as f64) as f32)
+                        .map(|&i| evaluate_expression(&logical, &rows[i]))
+                        .collect();
+                    let count = vals.len().max(1) as f32;
+                    match window_running_sum(&vals, line_no)? {
+                        Value::Float(s) => Value::Float(s / count),
+                        Value::Vector(v) => Value::Vector(v.iter().map(|x| x / count).collect()),
+                        Value::Matrix(m) => Value::Matrix(
+                            m.iter()
+                                .map(|row| row.iter().map(|x| x / count).collect())
+                                .collect(),
+                        ),
+                        other => other,
+                    }
                 }
                 WindowFunc::Count(inner) => {
                     let logical = dsl_expr_to_logical_expr(inner);
@@ -871,17 +905,13 @@ fn apply_window_func(
         }
     }
 
-    // Infer value type from computed results
+    // Infer value type from computed results (Value::value_type() already covers
+    // Vector/Matrix correctly, unlike the old hand-rolled match here which
+    // defaulted anything non-scalar to Int).
     let vtype = result_vals
         .iter()
         .find(|v| !matches!(v, Value::Null))
-        .map(|v| match v {
-            Value::Int(_) => ValueType::Int,
-            Value::Float(_) => ValueType::Float,
-            Value::String(_) => ValueType::String,
-            Value::Bool(_) => ValueType::Bool,
-            _ => ValueType::Int,
-        })
+        .map(|v| v.value_type())
         .unwrap_or(ValueType::Int);
 
     // Append window result to each row using the alias as the column name
@@ -906,6 +936,62 @@ fn apply_window_func(
             })
         })
         .collect()
+}
+
+/// Element-wise running SUM over a window slice. Handles Int/Float/Vector/Matrix,
+/// mirroring the vector-aware accumulation `AggregateExec` uses for grouped SUM/AVG
+/// (`src/query/physical.rs`) — errors on dimension/shape mismatch instead of
+/// silently dropping to `0.0`.
+fn window_running_sum(vals: &[Value], line_no: usize) -> Result<Value, DslError> {
+    let mut acc: Option<Value> = None;
+    for v in vals.iter().cloned() {
+        acc = Some(match (acc, v) {
+            (None, Value::Int(n)) => Value::Float(n as f32),
+            (None, Value::Float(f)) => Value::Float(f),
+            (None, Value::Vector(vec)) => Value::Vector(vec),
+            (None, Value::Matrix(m)) => Value::Matrix(m),
+            (None, _) => Value::Float(0.0),
+            (Some(Value::Float(s)), Value::Int(n)) => Value::Float(s + n as f32),
+            (Some(Value::Float(s)), Value::Float(f)) => Value::Float(s + f),
+            (Some(Value::Vector(mut sum)), Value::Vector(v2)) => {
+                if sum.len() != v2.len() {
+                    return Err(DslError::Parse {
+                        line: line_no,
+                        msg: format!(
+                            "Window SUM/AVG: vector dimension mismatch — expected {}, got {}",
+                            sum.len(),
+                            v2.len()
+                        ),
+                    });
+                }
+                for (s, x) in sum.iter_mut().zip(v2.iter()) {
+                    *s += x;
+                }
+                Value::Vector(sum)
+            }
+            (Some(Value::Matrix(mut sum)), Value::Matrix(m2)) => {
+                let expected = (sum.len(), sum.first().map_or(0, |r| r.len()));
+                let actual = (m2.len(), m2.first().map_or(0, |r| r.len()));
+                if expected != actual {
+                    return Err(DslError::Parse {
+                        line: line_no,
+                        msg: format!(
+                            "Window SUM/AVG: matrix shape mismatch — expected {:?}, got {:?}",
+                            expected, actual
+                        ),
+                    });
+                }
+                for i in 0..sum.len() {
+                    for j in 0..sum[i].len() {
+                        sum[i][j] += m2[i][j];
+                    }
+                }
+                Value::Matrix(sum)
+            }
+            (Some(other), _) => other,
+        });
+    }
+    Ok(acc.unwrap_or(Value::Float(0.0)))
 }
 
 pub(super) fn execute_add_computed_column(

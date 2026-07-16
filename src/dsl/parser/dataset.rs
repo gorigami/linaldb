@@ -812,14 +812,17 @@ impl Parser {
                     alias,
                 });
             }
-            // Consume optional AS alias (alias is noted but the schema uses the function name)
-            if self.at(&Token::As) {
+            // Optional AS alias — honored as the output column name.
+            let alias = if self.at(&Token::As) {
                 self.advance();
-                let _ = self.eat_ident()?;
-            }
+                Some(self.eat_ident()?)
+            } else {
+                None
+            };
             return Ok(SelectExpr::Aggregate {
                 func,
                 expr: Box::new(inner_expr),
+                alias,
             });
         }
 
