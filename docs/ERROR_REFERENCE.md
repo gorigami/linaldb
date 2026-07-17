@@ -27,17 +27,17 @@ DSL errors occur during the parsing or initial routing of your script commands.
 
 ### Parse Error
 
-Happens when the command doesn't match LINAL's expected grammar. The engine runs a full Logos lexer + recursive-descent parser first, which internally produces a structured `ParseError { offset, msg }` with a byte offset and expectation detail — but the only call site (`execute_line_with_context`, `src/dsl/mod.rs`) discards that structured error entirely on failure and reports a generic message instead:
+Happens when the command doesn't match LINAL's expected grammar. The engine runs a full Logos lexer + recursive-descent parser first, which produces a structured `ParseError { offset, msg }` with a byte offset and expectation detail — as of v0.1.50, that detail survives all the way to the message you see, instead of being discarded in favor of a generic "Unknown command":
 
 ```
-[line 3] Parse error: Unknown command: GET * FROM users
+[line 1] Parse error: expected a statement keyword, found identifier `GET` (at byte 0)
 ```
 
-- **Example**: `GET * FROM users` (unknown command — `GET` is not a LINAL keyword)
-- **Example**: `DEFINE t AS TENSOR(2,2) VALUES [...]` (old paren syntax; use brackets: `TENSOR [2, 2]`)
-- **Fix**: Refer to [DSL_REFERENCE.md](DSL_REFERENCE.md) for correct syntax and type keywords. The error message won't tell you *what* was expected at the failure point (that detail is currently thrown away) — treat it as "this line didn't parse," not a precise diagnostic.
+- **Example**: `GET * FROM users` → "expected a statement keyword, found identifier `GET`" (`GET` is not a LINAL keyword)
+- **Example**: `DEFINE t AS TENSOR(2,2) VALUES [...]` → "expected `[`, found `(`" (old paren syntax; use brackets: `TENSOR [2, 2]`)
+- **Fix**: Refer to [DSL_REFERENCE.md](DSL_REFERENCE.md) for correct syntax and type keywords. The message tells you what token the parser expected and what it actually found, plus the byte offset into the line — use that to locate the problem directly instead of scanning the whole line.
 
-All `Statement` variants are handled in the typed pipeline — there is no legacy string-dispatch fallback. An unrecognized command falls through to the generic `DslError::Parse { msg: "Unknown command: ..." }` shown above, not a structured `ParseError`.
+All `Statement` variants are handled in the typed pipeline — there is no legacy string-dispatch fallback. Comment-only lines (`--`, `#`, `//`) and blank lines are the only inputs that fail to parse without becoming an error — they're recognized before the structured error would otherwise surface and treated as a no-op.
 
 ### Engine Error (from DSL)
 

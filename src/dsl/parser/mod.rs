@@ -26,7 +26,11 @@ impl ParseError {
     pub fn into_dsl_error(self, line: usize) -> crate::dsl::DslError {
         crate::dsl::DslError::Parse {
             line,
-            msg: self.msg,
+            // Uses Display (msg + byte offset), not just self.msg, so the
+            // offset survives the conversion into DslError::Parse's plain
+            // String — DslError::Parse has no dedicated offset field, so
+            // this is the only place that information can travel.
+            msg: self.to_string(),
         }
     }
 }

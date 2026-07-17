@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.50] - 2026-07-17
+
+### Fixed — parser errors are no longer discarded; SECURITY.md contact email unified
+
+Fixes the two items flagged, but not fixed, at the end of the round-2
+consistency audit (v0.1.45-v0.1.49).
+
+- **Parser errors were silently discarded.** `execute_line_with_context`
+  (`src/dsl/mod.rs`) used `if let Ok(stmt) = parser::parse(line)`, which
+  threw away the `Err` case entirely — any line that failed to parse
+  reported a generic `Unknown command: <raw line>` regardless of what
+  actually went wrong, even though the parser had already produced a
+  structured `ParseError { offset, msg }` with the real expectation detail.
+  Fixed by matching on the `Result` instead: a real parse failure now
+  surfaces the parser's own message and byte offset, e.g. `GET * FROM
+  users` now reports `expected a statement keyword, found identifier
+  `GET` (at byte 0)` instead of `Unknown command: GET * FROM users`.
+  `ParseError::into_dsl_error` (previously dead code — never called
+  anywhere) now also preserves the byte offset via `Display` instead of
+  dropping it, and is the single conversion path used here.
+- **Found while fixing the above**: pure `--`-comment lines errored out as
+  `Unknown command` when reached directly through `execute_line`/
+  `execute_line_with_context` (REPL, server `/execute`) — the blank/comment
+  fallback only checked `#`/`//`, not `--`, even though the lexer treats
+  all three as comment styles and `execute_script`'s own line-by-line
+  pre-filter already checked all three. Only affected direct callers;
+  `run`/script execution was never affected since `execute_script` filters
+  comment lines before they reach this function at all. Fixed by checking
+  `--` too.
+- **`SECURITY.md` gave two different contact emails** (`security@gorigami.xyz`
+  in one section, `dev@gorigami.xyz` in another) for reporting a
+  vulnerability. Unified on `develop@gorigami.xyz`, matching the address
+  README.md already uses for commercial licensing inquiries.
+
+Updated `docs/ERROR_REFERENCE.md`'s Parse Error section and example to match
+the new, correct behavior. New regression coverage in
+`tests/parser_error_surfacing_test.rs`. Full suite passes, 0 failures.
+
+---
+
 ## [0.1.49] - 2026-07-16
 
 ### Documented — README/CONTRIBUTING cross-consistency, closes the round-2 audit (Track K)

@@ -218,24 +218,36 @@ pub fn execute_line_with_context(
     ctx: Option<&mut crate::engine::context::ExecutionContext>,
 ) -> Result<DslOutput, DslError> {
     // Every statement goes through the typed parser — there is no string-matching
-    // fallback chain. On parse failure, only blank/comment lines are tolerated.
-    if let Ok(stmt) = crate::dsl::parser::parse(line) {
-        // Attach the raw source line to DefinePipeline for serialization.
-        let stmt = match stmt {
-            crate::dsl::ast::Statement::DefinePipeline(mut s) => {
-                s.source = line.to_string();
-                crate::dsl::ast::Statement::DefinePipeline(s)
+    // fallback chain. On parse failure, only blank/comment lines are tolerated;
+    // anything else surfaces the parser's own structured error (byte offset +
+    // expectation detail) instead of a generic "Unknown command" message.
+    match crate::dsl::parser::parse(line) {
+        Ok(stmt) => {
+            // Attach the raw source line to DefinePipeline for serialization.
+            let stmt = match stmt {
+                crate::dsl::ast::Statement::DefinePipeline(mut s) => {
+                    s.source = line.to_string();
+                    crate::dsl::ast::Statement::DefinePipeline(s)
+                }
+                other => other,
+            };
+            executor::execute_statement(db, stmt, line_no, ctx)
+        }
+        Err(parse_err) => {
+            let trimmed = line.trim();
+            // Comment-only/blank lines legitimately fail to parse (the lexer
+            // skips `--`/`#`/`//` comments entirely, leaving no tokens), and
+            // aren't errors — every direct caller of execute_line/execute_line_
+            // with_context (REPL, server /execute) must tolerate them the same
+            // way execute_script's line-by-line pre-filter already does.
+            if trimmed.is_empty()
+                || trimmed.starts_with('#')
+                || trimmed.starts_with("//")
+                || trimmed.starts_with("--")
+            {
+                return Ok(DslOutput::None);
             }
-            other => other,
-        };
-        return executor::execute_statement(db, stmt, line_no, ctx);
+            Err(parse_err.into_dsl_error(line_no))
+        }
     }
-
-    if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
-        return Ok(DslOutput::None);
-    }
-    Err(DslError::Parse {
-        line: line_no,
-        msg: format!("Unknown command: {}", line),
-    })
 }

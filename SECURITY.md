@@ -18,7 +18,7 @@ If you discover a security vulnerability in LINAL, please report it responsibly.
 ### How to Report
 
 1. **Do NOT** open a public GitHub issue
-2. Email security details to: **<security@gorigami.xyz>**
+2. Email security details to: **<develop@gorigami.xyz>**
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
@@ -196,7 +196,7 @@ Regular dependency updates help maintain security.
 
 ## Reporting Security Issues
 
-**Email**: <dev@gorigami.xyz>
+**Email**: <develop@gorigami.xyz>
 
 **PGP Key**: (if available)
 
@@ -235,4 +235,4 @@ Future security enhancements planned:
 
 **Last Updated**: 2025
 
-For questions about security, contact: <dev@gorigami.xyz>
+For questions about security, contact: <develop@gorigami.xyz>
