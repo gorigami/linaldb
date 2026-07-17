@@ -82,8 +82,20 @@ pub trait Connector: Send + Sync {
     /// Check if this connector can handle the given path/URI
     fn can_handle(&self, path: &str) -> bool;
 
-    /// Read the dataset from the given path
-    fn read_dataset(&self, path: &str) -> Result<(RecordBatch, DatasetLineage), ConnectorError>;
+    /// Read the dataset from the given path. `fields`, when `Some`,
+    /// explicitly picks which named fields/arrays to ingest from a source
+    /// that bundles several (e.g. an HDF5 file with arrays of different
+    /// shapes) — every named field must exist and be combinable into one
+    /// `RecordBatch`, or this returns a hard `ConnectorError` rather than
+    /// silently/loudly skipping anything, since the caller has explicitly
+    /// chosen what it wants. `None` keeps the connector's default behavior:
+    /// ingest everything that shares the first-encountered field's shape,
+    /// skip (with a `DatasetLineage` warning) anything that doesn't.
+    fn read_dataset(
+        &self,
+        path: &str,
+        fields: Option<&[String]>,
+    ) -> Result<(RecordBatch, DatasetLineage), ConnectorError>;
 
     /// Inspect the dataset to get its schema without reading all data
     fn inspect(&self, path: &str) -> Result<DatasetSchema, ConnectorError>;

@@ -134,6 +134,28 @@ impl Parser {
         Err(self.unexpected("string literal"))
     }
 
+    /// Parses `(name1, name2, ...)` — a parenthesized, comma-separated list
+    /// of identifiers. Used by `FIELDS (...)` in `IMPORT`/`USE DATASET
+    /// FROM`; generic enough to reuse anywhere else a plain name list shows
+    /// up.
+    pub(super) fn parse_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.eat(&Token::LParen)?;
+        let mut names = Vec::new();
+        loop {
+            if self.eof() || self.at(&Token::RParen) {
+                break;
+            }
+            names.push(self.eat_ident()?);
+            if self.at(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Token::RParen)?;
+        Ok(names)
+    }
+
     fn eat_int(&mut self) -> Result<i64, ParseError> {
         if matches!(self.peek(), Some(Token::Int(_))) {
             if let Some(Token::Int(n)) = self.advance() {

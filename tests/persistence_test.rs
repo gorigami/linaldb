@@ -379,7 +379,7 @@ fn test_import_dataset_hdf5_round_trip() {
     let storage = ParquetStorage::new(temp_dir);
 
     let (batch, lineage) = Hdf5Connector
-        .read_dataset("test_data.h5")
+        .read_dataset("test_data.h5", None)
         .expect("test_data.h5 fixture must exist (cargo run --example gen_test_data)");
 
     let metadata = DatasetMetadata::new(

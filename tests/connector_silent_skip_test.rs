@@ -50,7 +50,7 @@ fn test_hdf5_shape_mismatch_produces_warning_not_silent_drop() {
         .unwrap();
     drop(file);
 
-    let (batch, lineage) = Hdf5Connector.read_dataset(path_str).unwrap();
+    let (batch, lineage) = Hdf5Connector.read_dataset(path_str, None).unwrap();
 
     // Exactly one of the two datasets survives (whichever HDF5 iterates
     // first); the other must be reported as a warning, not silently gone.
@@ -129,7 +129,7 @@ fn test_npz_dtype_mismatch_produces_warning_not_silent_drop() {
     writer.add_array("invalid_int", &invalid).unwrap();
     writer.finish().unwrap();
 
-    let (batch, lineage) = NumpyConnector.read_dataset(path_str).unwrap();
+    let (batch, lineage) = NumpyConnector.read_dataset(path_str, None).unwrap();
 
     assert_eq!(batch.num_columns(), 1);
     assert_eq!(
@@ -159,7 +159,7 @@ fn test_npz_length_mismatch_produces_warning_not_silent_drop() {
     writer.add_array("array_b", &b).unwrap();
     writer.finish().unwrap();
 
-    let (batch, lineage) = NumpyConnector.read_dataset(path_str).unwrap();
+    let (batch, lineage) = NumpyConnector.read_dataset(path_str, None).unwrap();
 
     assert_eq!(batch.num_columns() + lineage.warnings.len(), 2);
     assert_eq!(batch.num_columns(), 1);
@@ -212,7 +212,7 @@ fn test_zarr_shape_mismatch_produces_warning_not_silent_drop() {
         .store_array_subset_elements(&ArraySubset::new_with_shape(vec![10]), &data_b)
         .unwrap();
 
-    let (batch, lineage) = ZarrConnector.read_dataset(path_str).unwrap();
+    let (batch, lineage) = ZarrConnector.read_dataset(path_str, None).unwrap();
 
     assert_eq!(batch.num_columns() + lineage.warnings.len(), 2);
     assert_eq!(batch.num_columns(), 1);

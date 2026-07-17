@@ -33,7 +33,7 @@ fn test_hdf5_2d_shape_preserved_in_tensor() {
     ds.write(&data).unwrap();
     drop(file);
 
-    let (batch, _lineage) = Hdf5Connector.read_dataset(path_str).unwrap();
+    let (batch, _lineage) = Hdf5Connector.read_dataset(path_str, None).unwrap();
     let tensors = record_batch_to_tensors(&batch).unwrap();
 
     assert_eq!(tensors.len(), 1);
@@ -56,7 +56,7 @@ fn test_numpy_2d_shape_preserved_in_tensor() {
     let data = sample_4x3();
     ndarray_npy::write_npy(path_str, &data).unwrap();
 
-    let (batch, _lineage) = NumpyConnector.read_dataset(path_str).unwrap();
+    let (batch, _lineage) = NumpyConnector.read_dataset(path_str, None).unwrap();
     let tensors = record_batch_to_tensors(&batch).unwrap();
 
     assert_eq!(tensors.len(), 1);
@@ -128,7 +128,7 @@ fn test_hdf5_3d_shape_preserved_at_tensor_level_but_not_materializable() {
     ds.write(&data).unwrap();
     drop(file);
 
-    let (batch, _lineage) = Hdf5Connector.read_dataset(path_str).unwrap();
+    let (batch, _lineage) = Hdf5Connector.read_dataset(path_str, None).unwrap();
     let tensors = record_batch_to_tensors(&batch).unwrap();
 
     assert_eq!(tensors.len(), 1);
