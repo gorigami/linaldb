@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.58] - 2026-07-17
+
+### Fixed — HDF5/NPZ/Zarr connectors silently dropped fields with no warning
+
+Found while auditing all four connectors for issues similar to v0.1.55/
+v0.1.56: the HDF5, NPZ, and Zarr connectors all tracked the expected
+element count from the first dataset/array they happened to iterate, then
+silently dropped every subsequent one that didn't match — either a real
+shape/length mismatch, or a dtype `read` failure — with zero warning,
+while `IMPORT`/`USE DATASET FROM` still reported success. Verified
+empirically: a real HDF5 file with a `(5, 3)` matrix and a `(7,)` vector
+ingested as a single-column dataset, the vector silently gone with no
+indication. Real scientific files routinely bundle arrays of different
+shapes (data + labels + metadata), so this could silently discard most of
+a file's actual content.
+
+Fixed by threading a `warnings: Vec<String>` through each connector into
+the existing `DatasetLineage` (new `DatasetLineage::warnings` field +
+`add_warning`), surfaced immediately: `import_dataset_core` appends
+warnings to its success `Message`; `use_dataset_core` prints them to
+stderr (its `DslOutput::Table` return has no message slot to carry them
+alongside the table). The Zarr connector additionally used to *abort the
+entire read* if any one array had an incompatible dtype (an unhandled `?`
+propagating out of `process_array`) — restructured to skip-with-warning
+like the other two connectors instead.
+
+### Fixed — connector `inspect()` reported stale/wrong shape
+
+All three connectors' `inspect()` hardcoded a flat
+`Shape::new(vec![batch.num_rows()])` for every field, never reading the
+shape-preservation metadata the v0.1.56 fix added — so it would misreport
+a genuinely multi-dimensional field's shape (e.g. `[12]` instead of the
+real `[4, 3]`), even though the ingestion path itself
+(`record_batch_to_tensors`) already got it right. Currently dead code
+(zero callers anywhere in the codebase today), but a landmine for whenever
+a `DESCRIBE`/preview command gets wired up to it. Fixed by extracting the
+shared shape-resolution logic into a new
+`core::connectors::resolve_shape_dims` helper, used by both
+`record_batch_to_tensors` (no behavior change there) and all three
+connectors' `inspect()`.
+
+New `tests/connector_silent_skip_test.rs` (6 tests: HDF5 shape mismatch,
+HDF5 + Numpy `inspect()` shape correctness, NPZ dtype mismatch, NPZ length
+mismatch, Zarr shape mismatch) and
+`tests/ingestion_test.rs::test_import_dataset_from_hdf5_surfaces_skip_warning`
+(end-to-end DSL-level check that the warning reaches the returned
+`Message`).
+
 ## [0.1.57] - 2026-07-17
 
 ### Added — end-to-end showcase example: real-data HDF5 digit classification

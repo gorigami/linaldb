@@ -16,14 +16,28 @@ pub struct LineageNode {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DatasetLineage {
     pub nodes: Vec<LineageNode>,
+    /// Non-fatal issues raised while building this lineage — e.g. a
+    /// connector silently skipping a field it couldn't read (unsupported
+    /// dtype) or reconcile (shape/length mismatch against the rest of the
+    /// file). `#[serde(default)]` so lineage.json files persisted before
+    /// this field existed still deserialize cleanly.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 impl DatasetLineage {
     pub fn new() -> Self {
-        Self { nodes: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            warnings: Vec::new(),
+        }
     }
 
     pub fn add_node(&mut self, node: LineageNode) {
         self.nodes.push(node);
+    }
+
+    pub fn add_warning(&mut self, msg: impl Into<String>) {
+        self.warnings.push(msg.into());
     }
 }

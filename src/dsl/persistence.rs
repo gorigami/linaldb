@@ -415,12 +415,28 @@ fn use_dataset_core(
             msg: format!("No connector found for path: {}", path_str),
         })?;
 
-    let (batch, _lineage) = connector
+    let (batch, lineage) = connector
         .read_dataset(path_str)
         .map_err(|e| DslError::Parse {
             line: line_no,
             msg: format!("Connector failed: {}", e),
         })?;
+
+    // read_dataset can skip individual fields it couldn't reconcile
+    // (unsupported dtype, shape/length mismatch against the rest of the
+    // file) — DslOutput::Table has no message slot to carry this alongside
+    // the returned table, so surface it on stderr right now rather than
+    // losing it silently.
+    if !lineage.warnings.is_empty() {
+        eprintln!(
+            "Warning: {} field(s) skipped while ingesting '{}':",
+            lineage.warnings.len(),
+            path_str
+        );
+        for w in &lineage.warnings {
+            eprintln!("  - {}", w);
+        }
+    }
 
     let tensors = record_batch_to_tensors(&batch).map_err(|e| DslError::Parse {
         line: line_no,
@@ -528,10 +544,21 @@ fn import_dataset_core(
             msg: format!("Failed to save legacy metadata: {}", e),
         })?;
 
-    Ok(DslOutput::Message(format!(
+    let mut msg = format!(
         "Imported dataset '{}' and persisted to {}",
         ds_name, storage_path
-    )))
+    );
+    if !lineage.warnings.is_empty() {
+        msg.push_str(&format!(
+            "\nWarning: {} field(s) skipped during import:",
+            lineage.warnings.len()
+        ));
+        for w in &lineage.warnings {
+            msg.push_str(&format!("\n  - {}", w));
+        }
+    }
+
+    Ok(DslOutput::Message(msg))
 }
 
 fn export_csv_core(

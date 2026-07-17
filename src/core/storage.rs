@@ -626,7 +626,6 @@ pub fn arrow_array_to_f32_vec(array: &ArrayRef) -> Result<Vec<f32>, StorageError
 /// Convert RecordBatch to a list of named Tensors
 pub fn record_batch_to_tensors(batch: &RecordBatch) -> Result<Vec<(String, Tensor)>, StorageError> {
     let mut tensors = Vec::new();
-    let num_rows = batch.num_rows();
 
     for field in batch.schema().fields() {
         let col_name = field.name();
@@ -640,9 +639,7 @@ pub fn record_batch_to_tensors(batch: &RecordBatch) -> Result<Vec<(String, Tenso
         // consistent with the actual data length, otherwise fall back to
         // the flat-vector assumption (also covers relational/CSV imports,
         // which never attach shape metadata at all).
-        let dims = crate::core::connectors::read_shape_metadata(field)
-            .filter(|dims| dims.iter().product::<usize>() == data.len())
-            .unwrap_or_else(|| vec![num_rows]);
+        let dims = crate::core::connectors::resolve_shape_dims(field, data.len());
         let shape = Shape::new(dims);
         let id = TensorId::new();
         let metadata = TensorMetadata::new(id, Some("ingestion".to_string()));

@@ -1,4 +1,4 @@
-use crate::core::connectors::{field_with_shape, Connector, ConnectorError};
+use crate::core::connectors::{field_with_shape, resolve_shape_dims, Connector, ConnectorError};
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
@@ -31,8 +31,16 @@ impl Connector for Hdf5Connector {
         let mut columns = Vec::new();
         let mut fields = Vec::new();
         let mut num_rows = 0;
+        let mut warnings = Vec::new();
 
-        self.visit_group(&file, "", &mut fields, &mut columns, &mut num_rows)?;
+        self.visit_group(
+            &file,
+            "",
+            &mut fields,
+            &mut columns,
+            &mut num_rows,
+            &mut warnings,
+        )?;
 
         if fields.is_empty() {
             return Err(ConnectorError::Parse(
@@ -52,6 +60,7 @@ impl Connector for Hdf5Connector {
             parents: vec![],
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
         });
+        lineage.warnings = warnings;
 
         Ok((batch, lineage))
     }
@@ -64,8 +73,8 @@ impl Connector for Hdf5Connector {
             .fields()
             .iter()
             .map(|f| {
-                let shape = Shape::new(vec![batch.num_rows()]);
-                ColumnSchema::new(f.name().clone(), ValueType::Float, shape)
+                let dims = resolve_shape_dims(f, batch.num_rows());
+                ColumnSchema::new(f.name().clone(), ValueType::Float, Shape::new(dims))
             })
             .collect();
 
@@ -81,6 +90,7 @@ impl Hdf5Connector {
         fields: &mut Vec<Field>,
         columns: &mut Vec<ArrayRef>,
         num_rows: &mut usize,
+        warnings: &mut Vec<String>,
     ) -> Result<(), ConnectorError> {
         // Visit datasets in this group
         for member_name in group
@@ -95,9 +105,9 @@ impl Hdf5Connector {
 
             // Check if it's a dataset or a group
             if let Ok(ds) = group.dataset(&member_name) {
-                self.process_dataset(&ds, &name, fields, columns, num_rows)?;
+                self.process_dataset(&ds, &name, fields, columns, num_rows, warnings)?;
             } else if let Ok(subgroup) = group.group(&member_name) {
-                self.visit_group(&subgroup, &name, fields, columns, num_rows)?;
+                self.visit_group(&subgroup, &name, fields, columns, num_rows, warnings)?;
             }
         }
         Ok(())
@@ -110,6 +120,7 @@ impl Hdf5Connector {
         fields: &mut Vec<Field>,
         columns: &mut Vec<ArrayRef>,
         num_row_count: &mut usize,
+        warnings: &mut Vec<String>,
     ) -> Result<(), ConnectorError> {
         // We only support numeric datasets for now. The underlying Arrow
         // column is always a flat 1D array (LINAL's connector output
@@ -124,8 +135,14 @@ impl Hdf5Connector {
                 // Try reading as f64 and casting
                 match ds.read_raw::<f64>() {
                     Ok(v) => v.into_iter().map(|x| x as f32).collect(),
-                    Err(_) => {
-                        // Skip non-numeric or incompatible datasets
+                    Err(e) => {
+                        // Skip non-numeric or incompatible datasets, but say
+                        // so -- silently dropping a real dataset with no
+                        // indication at all is worse than a loud skip.
+                        warnings.push(format!(
+                            "Skipped HDF5 dataset '{name}': not readable as a numeric \
+                             (float-convertible) array ({e})"
+                        ));
                         return Ok(());
                     }
                 }
@@ -135,9 +152,18 @@ impl Hdf5Connector {
         if *num_row_count == 0 {
             *num_row_count = data.len();
         } else if data.len() != *num_row_count {
-            // Inconsistent length, skip or error?
-            // In LINAL, consistency is key, but HDF5 datasets often have different shapes.
-            // For now, we skip if inconsistent to allow specialized h5ad handling later.
+            // Inconsistent flattened length vs. the other datasets already
+            // ingested from this file -- can't combine into one RecordBatch
+            // (Arrow columns in a batch must share a row count), so this
+            // dataset is skipped. HDF5 files commonly bundle arrays of
+            // different shapes (data + labels + metadata), so warn loudly
+            // rather than silently dropping real data.
+            warnings.push(format!(
+                "Skipped HDF5 dataset '{name}': has {} element(s), expected {} \
+                 (doesn't match other datasets already ingested from this file)",
+                data.len(),
+                *num_row_count
+            ));
             return Ok(());
         }
 

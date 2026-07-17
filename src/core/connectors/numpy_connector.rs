@@ -1,4 +1,4 @@
-use crate::core::connectors::{field_with_shape, Connector, ConnectorError};
+use crate::core::connectors::{field_with_shape, resolve_shape_dims, Connector, ConnectorError};
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
@@ -47,8 +47,8 @@ impl Connector for NumpyConnector {
             .fields()
             .iter()
             .map(|f| {
-                let shape = Shape::new(vec![batch.num_rows()]);
-                ColumnSchema::new(f.name().clone(), ValueType::Float, shape)
+                let dims = resolve_shape_dims(f, batch.num_rows());
+                ColumnSchema::new(f.name().clone(), ValueType::Float, Shape::new(dims))
             })
             .collect();
 
@@ -73,6 +73,7 @@ impl NumpyConnector {
         let mut fields = Vec::new();
         let mut columns: Vec<ArrayRef> = Vec::new();
         let mut num_rows = 0;
+        let mut warnings = Vec::new();
 
         let names: Vec<String> = npz
             .names()
@@ -84,19 +85,39 @@ impl NumpyConnector {
         for name in names {
             // Using a temporary result to help type inference
             let result: Result<ArrayD<f32>, _> = npz.by_name(&name);
-            if let Ok(arr) = result {
-                let len = arr.len();
-                if num_rows == 0 {
-                    num_rows = len;
-                } else if len != num_rows {
+            let arr = match result {
+                Ok(arr) => arr,
+                Err(e) => {
+                    // Not readable as f32 (e.g. an int/bool-typed array) --
+                    // skip it, but say so. Silently dropping a real array
+                    // with no indication at all is worse than a loud skip.
+                    warnings.push(format!(
+                        "Skipped NPZ array '{name}': not readable as an f32 array ({e})"
+                    ));
                     continue;
                 }
+            };
 
-                let dims = arr.shape().to_vec();
-                fields.push(field_with_shape(&name, DataType::Float32, false, &dims));
-                let data: Vec<f32> = arr.iter().cloned().collect();
-                columns.push(Arc::new(Float32Array::from(data)));
+            let len = arr.len();
+            if num_rows == 0 {
+                num_rows = len;
+            } else if len != num_rows {
+                // Inconsistent flattened length vs. the other arrays already
+                // ingested from this file -- can't combine into one
+                // RecordBatch, so this array is skipped. NPZ archives
+                // commonly bundle arrays of different shapes, so warn
+                // loudly rather than silently dropping real data.
+                warnings.push(format!(
+                    "Skipped NPZ array '{name}': has {len} element(s), expected {num_rows} \
+                     (doesn't match other arrays already ingested from this file)"
+                ));
+                continue;
             }
+
+            let dims = arr.shape().to_vec();
+            fields.push(field_with_shape(&name, DataType::Float32, false, &dims));
+            let data: Vec<f32> = arr.iter().cloned().collect();
+            columns.push(Arc::new(Float32Array::from(data)));
         }
 
         if fields.is_empty() {
@@ -117,6 +138,7 @@ impl NumpyConnector {
             parents: vec![],
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
         });
+        lineage.warnings = warnings;
 
         Ok((batch, lineage))
     }
