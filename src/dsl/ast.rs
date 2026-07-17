@@ -478,6 +478,16 @@ pub struct ImportStmt {
     pub ephemeral: bool,
     pub path: String,
     pub name: Option<String>,
+    /// Optional `FIELDS (name1, name2, ...)` clause: explicitly pick which
+    /// named fields/arrays to ingest from a source that contains several
+    /// (e.g. an HDF5 file bundling arrays of different shapes). `None`
+    /// keeps the connector's default behavior (first-length-group wins,
+    /// everything else is skipped with a warning); `Some` makes the
+    /// selection explicit and turns "requested fields don't share a
+    /// combinable shape" into a hard error instead of a silent/warned skip,
+    /// since the user has no fallback expectation once they've named exactly
+    /// what they want.
+    pub fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]

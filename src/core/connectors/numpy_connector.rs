@@ -25,7 +25,11 @@ impl Connector for NumpyConnector {
         )
     }
 
-    fn read_dataset(&self, path: &str) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
+    fn read_dataset(
+        &self,
+        path: &str,
+        fields: Option<&[String]>,
+    ) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
         let path_obj = Path::new(path);
         let ext = path_obj
             .extension()
@@ -33,14 +37,14 @@ impl Connector for NumpyConnector {
             .ok_or_else(|| ConnectorError::Parse("Missing file extension".to_string()))?;
 
         if ext == "npz" {
-            self.read_npz(path)
+            self.read_npz(path, fields)
         } else {
-            self.read_npy(path)
+            self.read_npy(path, fields)
         }
     }
 
     fn inspect(&self, path: &str) -> Result<DatasetSchema, ConnectorError> {
-        let (batch, _) = self.read_dataset(path)?;
+        let (batch, _) = self.read_dataset(path, None)?;
 
         let fields = batch
             .schema()
@@ -57,7 +61,21 @@ impl Connector for NumpyConnector {
 }
 
 impl NumpyConnector {
-    fn read_npy(&self, path: &str) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
+    fn read_npy(
+        &self,
+        path: &str,
+        fields: Option<&[String]>,
+    ) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
+        if let Some(names) = fields {
+            if names.iter().any(|n| n != "array") {
+                return Err(ConnectorError::Parse(format!(
+                    "FIELDS: a single .npy file only has one array, named \"array\" \
+                     (requested: {})",
+                    names.join(", ")
+                )));
+            }
+        }
+
         let arr: ArrayD<f32> = ndarray_npy::read_npy(path)
             .map_err(|e| ConnectorError::Parse(format!("Failed to read NPY: {}", e)))?;
 
@@ -65,15 +83,20 @@ impl NumpyConnector {
         Ok((batch, lineage))
     }
 
-    fn read_npz(&self, path: &str) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
+    fn read_npz(
+        &self,
+        path: &str,
+        fields: Option<&[String]>,
+    ) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
         let file = File::open(path)?;
         let mut npz = ndarray_npy::NpzReader::new(file)
             .map_err(|e| ConnectorError::Parse(format!("Failed to open NPZ: {}", e)))?;
 
-        let mut fields = Vec::new();
+        let mut out_fields = Vec::new();
         let mut columns: Vec<ArrayRef> = Vec::new();
         let mut num_rows = 0;
         let mut warnings = Vec::new();
+        let mut found = std::collections::HashSet::new();
 
         let names: Vec<String> = npz
             .names()
@@ -83,17 +106,26 @@ impl NumpyConnector {
             .collect();
 
         for name in names {
+            let requested = matches!(fields, Some(names) if names.iter().any(|n| n == &name));
+            if fields.is_some() && !requested {
+                // Not one of the explicitly-requested arrays -- skip
+                // silently, the caller chose not to include it.
+                continue;
+            }
+
             // Using a temporary result to help type inference
             let result: Result<ArrayD<f32>, _> = npz.by_name(&name);
             let arr = match result {
                 Ok(arr) => arr,
                 Err(e) => {
-                    // Not readable as f32 (e.g. an int/bool-typed array) --
-                    // skip it, but say so. Silently dropping a real array
-                    // with no indication at all is worse than a loud skip.
-                    warnings.push(format!(
-                        "Skipped NPZ array '{name}': not readable as an f32 array ({e})"
-                    ));
+                    let msg = format!("NPZ array '{name}': not readable as an f32 array ({e})");
+                    if requested {
+                        return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+                    }
+                    // Not explicitly requested: skip, but say so --
+                    // silently dropping a real array with no indication at
+                    // all is worse than a loud skip.
+                    warnings.push(format!("Skipped {msg}"));
                     continue;
                 }
             };
@@ -102,31 +134,53 @@ impl NumpyConnector {
             if num_rows == 0 {
                 num_rows = len;
             } else if len != num_rows {
+                let msg = format!(
+                    "NPZ array '{name}': has {len} element(s), expected {num_rows} \
+                     (doesn't match other arrays already ingested from this file)"
+                );
+                if requested {
+                    // Explicitly requested alongside others that don't
+                    // share its shape -- no fallback expectation once
+                    // fields are named explicitly.
+                    return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+                }
                 // Inconsistent flattened length vs. the other arrays already
                 // ingested from this file -- can't combine into one
                 // RecordBatch, so this array is skipped. NPZ archives
                 // commonly bundle arrays of different shapes, so warn
                 // loudly rather than silently dropping real data.
-                warnings.push(format!(
-                    "Skipped NPZ array '{name}': has {len} element(s), expected {num_rows} \
-                     (doesn't match other arrays already ingested from this file)"
-                ));
+                warnings.push(format!("Skipped {msg}"));
                 continue;
             }
 
+            found.insert(name.clone());
             let dims = arr.shape().to_vec();
-            fields.push(field_with_shape(&name, DataType::Float32, false, &dims));
+            out_fields.push(field_with_shape(&name, DataType::Float32, false, &dims));
             let data: Vec<f32> = arr.iter().cloned().collect();
             columns.push(Arc::new(Float32Array::from(data)));
         }
 
-        if fields.is_empty() {
+        if let Some(requested) = fields {
+            let missing: Vec<&String> = requested.iter().filter(|n| !found.contains(*n)).collect();
+            if !missing.is_empty() {
+                return Err(ConnectorError::Parse(format!(
+                    "FIELDS: array(s) not found in NPZ file '{path}': {}",
+                    missing
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+
+        if out_fields.is_empty() {
             return Err(ConnectorError::Parse(
                 "No valid f32 arrays found in NPZ".to_string(),
             ));
         }
 
-        let schema = Arc::new(Schema::new(fields));
+        let schema = Arc::new(Schema::new(out_fields));
         let batch = RecordBatch::try_new(schema, columns)?;
 
         let mut lineage = DatasetLineage::new();

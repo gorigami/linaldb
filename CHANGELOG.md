@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.59] - 2026-07-17
+
+### Added — `FIELDS (...)` clause for explicit multi-shape ingestion
+
+Follow-up to v0.1.58: that fix made the connectors *warn* instead of
+*silently* dropping fields with an incompatible shape/dtype, but ingestion
+was still not dynamic — a source bundling fields of different shapes
+still only got the first-encountered shape-group, with the rest dropped
+(now loudly). `IMPORT DATASET FROM`/`USE DATASET FROM` now accept an
+optional `FIELDS (name1, name2, ...)` clause to explicitly pick which
+named fields/columns/arrays to ingest, across all four connectors
+(CSV, HDF5, Numpy, Zarr):
+
+```sql
+USE DATASET FROM "vectors.h5" AS d FIELDS (labels)
+```
+
+Without `FIELDS`, behavior is unchanged from v0.1.58 (first-shape-group
+wins, the rest are skipped with a warning). With `FIELDS`, only the named
+fields are read, and:
+- a name that doesn't exist in the source is a hard `ConnectorError`
+  (not an empty/partial result), and
+- named fields that don't end up sharing one row count is also a hard
+  error, rather than a silent/warned skip — once the caller has named
+  exactly what they want, there's no reasonable fallback behavior.
+
+`Connector::read_dataset` gained a `fields: Option<&[String]>` parameter
+(a breaking change to the trait, contained entirely within this 0.x
+release). CSV's `FIELDS` support is a straightforward column projection
+(`RecordBatch::project`); it was never affected by the v0.1.58 bug since
+CSV has no shape ambiguity, but gets the same selection syntax for
+consistency.
+
+New `tests/connector_fields_selection_test.rs` (10 tests: parser coverage
+for both statements with/without `FIELDS`, HDF5 field selection +
+missing-name error + incompatible-lengths error, Zarr field selection,
+CSV projection + missing-column error, and an end-to-end DSL-level test).
+
 ## [0.1.58] - 2026-07-17
 
 ### Fixed — HDF5/NPZ/Zarr connectors silently dropped fields with no warning

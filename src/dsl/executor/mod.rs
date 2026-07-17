@@ -377,9 +377,14 @@ pub fn execute_statement(
 
         Statement::List(s) => persistence::list_typed(db, &s.target, line_no),
 
-        Statement::Import(s) => {
-            persistence::import_typed(db, s.ephemeral, &s.path, s.name.as_deref(), line_no)
-        }
+        Statement::Import(s) => persistence::import_typed(
+            db,
+            s.ephemeral,
+            &s.path,
+            s.name.as_deref(),
+            s.fields.as_deref(),
+            line_no,
+        ),
 
         Statement::ImportCsv(s) => {
             persistence::import_csv_typed(db, &s.path, s.name.as_deref(), line_no)

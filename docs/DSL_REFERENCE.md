@@ -427,10 +427,11 @@ SELECT SUBSTR(name, 1, 3) AS prefix, UPPER(TRIM(email)) AS clean_email FROM user
 
 Load and save data across different formats.
 
-- `USE DATASET FROM "path" [AS name]`: Load external data (CSV, HDF5, Numpy, Zarr) into the current session as ephemeral tensors and a dataset view.
+- `USE DATASET FROM "path" [AS name] [FIELDS (name1, name2, ...)]`: Load external data (CSV, HDF5, Numpy, Zarr) into the current session as ephemeral tensors and a dataset view.
   - Automatically detects format from file extension (`.csv`, `.h5`, `.npy`, `.npz`, `.zarr`).
-- `IMPORT DATASET FROM "path" [AS name]`: Load and normalize external data into a persistent LINAL Dataset Package.
-  - Supports CSV, HDF5, Numpy, and Zarr.
+  - `FIELDS (...)`: explicitly pick which named columns/datasets/arrays to ingest, by exact name. Without it, a source that bundles fields of different shapes (e.g. an HDF5 file with a `(10, 64)` array and a `(7,)` array) keeps whichever fields share the first-encountered one's shape and silently-but-loudly skips the rest (reported as a warning). With `FIELDS`, only the named fields are read — a name that doesn't exist in the source, or a set of named fields that can't share one row count, is a hard error instead of a skip, since you've said exactly what you want.
+- `IMPORT DATASET FROM "path" [AS name] [FIELDS (name1, name2, ...)]`: Load and normalize external data into a persistent LINAL Dataset Package.
+  - Supports CSV, HDF5, Numpy, and Zarr. `FIELDS (...)` works the same way as for `USE DATASET FROM` above.
 - `IMPORT CSV FROM "path" AS name`: (Legacy) Auto-infer schema and load CSV into a relational dataset.
 - `EXPORT [CSV] name TO "path"`: Save dataset to CSV. The `CSV` keyword is optional — `EXPORT name TO "path"` behaves identically.
 - `SAVE DATASET name [TO "path"]`: Persist to Parquet (includes metadata/lineage).
@@ -451,6 +452,18 @@ LINAL supports direct ingestion of multi-dimensional data:
 - **HDF5**: Ingests datasets from groups; flattens them into columns.
 - **Numpy**: Supports `.npy` (single vector/matrix) and `.npz` (named collections).
 - **Zarr**: Supports V3 Zarr stores with recursive group traversal.
+
+A source file can bundle several fields of different shapes (e.g. an HDF5
+file with both a `(10, 64)` data matrix and a `(10,)` label vector). Since
+one LINAL dataset from `USE`/`IMPORT DATASET FROM` is one row-count-aligned
+table, only fields that share a common row count can end up in the same
+result. Use `FIELDS (...)` to pick exactly which ones:
+
+```sql
+-- Only the "labels" field, even though the file also has a differently-
+-- shaped "embeddings" field.
+USE DATASET FROM "vectors.h5" AS d FIELDS (labels)
+```
 
 ---
 

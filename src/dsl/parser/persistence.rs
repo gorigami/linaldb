@@ -84,7 +84,7 @@ impl Parser {
         Ok(Statement::List(ListStmt { target }))
     }
 
-    // IMPORT DATASET FROM <path> [AS <name>]
+    // IMPORT DATASET FROM <path> [AS <name>] [FIELDS (name1, name2, ...)]
     // IMPORT CSV FROM <path> [AS <name>]
     pub(super) fn parse_import(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Import)?;
@@ -109,10 +109,17 @@ impl Parser {
         } else {
             None
         };
+        let fields = if self.at_ident("FIELDS") {
+            self.advance();
+            Some(self.parse_ident_list()?)
+        } else {
+            None
+        };
         Ok(Statement::Import(ImportStmt {
             ephemeral: false,
             path,
             name,
+            fields,
         }))
     }
 
@@ -129,7 +136,7 @@ impl Parser {
     }
 
     // USE <database_name>
-    // USE DATASET FROM <path> [AS <name>]  (ephemeral import)
+    // USE DATASET FROM <path> [AS <name>] [FIELDS (...)]  (ephemeral import)
     pub(super) fn parse_use(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Use)?;
         match self.peek() {
@@ -143,10 +150,17 @@ impl Parser {
                 } else {
                     None
                 };
+                let fields = if self.at_ident("FIELDS") {
+                    self.advance();
+                    Some(self.parse_ident_list()?)
+                } else {
+                    None
+                };
                 Ok(Statement::Import(ImportStmt {
                     ephemeral: true,
                     path,
                     name,
+                    fields,
                 }))
             }
             Some(Token::Ident(_)) => Ok(Statement::UseDatabase(UseDatabaseStmt {

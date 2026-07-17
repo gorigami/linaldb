@@ -405,6 +405,7 @@ fn use_dataset_core(
     db: &mut TensorDb,
     path_str: &str,
     name_override: Option<&str>,
+    fields: Option<&[String]>,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     let registry = get_connector_registry();
@@ -415,12 +416,13 @@ fn use_dataset_core(
             msg: format!("No connector found for path: {}", path_str),
         })?;
 
-    let (batch, lineage) = connector
-        .read_dataset(path_str)
-        .map_err(|e| DslError::Parse {
-            line: line_no,
-            msg: format!("Connector failed: {}", e),
-        })?;
+    let (batch, lineage) =
+        connector
+            .read_dataset(path_str, fields)
+            .map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: format!("Connector failed: {}", e),
+            })?;
 
     // read_dataset can skip individual fields it couldn't reconcile
     // (unsupported dtype, shape/length mismatch against the rest of the
@@ -490,6 +492,7 @@ fn import_dataset_core(
     db: &mut TensorDb,
     path_str: &str,
     name_override: Option<&str>,
+    fields: Option<&[String]>,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     let registry = get_connector_registry();
@@ -500,12 +503,13 @@ fn import_dataset_core(
             msg: format!("No connector found for path: {}", path_str),
         })?;
 
-    let (batch, lineage) = connector
-        .read_dataset(path_str)
-        .map_err(|e| DslError::Parse {
-            line: line_no,
-            msg: format!("Connector failed: {}", e),
-        })?;
+    let (batch, lineage) =
+        connector
+            .read_dataset(path_str, fields)
+            .map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: format!("Connector failed: {}", e),
+            })?;
 
     let ds_name = name_override.unwrap_or_else(|| {
         Path::new(path_str)
@@ -743,12 +747,13 @@ pub fn import_typed(
     ephemeral: bool,
     path: &str,
     name_override: Option<&str>,
+    fields: Option<&[String]>,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     if ephemeral {
-        use_dataset_core(db, path, name_override, line_no)
+        use_dataset_core(db, path, name_override, fields, line_no)
     } else {
-        import_dataset_core(db, path, name_override, line_no)
+        import_dataset_core(db, path, name_override, fields, line_no)
     }
 }
 

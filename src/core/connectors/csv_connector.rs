@@ -25,7 +25,11 @@ impl Connector for CsvConnector {
         path.to_lowercase().ends_with(".csv")
     }
 
-    fn read_dataset(&self, path: &str) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
+    fn read_dataset(
+        &self,
+        path: &str,
+        fields: Option<&[String]>,
+    ) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
         let file = fs::File::open(path)?;
         let format = csv::reader::Format::default().with_header(true);
         let (arrow_schema, _) = format.infer_schema(file, Some(100))?;
@@ -47,7 +51,21 @@ impl Connector for CsvConnector {
 
         // Combine batches into one for simplicity in this MVP
         // In a real scenario, we might want to keep them chunked
-        let combined_batch = concat_batches(&arrow_schema_arc, batches.iter())?;
+        let mut combined_batch = concat_batches(&arrow_schema_arc, batches.iter())?;
+
+        if let Some(names) = fields {
+            let indices = names
+                .iter()
+                .map(|name| {
+                    combined_batch.schema().index_of(name).map_err(|_| {
+                        ConnectorError::Parse(format!(
+                            "FIELDS: column '{name}' not found in CSV file '{path}'"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            combined_batch = combined_batch.project(&indices)?;
+        }
 
         let mut lineage = DatasetLineage::new();
         lineage.add_node(LineageNode {

@@ -12,7 +12,7 @@ async fn test_numpy_ingestion() {
         .expect("Numpy connector should be found for .npy");
 
     let (batch, _lineage) = connector
-        .read_dataset(path)
+        .read_dataset(path, None)
         .expect("Should read NPY dataset");
 
     assert_eq!(batch.num_columns(), 1);
@@ -30,7 +30,7 @@ async fn test_hdf5_ingestion() {
         .expect("HDF5 connector should be found for .h5");
 
     let (batch, _lineage) = connector
-        .read_dataset(path)
+        .read_dataset(path, None)
         .expect("Should read HDF5 dataset");
 
     assert!(batch.num_columns() >= 1);
@@ -48,7 +48,7 @@ async fn test_zarr_ingestion() {
         .expect("Zarr connector should be found for .zarr");
 
     let (batch, _lineage) = connector
-        .read_dataset(path)
+        .read_dataset(path, None)
         .expect("Should read Zarr dataset");
 
     assert!(batch.num_columns() >= 1);

@@ -11,6 +11,38 @@ use std::sync::Arc;
 
 pub struct Hdf5Connector;
 
+/// Accumulates results across a recursive `visit_group` walk. Bundled into
+/// one struct (rather than several separate `&mut` params) to keep
+/// `visit_group`/`process_dataset`'s arg count reasonable, and to carry the
+/// optional `FIELDS (...)` selection through the traversal.
+struct IngestAccumulator<'a> {
+    fields: Vec<Field>,
+    columns: Vec<ArrayRef>,
+    num_rows: usize,
+    warnings: Vec<String>,
+    /// `Some` when the caller passed an explicit `FIELDS (...)` list:
+    /// unlisted datasets are skipped silently (the user chose not to
+    /// include them), and a listed dataset that can't be read or doesn't
+    /// share the other listed datasets' shape is a hard error rather than
+    /// a warned skip, since the caller has no fallback expectation once
+    /// they've named exactly what they want.
+    requested: Option<&'a [String]>,
+    found: std::collections::HashSet<String>,
+}
+
+impl<'a> IngestAccumulator<'a> {
+    fn new(requested: Option<&'a [String]>) -> Self {
+        Self {
+            fields: Vec::new(),
+            columns: Vec::new(),
+            num_rows: 0,
+            warnings: Vec::new(),
+            requested,
+            found: std::collections::HashSet::new(),
+        }
+    }
+}
+
 impl Connector for Hdf5Connector {
     fn name(&self) -> &str {
         "hdf5"
@@ -24,32 +56,42 @@ impl Connector for Hdf5Connector {
         )
     }
 
-    fn read_dataset(&self, path: &str) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
+    fn read_dataset(
+        &self,
+        path: &str,
+        fields: Option<&[String]>,
+    ) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
         let file = File::open(path)
             .map_err(|e| ConnectorError::Io(std::io::Error::other(e.to_string())))?;
 
-        let mut columns = Vec::new();
-        let mut fields = Vec::new();
-        let mut num_rows = 0;
-        let mut warnings = Vec::new();
+        let mut acc = IngestAccumulator::new(fields);
+        self.visit_group(&file, "", &mut acc)?;
 
-        self.visit_group(
-            &file,
-            "",
-            &mut fields,
-            &mut columns,
-            &mut num_rows,
-            &mut warnings,
-        )?;
+        if let Some(requested) = fields {
+            let missing: Vec<&String> = requested
+                .iter()
+                .filter(|n| !acc.found.contains(*n))
+                .collect();
+            if !missing.is_empty() {
+                return Err(ConnectorError::Parse(format!(
+                    "FIELDS: dataset(s) not found in HDF5 file '{path}': {}",
+                    missing
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
 
-        if fields.is_empty() {
+        if acc.fields.is_empty() {
             return Err(ConnectorError::Parse(
                 "No datasets found in HDF5 file".to_string(),
             ));
         }
 
-        let schema = Arc::new(Schema::new(fields));
-        let batch = RecordBatch::try_new(schema, columns)?;
+        let schema = Arc::new(Schema::new(acc.fields));
+        let batch = RecordBatch::try_new(schema, acc.columns)?;
 
         let mut lineage = DatasetLineage::new();
         lineage.add_node(crate::core::dataset::lineage::LineageNode {
@@ -60,13 +102,13 @@ impl Connector for Hdf5Connector {
             parents: vec![],
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
         });
-        lineage.warnings = warnings;
+        lineage.warnings = acc.warnings;
 
         Ok((batch, lineage))
     }
 
     fn inspect(&self, path: &str) -> Result<DatasetSchema, ConnectorError> {
-        let (batch, _) = self.read_dataset(path)?;
+        let (batch, _) = self.read_dataset(path, None)?;
 
         let fields = batch
             .schema()
@@ -87,10 +129,7 @@ impl Hdf5Connector {
         &self,
         group: &Group,
         prefix: &str,
-        fields: &mut Vec<Field>,
-        columns: &mut Vec<ArrayRef>,
-        num_rows: &mut usize,
-        warnings: &mut Vec<String>,
+        acc: &mut IngestAccumulator,
     ) -> Result<(), ConnectorError> {
         // Visit datasets in this group
         for member_name in group
@@ -105,9 +144,9 @@ impl Hdf5Connector {
 
             // Check if it's a dataset or a group
             if let Ok(ds) = group.dataset(&member_name) {
-                self.process_dataset(&ds, &name, fields, columns, num_rows, warnings)?;
+                self.process_dataset(&ds, &name, acc)?;
             } else if let Ok(subgroup) = group.group(&member_name) {
-                self.visit_group(&subgroup, &name, fields, columns, num_rows, warnings)?;
+                self.visit_group(&subgroup, &name, acc)?;
             }
         }
         Ok(())
@@ -117,11 +156,15 @@ impl Hdf5Connector {
         &self,
         ds: &Dataset,
         name: &str,
-        fields: &mut Vec<Field>,
-        columns: &mut Vec<ArrayRef>,
-        num_row_count: &mut usize,
-        warnings: &mut Vec<String>,
+        acc: &mut IngestAccumulator,
     ) -> Result<(), ConnectorError> {
+        let requested = matches!(acc.requested, Some(names) if names.iter().any(|n| n == name));
+        if acc.requested.is_some() && !requested {
+            // Not one of the explicitly-requested fields -- skip silently,
+            // the caller chose not to include it.
+            return Ok(());
+        }
+
         // We only support numeric datasets for now. The underlying Arrow
         // column is always a flat 1D array (LINAL's connector output
         // convention), but we stash the dataset's original shape as field
@@ -136,39 +179,53 @@ impl Hdf5Connector {
                 match ds.read_raw::<f64>() {
                     Ok(v) => v.into_iter().map(|x| x as f32).collect(),
                     Err(e) => {
-                        // Skip non-numeric or incompatible datasets, but say
-                        // so -- silently dropping a real dataset with no
-                        // indication at all is worse than a loud skip.
-                        warnings.push(format!(
-                            "Skipped HDF5 dataset '{name}': not readable as a numeric \
+                        let msg = format!(
+                            "HDF5 dataset '{name}': not readable as a numeric \
                              (float-convertible) array ({e})"
-                        ));
+                        );
+                        if requested {
+                            return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+                        }
+                        // Not explicitly requested: skip, but say so --
+                        // silently dropping a real dataset with no
+                        // indication at all is worse than a loud skip.
+                        acc.warnings.push(format!("Skipped {msg}"));
                         return Ok(());
                     }
                 }
             }
         };
 
-        if *num_row_count == 0 {
-            *num_row_count = data.len();
-        } else if data.len() != *num_row_count {
+        if acc.num_rows == 0 {
+            acc.num_rows = data.len();
+        } else if data.len() != acc.num_rows {
+            let msg = format!(
+                "HDF5 dataset '{name}': has {} element(s), expected {} \
+                 (doesn't match other datasets already ingested from this file)",
+                data.len(),
+                acc.num_rows
+            );
+            if requested {
+                // The caller explicitly asked for this field alongside
+                // others that don't share its shape -- can't silently
+                // drop it since there's no fallback expectation once
+                // fields are named explicitly.
+                return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+            }
             // Inconsistent flattened length vs. the other datasets already
             // ingested from this file -- can't combine into one RecordBatch
             // (Arrow columns in a batch must share a row count), so this
             // dataset is skipped. HDF5 files commonly bundle arrays of
             // different shapes (data + labels + metadata), so warn loudly
             // rather than silently dropping real data.
-            warnings.push(format!(
-                "Skipped HDF5 dataset '{name}': has {} element(s), expected {} \
-                 (doesn't match other datasets already ingested from this file)",
-                data.len(),
-                *num_row_count
-            ));
+            acc.warnings.push(format!("Skipped {msg}"));
             return Ok(());
         }
 
-        fields.push(field_with_shape(name, DataType::Float32, false, &shape));
-        columns.push(Arc::new(Float32Array::from(data)));
+        acc.found.insert(name.to_string());
+        acc.fields
+            .push(field_with_shape(name, DataType::Float32, false, &shape));
+        acc.columns.push(Arc::new(Float32Array::from(data)));
 
         Ok(())
     }
