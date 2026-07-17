@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.54] - 2026-07-17
+
+### Added — end-to-end showcase example: single-cell PBMC reference-based cell typing
+
+New `examples/pbmc_cell_typing.lnl` replicates a real single-cell RNA-seq
+analysis technique — reference-based "label transfer" / nearest-centroid
+classification, as used in tools like Seurat and SingleR — against
+synthetic PBMC marker-gene data (not downloaded; deterministically
+generated, fixed seed), with ground truth retained so the classifier's
+accuracy can be validated directly.
+
+Demonstrates nearly the full DSL feature surface in one coherent workflow:
+`Vector`-typed columns, a named pipeline for QC filtering, a vector index +
+index-accelerated similarity `JOIN` for classification, `ROW_NUMBER`/`RANK`
+window functions, CTEs and `FROM`-subqueries, an equi-`JOIN` against a
+small metadata table (the asymmetric-size case the v0.1.51 smaller-side
+hash join targets), `AVG_VEC` per-type expression centroids, `CASE`-based
+accuracy scoring, `MATMUL`/`TRANSPOSE` for a cell-type similarity matrix,
+and dataset persistence. A documented, simplified synthetic effect (a
+1.35x CD14 boost on sepsis-condition monocytes) is injected at data
+generation time so the differential-analysis step has a genuine,
+recoverable signal — not a claim about real measured magnitudes.
+
+Building this surfaced and fixed two real engine bugs, released
+separately: `CASE WHEN <comparison>` always taking the `ELSE` branch
+(v0.1.52) and `GROUP BY` silently dropping/misnaming aggregate columns
+when the `SELECT` list also had a `Computed` item (v0.1.53).
+
+New `tests/examples_cli_smoke_test.rs::test_example_pbmc_cell_typing_runs_clean`
+and a deeper `tests/examples_integration.rs::test_pbmc_cell_typing_integration`
+asserting on dataset row counts (240 raw cells, 237 after QC, 6 per-type
+profiles) and the vector index. Full suite passes, 0 failures.
+
+---
+
+## [0.1.53] - 2026-07-17
+
+### Fixed — GROUP BY silently dropped/misnamed aggregate columns when a Computed item was also in the SELECT list
+
+Found while building the PBMC cell-typing showcase example: `SELECT
+small.sid AS sid, small.cond AS cond, COUNT(*) AS n, AVG(big.val) AS
+avg_val FROM big JOIN small ON ... GROUP BY sid, cond` returned a 4-column
+result where the `n`/`avg_val` columns were silently replaced by duplicated
+`sid`/`cond` values — the actual aggregate results never appeared.
+
+Root cause: any qualified column with an alias (`t.col AS col`) — not just
+a genuine computed expression — parses as `SelectExpr::Computed`, which
+makes `execute_select`'s window/computed post-processing path run even
+when a `GROUP BY` is present (that path isn't exclusive to ungrouped
+queries, despite a comment added in v0.1.45/Track G3 assuming it was). That
+path's `agg_idx` counter (introduced in v0.1.45 to look up an aggregate's
+real output name instead of a hardcoded placeholder) assumed
+`base_schema.fields` were *only* the aggregate outputs, one per Aggregate
+`SelectExpr` in order — true only without a `GROUP BY`. With one,
+`LogicalPlan::Aggregate::schema()` puts the group-key fields first, so
+`agg_idx` pointed at the wrong fields entirely.
+
+Fixed by starting `agg_idx` at `s.group_by.len()` instead of `0`, so it
+correctly skips past the group-key fields before indexing into the
+aggregate portion of the schema.
+
+New `tests/group_by_with_computed_column_test.rs`: the exact
+qualified-alias-plus-JOIN-plus-GROUP-BY repro, a genuinely computed
+expression (`UPPER(...)`) alongside GROUP BY + an aggregate (confirming
+the bug wasn't specific to column qualifiers), and a guard test for the
+plain GROUP BY + aggregate case. Full suite passes, 0 failures.
+
+---
+
 ## [0.1.52] - 2026-07-17
 
 ### Fixed — CASE WHEN (and any comparison in a computed column or aggregate) silently always took the ELSE branch

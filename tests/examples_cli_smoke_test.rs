@@ -76,6 +76,14 @@ fn test_example_metadata_demo_runs_clean() {
 }
 
 #[test]
+fn test_example_pbmc_cell_typing_runs_clean() {
+    let _guard = DATA_DIR_LOCK.lock().unwrap();
+    let _ = fs::remove_dir_all("./data/pbmc_celltyping");
+    assert_example_runs_clean("pbmc_cell_typing");
+    let _ = fs::remove_dir_all("./data/pbmc_celltyping");
+}
+
+#[test]
 fn test_example_smoke_test_runs_clean() {
     let _guard = DATA_DIR_LOCK.lock().unwrap();
     let _ = fs::remove_dir_all("./data/smoke_db_final");
