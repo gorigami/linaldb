@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.55] - 2026-07-17
+
+### Fixed — `IMPORT DATASET FROM` produced a package `LOAD DATASET` could never load back
+
+Found while testing the engine against a real downloaded HDF5 file:
+`import_dataset_core`, the shared handler
+behind `IMPORT DATASET FROM <path> AS <name>` for every connector (HDF5,
+Numpy, Zarr, CSV-via-`IMPORT`), wrote the tensor-first dataset package via
+`save_dataset_package` but never wrote the legacy `.meta.json` sidecar file
+that `LOAD DATASET`'s existence check and schema reconstruction hard-require.
+The command reported success and the data was correctly on disk, but the
+dataset was invisible to `SHOW ALL DATASETS` and `LOAD DATASET` failed with
+"Dataset not found" — silently breaking the documented "import once, load
+later" workflow for every connector-sourced import.
+
+Fixed by adding `ParquetStorage::save_legacy_metadata` /
+`save_legacy_metadata_for_batch` (builds a minimal legacy schema from the
+Arrow `RecordBatch` via a new `arrow_schema_to_tuple_schema` mapping) and
+calling it from `import_dataset_core` right after `save_dataset_package`.
+`StorageEngine::save_dataset`'s existing inline sidecar-writing code was
+refactored to share the same `save_legacy_metadata` method (no behavior
+change there — it still uses its own fully-populated metadata with live
+per-column stats).
+
+New tests: `tests/ingestion_test.rs::test_import_dataset_from_csv` now
+asserts `LOAD DATASET` succeeds after `IMPORT DATASET FROM` (previously the
+test stopped right at the gap); new
+`tests/persistence_test.rs::test_import_dataset_hdf5_round_trip` exercises
+the fix directly against the HDF5 connector and storage layer.
+
+Note: the scientific connectors (HDF5/Numpy/Zarr) still flatten all
+imported arrays to a 1D shape regardless of their original dimensionality —
+that is a separate, known limitation, tracked for a follow-up fix.
+
 ## [0.1.54] - 2026-07-17
 
 ### Added — end-to-end showcase example: single-cell PBMC reference-based cell typing

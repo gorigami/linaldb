@@ -515,6 +515,19 @@ fn import_dataset_core(
             msg: format!("Failed to save dataset package: {}", e),
         })?;
 
+    // save_dataset_package alone leaves the dataset unloadable — LOAD DATASET
+    // hard-requires the legacy `.meta.json` sidecar, which only SAVE DATASET
+    // (via ParquetStorage::save_dataset) used to write. Without this, every
+    // IMPORT DATASET FROM (any connector) reported success but the dataset
+    // was invisible to SHOW ALL DATASETS / LOAD DATASET despite the data
+    // being correctly on disk.
+    storage
+        .save_legacy_metadata_for_batch(ds_name, &batch)
+        .map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to save legacy metadata: {}", e),
+        })?;
+
     Ok(DslOutput::Message(format!(
         "Imported dataset '{}' and persisted to {}",
         ds_name, storage_path

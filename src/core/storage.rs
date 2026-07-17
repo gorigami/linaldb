@@ -252,6 +252,43 @@ impl ParquetStorage {
         Ok(())
     }
 
+    /// Write the legacy `.meta.json` sidecar `StorageEngine::load_dataset`
+    /// hard-requires to exist. Shared by `StorageEngine::save_dataset` (which
+    /// already has a fully populated metadata object with real per-column
+    /// stats accumulated over the dataset's lifetime) and
+    /// `save_legacy_metadata_for_batch` below (which doesn't).
+    pub fn save_legacy_metadata(
+        &self,
+        name: &str,
+        metadata: &DatasetMetadataLegacy,
+    ) -> Result<(), StorageError> {
+        self.ensure_directories(Some(name))?;
+        let meta_path = self.legacy_metadata_path(name);
+        let metadata_json = serde_json::to_string_pretty(metadata)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        fs::write(&meta_path, metadata_json)?;
+        Ok(())
+    }
+
+    /// Build a minimal legacy metadata object (schema + row_count only, no
+    /// per-column `ColumnStats` — those need row-level Tuple scanning that
+    /// connector-sourced imports never do, and `load_dataset` never reads
+    /// them) directly from an Arrow `RecordBatch`, and write it as the
+    /// `.meta.json` sidecar. Used by `import_dataset_core` for
+    /// connector-sourced imports (HDF5/Numpy/Zarr/CSV-via-IMPORT), which
+    /// otherwise write a `save_dataset_package` output that `load_dataset`
+    /// can never find (missing this exact file).
+    pub fn save_legacy_metadata_for_batch(
+        &self,
+        name: &str,
+        batch: &RecordBatch,
+    ) -> Result<(), StorageError> {
+        let schema = arrow_schema_to_tuple_schema(batch.schema().as_ref());
+        let mut metadata = DatasetMetadataLegacy::new(Some(name.to_string()), schema);
+        metadata.row_count = batch.num_rows();
+        self.save_legacy_metadata(name, &metadata)
+    }
+
     fn compute_stats(&self, batch: &RecordBatch) -> DatasetStats {
         let mut stats = DatasetStats::new(batch.num_rows() as u64);
         for field in batch.schema().fields() {
@@ -361,6 +398,35 @@ impl From<Arc<ArrowSchema>> for DatasetSchema {
             .collect();
         Self { columns }
     }
+}
+
+/// Convert an Arrow schema into LINAL's legacy relational `core::tuple::Schema`,
+/// used as the authoritative schema `load_dataset` reconstructs rows against.
+/// Mirrors `dataset_to_record_batch`'s reverse mapping (Int, Float, String,
+/// Bool); anything else falls back to `String` — not reachable by any current
+/// connector (HDF5/Numpy/Zarr only ever emit Float32; CSV import produces
+/// Int64/Float64/Utf8/Boolean), and `load_dataset` will surface a clean
+/// `StorageError` rather than silently corrupt data if it ever is.
+fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
+    let fields = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let value_type = match f.data_type() {
+                DataType::Int64 | DataType::Int32 => ValueType::Int,
+                DataType::Float32 | DataType::Float64 => ValueType::Float,
+                DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
+                DataType::Boolean => ValueType::Bool,
+                _ => ValueType::String,
+            };
+            let mut field = crate::core::tuple::Field::new(f.name().clone(), value_type);
+            if f.is_nullable() {
+                field = field.nullable();
+            }
+            field
+        })
+        .collect();
+    Schema::new(fields)
 }
 
 /// Convert Arrow RecordBatch to LINAL Rows
@@ -715,10 +781,7 @@ impl StorageEngine for ParquetStorage {
         self.save_dataset_package(dataset_name, &record_batch, &metadata, &lineage)?;
 
         // 5. Also save legacy metadata for backward compatibility (optional but safer for now)
-        let meta_path = self.legacy_metadata_path(dataset_name);
-        let metadata_json = serde_json::to_string_pretty(&dataset.metadata)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        fs::write(&meta_path, metadata_json)?;
+        self.save_legacy_metadata(dataset_name, &dataset.metadata)?;
 
         Ok(())
     }
