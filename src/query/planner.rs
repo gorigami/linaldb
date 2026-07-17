@@ -2,9 +2,9 @@ use crate::core::tuple::Schema;
 use crate::engine::{EngineError, TensorDb};
 use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
-    AggregateExec, CosineFilterExec, DistinctExec, FilterExec, IndexScanExec, LimitExec,
-    NestedLoopJoinExec, PhysicalPlan, ProjectionExec, SeqScanExec, SimilarityJoinExec, SortExec,
-    UnionExec, VectorSearchExec,
+    AggregateExec, CosineFilterExec, DistinctExec, FilterExec, HashJoinExec, IndexScanExec,
+    LimitExec, PhysicalPlan, ProjectionExec, SeqScanExec, SimilarityJoinExec, SortExec, UnionExec,
+    VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -190,7 +190,7 @@ impl<'a> Planner<'a> {
                         output_schema,
                     }))
                 } else {
-                    Ok(Box::new(NestedLoopJoinExec {
+                    Ok(Box::new(HashJoinExec {
                         left: left_plan,
                         right: right_plan,
                         left_col: left_col.clone(),

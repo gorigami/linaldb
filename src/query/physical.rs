@@ -1109,9 +1109,23 @@ pub fn evaluate_expression(
     }
 }
 
-/// Nested-loop join executor — INNER or LEFT join on an equi-condition.
+/// Returns `true` if the hash table should be built on the left side, based
+/// purely on which materialized side has fewer rows (ties build right, to
+/// minimize behavior change from before this side-selection existed).
+fn build_side_is_left(left_len: usize, right_len: usize) -> bool {
+    left_len < right_len
+}
+
+/// Hash join executor — INNER/LEFT/RIGHT/FULL join on an equi-condition.
+/// Builds a hash table on whichever materialized side has fewer rows
+/// (see `build_side_is_left`) and probes with the other side, so the cost
+/// of building the table is always paid on the smaller relation regardless
+/// of which side is syntactically left/right or which `JoinType` is used.
+/// Which side must be NULL-padded for unmatched rows is a separate,
+/// semantics-only decision driven by `JoinType`, fully decoupled from which
+/// side happens to be the hash build side.
 #[derive(Debug)]
-pub struct NestedLoopJoinExec {
+pub struct HashJoinExec {
     pub left: Box<dyn PhysicalPlan>,
     pub right: Box<dyn PhysicalPlan>,
     pub left_col: String,
@@ -1120,12 +1134,13 @@ pub struct NestedLoopJoinExec {
     pub output_schema: Arc<Schema>,
 }
 
-impl PhysicalPlan for NestedLoopJoinExec {
+impl PhysicalPlan for HashJoinExec {
     fn schema(&self) -> Arc<Schema> {
         self.output_schema.clone()
     }
 
     fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        use crate::core::value::Value;
         use crate::query::logical::JoinType;
         use std::collections::{HashMap, HashSet};
 
@@ -1151,116 +1166,147 @@ impl PhysicalPlan for NestedLoopJoinExec {
                 ))
             })?;
 
-        let left_nulls: Vec<crate::core::value::Value> = left_schema
-            .fields
-            .iter()
-            .map(|_| crate::core::value::Value::Null)
-            .collect();
-        let right_nulls: Vec<crate::core::value::Value> = right_schema
-            .fields
-            .iter()
-            .map(|_| crate::core::value::Value::Null)
-            .collect();
+        let left_nulls: Vec<Value> = left_schema.fields.iter().map(|_| Value::Null).collect();
+        let right_nulls: Vec<Value> = right_schema.fields.iter().map(|_| Value::Null).collect();
+
+        let preserve_left = matches!(self.join_type, JoinType::Left | JoinType::Full);
+        let preserve_right = matches!(self.join_type, JoinType::Right | JoinType::Full);
 
         let mut output = Vec::new();
 
-        match self.join_type {
-            JoinType::Inner | JoinType::Left | JoinType::Full => {
-                // Build hash map: right key → indices into right_rows
-                let mut right_map: HashMap<String, Vec<usize>> = HashMap::new();
-                for (i, row) in right_rows.iter().enumerate() {
-                    let key = format!("{:?}", row.values[right_col_idx]);
-                    right_map.entry(key).or_default().push(i);
-                }
+        if build_side_is_left(left_rows.len(), right_rows.len()) {
+            // Build on LEFT (smaller), probe with RIGHT.
+            let mut build_map: HashMap<Value, Vec<usize>> = HashMap::new();
+            for (i, row) in left_rows.iter().enumerate() {
+                build_map
+                    .entry(row.values[left_col_idx].clone())
+                    .or_default()
+                    .push(i);
+            }
 
-                let mut matched_right: HashSet<usize> = HashSet::new();
+            let mut matched_build: HashSet<usize> = HashSet::new();
 
-                for left_row in &left_rows {
-                    let key = format!("{:?}", left_row.values[left_col_idx]);
-                    match right_map.get(&key) {
-                        Some(right_indices) => {
-                            for &ri in right_indices {
-                                let combined = merge_row_values(
-                                    left_row,
-                                    &right_rows[ri],
-                                    &left_schema,
-                                    &right_schema,
-                                );
-                                output.push(
-                                    Tuple::new(out_schema.clone(), combined)
-                                        .map_err(EngineError::InvalidOp)?,
-                                );
-                                if self.join_type == JoinType::Full {
-                                    matched_right.insert(ri);
-                                }
+            for right_row in &right_rows {
+                match build_map.get(&right_row.values[right_col_idx]) {
+                    Some(build_indices) => {
+                        for &li in build_indices {
+                            let combined = merge_row_values(
+                                &left_rows[li],
+                                right_row,
+                                &left_schema,
+                                &right_schema,
+                            );
+                            output.push(
+                                Tuple::new(out_schema.clone(), combined)
+                                    .map_err(EngineError::InvalidOp)?,
+                            );
+                            if preserve_left {
+                                matched_build.insert(li);
                             }
                         }
-                        None if matches!(self.join_type, JoinType::Left | JoinType::Full) => {
-                            let mut combined = left_row.values.clone();
-                            combined.extend_from_slice(&right_nulls);
-                            output.push(
-                                Tuple::new(out_schema.clone(), combined)
-                                    .map_err(EngineError::InvalidOp)?,
-                            );
-                        }
-                        None => {}
                     }
+                    None if preserve_right => {
+                        let mut combined = left_nulls.clone();
+                        combined.extend_from_slice(&right_row.values);
+                        output.push(
+                            Tuple::new(out_schema.clone(), combined)
+                                .map_err(EngineError::InvalidOp)?,
+                        );
+                    }
+                    None => {}
                 }
+            }
 
-                // FULL: emit unmatched right rows with NULL left values
-                if self.join_type == JoinType::Full {
-                    for (i, right_row) in right_rows.iter().enumerate() {
-                        if !matched_right.contains(&i) {
-                            let mut combined = left_nulls.clone();
-                            combined.extend_from_slice(&right_row.values);
-                            output.push(
-                                Tuple::new(out_schema.clone(), combined)
-                                    .map_err(EngineError::InvalidOp)?,
-                            );
-                        }
+            if preserve_left {
+                for (i, left_row) in left_rows.iter().enumerate() {
+                    if !matched_build.contains(&i) {
+                        let mut combined = left_row.values.clone();
+                        combined.extend_from_slice(&right_nulls);
+                        output.push(
+                            Tuple::new(out_schema.clone(), combined)
+                                .map_err(EngineError::InvalidOp)?,
+                        );
                     }
                 }
             }
-            JoinType::Right => {
-                // Build hash map: left key → indices into left_rows
-                let mut left_map: HashMap<String, Vec<usize>> = HashMap::new();
-                for (i, row) in left_rows.iter().enumerate() {
-                    let key = format!("{:?}", row.values[left_col_idx]);
-                    left_map.entry(key).or_default().push(i);
-                }
+        } else {
+            // Build on RIGHT (smaller-or-tied), probe with LEFT.
+            let mut build_map: HashMap<Value, Vec<usize>> = HashMap::new();
+            for (i, row) in right_rows.iter().enumerate() {
+                build_map
+                    .entry(row.values[right_col_idx].clone())
+                    .or_default()
+                    .push(i);
+            }
 
-                for right_row in &right_rows {
-                    let key = format!("{:?}", right_row.values[right_col_idx]);
-                    match left_map.get(&key) {
-                        Some(left_indices) => {
-                            for &li in left_indices {
-                                let combined = merge_row_values(
-                                    &left_rows[li],
-                                    right_row,
-                                    &left_schema,
-                                    &right_schema,
-                                );
-                                output.push(
-                                    Tuple::new(out_schema.clone(), combined)
-                                        .map_err(EngineError::InvalidOp)?,
-                                );
-                            }
-                        }
-                        None => {
-                            // Unmatched right row: emit NULL left + right values
-                            let mut combined = left_nulls.clone();
-                            combined.extend_from_slice(&right_row.values);
+            let mut matched_build: HashSet<usize> = HashSet::new();
+
+            for left_row in &left_rows {
+                match build_map.get(&left_row.values[left_col_idx]) {
+                    Some(build_indices) => {
+                        for &ri in build_indices {
+                            let combined = merge_row_values(
+                                left_row,
+                                &right_rows[ri],
+                                &left_schema,
+                                &right_schema,
+                            );
                             output.push(
                                 Tuple::new(out_schema.clone(), combined)
                                     .map_err(EngineError::InvalidOp)?,
                             );
+                            if preserve_right {
+                                matched_build.insert(ri);
+                            }
                         }
+                    }
+                    None if preserve_left => {
+                        let mut combined = left_row.values.clone();
+                        combined.extend_from_slice(&right_nulls);
+                        output.push(
+                            Tuple::new(out_schema.clone(), combined)
+                                .map_err(EngineError::InvalidOp)?,
+                        );
+                    }
+                    None => {}
+                }
+            }
+
+            if preserve_right {
+                for (i, right_row) in right_rows.iter().enumerate() {
+                    if !matched_build.contains(&i) {
+                        let mut combined = left_nulls.clone();
+                        combined.extend_from_slice(&right_row.values);
+                        output.push(
+                            Tuple::new(out_schema.clone(), combined)
+                                .map_err(EngineError::InvalidOp)?,
+                        );
                     }
                 }
             }
         }
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod hash_join_build_side_tests {
+    use super::build_side_is_left;
+
+    #[test]
+    fn smaller_left_builds_left() {
+        assert!(build_side_is_left(2, 10));
+    }
+
+    #[test]
+    fn smaller_right_builds_right() {
+        assert!(!build_side_is_left(10, 2));
+    }
+
+    #[test]
+    fn tie_builds_right() {
+        assert!(!build_side_is_left(5, 5));
     }
 }
 

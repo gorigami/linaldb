@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.51] - 2026-07-17
+
+### Changed — equi-join now hashes the smaller side; renamed `NestedLoopJoinExec` → `HashJoinExec`
+
+`NestedLoopJoinExec` was already hash-based (not a true nested loop) but
+always hashed a *fixed* side per `JoinType` (right for Inner/Left/Full, left
+for Right), regardless of which side was actually smaller — `tiny JOIN huge`
+ended up hashing `huge` instead of `tiny`, the wrong choice for performance.
+
+- Renamed to `HashJoinExec` and generalized to always build the hash table
+  on whichever materialized side has fewer rows (ties build right, matching
+  the previous default for Inner/Left/Full), fully decoupled from which side
+  outer-join NULL-preservation applies to (a separate, `JoinType`-driven
+  decision).
+- Hash keys are now `Value` directly — `Value` already implements `Hash`/
+  `Eq` with proper float-bits comparison (`src/core/value.rs`) — instead of
+  a `format!("{:?}", value)` allocation per row on both sides; the new code
+  only clones a key on the smaller (build) side.
+- Output rows/columns are unchanged (left-then-right column order
+  preserved, NULL-padding semantics identical); internal row ordering may
+  differ when the smaller side changes between queries.
+- Corrects `docs/ARCHITECTURE.md`'s "Join Execution" section, which
+  (incorrectly) said equi-joins were "always a nested-loop scan, not a hash
+  join" — also fixed an incidental `JoinKind`/`JoinType` mix-up in the same
+  paragraph.
+
+New unit tests for the build-side decision (`src/query/physical.rs`) and
+DSL-level regression tests for asymmetric row-count joins in both size
+directions (`tests/hash_join_test.rs`). Full suite passes, 0 failures.
+
+---
+
 ## [0.1.50] - 2026-07-17
 
 ### Fixed — parser errors are no longer discarded; SECURITY.md contact email unified
