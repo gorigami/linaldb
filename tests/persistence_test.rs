@@ -359,3 +359,53 @@ fn test_dataset_round_trip() {
     // Clean up
     let _ = fs::remove_dir_all(temp_dir);
 }
+
+/// Regression test for a bug found while testing the engine against a real
+/// downloaded HDF5 file: `import_dataset_core` (the DSL's `IMPORT DATASET
+/// FROM` handler) used to call only `save_dataset_package`, never writing
+/// the legacy `.meta.json` sidecar `load_dataset` hard-requires — so an
+/// IMPORT-produced package reported success but could never be loaded back,
+/// even though the data was correctly on disk. This test exercises the fix
+/// (`ParquetStorage::save_legacy_metadata_for_batch`) directly at the
+/// connector + storage layer, mirroring how `import_dataset_core` uses it.
+#[test]
+fn test_import_dataset_hdf5_round_trip() {
+    use linal::core::connectors::{hdf5_connector::Hdf5Connector, Connector};
+    use linal::core::dataset::{DatasetMetadata, DatasetOrigin};
+    use linal::core::value::ValueType;
+
+    let temp_dir = "/tmp/linal_test_import_hdf5_round_trip";
+    let _ = fs::remove_dir_all(temp_dir);
+    let storage = ParquetStorage::new(temp_dir);
+
+    let (batch, lineage) = Hdf5Connector
+        .read_dataset("test_data.h5")
+        .expect("test_data.h5 fixture must exist (cargo run --example gen_test_data)");
+
+    let metadata = DatasetMetadata::new(
+        "hdf5_import".to_string(),
+        DatasetOrigin::Imported {
+            source: "test_data.h5".to_string(),
+        },
+    );
+    storage
+        .save_dataset_package("hdf5_import", &batch, &metadata, &lineage)
+        .unwrap();
+    storage
+        .save_legacy_metadata_for_batch("hdf5_import", &batch)
+        .unwrap();
+
+    // This is the regression check: previously failed with DatasetNotFound
+    // even though save_dataset_package had just written valid data.
+    let loaded = storage
+        .load_dataset("hdf5_import")
+        .expect("LOAD should succeed now that the legacy sidecar is written");
+
+    assert_eq!(loaded.rows.len(), batch.num_rows());
+    assert_eq!(loaded.schema.fields.len(), batch.num_columns());
+    for field in &loaded.schema.fields {
+        assert_eq!(field.value_type, ValueType::Float);
+    }
+
+    let _ = fs::remove_dir_all(temp_dir);
+}

@@ -40,6 +40,7 @@ fn test_use_dataset_from_csv() {
 #[test]
 fn test_import_dataset_from_csv() {
     let mut db = TensorDb::new();
+    let _ = fs::remove_dir_all("./data/default/datasets/import_ds");
 
     // 1. Create a dummy CSV file
     let temp_dir = std::env::temp_dir();
@@ -59,6 +60,28 @@ fn test_import_dataset_from_csv() {
         _ => panic!("Expected Message output, got {:?}", out),
     }
 
+    // Regression test: IMPORT DATASET FROM used to write a package that
+    // LOAD DATASET could never find (missing legacy .meta.json sidecar) —
+    // it reported success but the dataset was invisible to SHOW ALL
+    // DATASETS / LOAD DATASET despite the data being correctly on disk.
+    let load_out =
+        execute_line(&mut db, "LOAD DATASET import_ds", 2).expect("LOAD DATASET should succeed");
+    match load_out {
+        DslOutput::Message(msg) => {
+            assert!(msg.contains("import_ds"));
+        }
+        other => panic!("Expected Message output, got {other:?}"),
+    }
+
+    let loaded = db
+        .get_dataset("import_ds")
+        .expect("import_ds should be loaded into the active instance");
+    assert_eq!(loaded.rows.len(), 1);
+    assert_eq!(loaded.schema.fields.len(), 2);
+    assert_eq!(loaded.schema.fields[0].name, "val1");
+    assert_eq!(loaded.schema.fields[1].name, "val2");
+
     // Cleanup
     let _ = fs::remove_file(csv_path);
+    let _ = fs::remove_dir_all("./data/default/datasets/import_ds");
 }
