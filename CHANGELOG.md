@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.53] - 2026-07-17
+
+### Fixed — GROUP BY silently dropped/misnamed aggregate columns when a Computed item was also in the SELECT list
+
+Found while building the PBMC cell-typing showcase example: `SELECT
+small.sid AS sid, small.cond AS cond, COUNT(*) AS n, AVG(big.val) AS
+avg_val FROM big JOIN small ON ... GROUP BY sid, cond` returned a 4-column
+result where the `n`/`avg_val` columns were silently replaced by duplicated
+`sid`/`cond` values — the actual aggregate results never appeared.
+
+Root cause: any qualified column with an alias (`t.col AS col`) — not just
+a genuine computed expression — parses as `SelectExpr::Computed`, which
+makes `execute_select`'s window/computed post-processing path run even
+when a `GROUP BY` is present (that path isn't exclusive to ungrouped
+queries, despite a comment added in v0.1.45/Track G3 assuming it was). That
+path's `agg_idx` counter (introduced in v0.1.45 to look up an aggregate's
+real output name instead of a hardcoded placeholder) assumed
+`base_schema.fields` were *only* the aggregate outputs, one per Aggregate
+`SelectExpr` in order — true only without a `GROUP BY`. With one,
+`LogicalPlan::Aggregate::schema()` puts the group-key fields first, so
+`agg_idx` pointed at the wrong fields entirely.
+
+Fixed by starting `agg_idx` at `s.group_by.len()` instead of `0`, so it
+correctly skips past the group-key fields before indexing into the
+aggregate portion of the schema.
+
+New `tests/group_by_with_computed_column_test.rs`: the exact
+qualified-alias-plus-JOIN-plus-GROUP-BY repro, a genuinely computed
+expression (`UPPER(...)`) alongside GROUP BY + an aggregate (confirming
+the bug wasn't specific to column qualifiers), and a guard test for the
+plain GROUP BY + aggregate case. Full suite passes, 0 failures.
+
+---
+
 ## [0.1.52] - 2026-07-17
 
 ### Fixed — CASE WHEN (and any comparison in a computed column or aggregate) silently always took the ELSE branch

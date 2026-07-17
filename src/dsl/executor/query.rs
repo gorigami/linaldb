@@ -491,14 +491,23 @@ pub(super) fn execute_select(
                 .collect(),
             SelectColumns::Named(exprs) => {
                 let mut computed_idx = 0usize;
-                // Aggregate fields land in base_schema in the same relative
-                // order they appear here (this branch only runs without a
-                // GROUP BY, so base_schema's fields are exactly the
-                // aggregate outputs, one per Aggregate entry below) — look
-                // up the real output name (honors G2's AS alias) instead of
-                // a placeholder, or the column is silently dropped by the
-                // get_field_index lookup a few lines down.
-                let mut agg_idx = 0usize;
+                // Aggregate fields land in base_schema after the GROUP BY key
+                // fields (LogicalPlan::Aggregate::schema() always puts group
+                // keys first), in the same relative order the Aggregate
+                // SelectExpr entries appear here — look up the real output
+                // name (honors G2's AS alias) instead of a placeholder, or
+                // the column is silently dropped by the get_field_index
+                // lookup a few lines down. This path isn't exclusive to the
+                // no-GROUP-BY case: a plain qualified column with an alias
+                // (e.g. `t.col AS col`) parses as SelectExpr::Computed, which
+                // also makes window_exprs non-empty even when GROUP BY is
+                // present — so the offset must account for group keys
+                // whenever they exist, not just when this branch "normally"
+                // runs. Previously started at 0 unconditionally, which
+                // returned wrong/misaligned names (or silently dropped
+                // columns) for any GROUP BY query that also had a Computed
+                // item in its SELECT list.
+                let mut agg_idx = s.group_by.len();
                 exprs
                     .iter()
                     .map(|e| match e {
