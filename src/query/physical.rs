@@ -711,6 +711,34 @@ pub fn evaluate_expression(
             let left_val = evaluate_expression(left, row);
             let right_val = evaluate_expression(right, row);
 
+            // Comparison operators apply generically via Value::compare(),
+            // regardless of operand type — mirrors the separate WHERE-predicate
+            // evaluator (query/planner.rs::evaluate_expr). Without this, every
+            // comparison fell through the arithmetic-only type-pair match below
+            // straight to `_ => Value::Null`, silently breaking any CASE WHEN
+            // condition, computed SELECT column, or aggregate inner expression
+            // that used a comparison (e.g. `CASE WHEN score > 90 THEN ...`) —
+            // always taking the ELSE branch instead of erroring or evaluating
+            // correctly. WHERE clauses were unaffected: they route through
+            // `evaluate_expr`, not this function.
+            if matches!(op.as_str(), "=" | "!=" | ">" | "<" | ">=" | "<=") {
+                let ord = left_val.compare(&right_val);
+                return Value::Bool(match op.as_str() {
+                    "=" => ord == Some(std::cmp::Ordering::Equal),
+                    "!=" => ord.is_some() && ord != Some(std::cmp::Ordering::Equal),
+                    ">" => ord == Some(std::cmp::Ordering::Greater),
+                    "<" => ord == Some(std::cmp::Ordering::Less),
+                    ">=" => matches!(
+                        ord,
+                        Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
+                    ),
+                    _ => matches!(
+                        ord,
+                        Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
+                    ), // "<="
+                });
+            }
+
             match (left_val, right_val) {
                 (Value::Int(l), Value::Int(r)) => match op.as_str() {
                     "+" => Value::Int(l + r),
