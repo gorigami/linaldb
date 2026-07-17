@@ -85,3 +85,61 @@ fn test_import_dataset_from_csv() {
     let _ = fs::remove_file(csv_path);
     let _ = fs::remove_dir_all("./data/default/datasets/import_ds");
 }
+
+/// Regression test for a silent-data-loss bug found while auditing all
+/// connectors after the v0.1.55/v0.1.56 fixes: `read_dataset` can skip
+/// individual fields it couldn't reconcile (shape/length mismatch, or an
+/// unsupported dtype) with zero indication -- `import_dataset_core` used to
+/// swallow that entirely. It now appends a warning to the returned
+/// `Message`, exercised here end-to-end through the DSL (connector-level
+/// coverage of the underlying skip logic itself lives in
+/// `tests/connector_silent_skip_test.rs`).
+#[test]
+fn test_import_dataset_from_hdf5_surfaces_skip_warning() {
+    use ndarray::{Array1, Array2};
+
+    let mut db = TensorDb::new();
+    let _ = fs::remove_dir_all("./data/default/datasets/import_mismatch_ds");
+
+    let temp_dir = std::env::temp_dir();
+    let h5_path_buf = temp_dir.join("test_ingestion_import_mismatch.h5");
+    let h5_path = h5_path_buf.to_str().unwrap();
+
+    let file = hdf5::File::create(h5_path).unwrap();
+    let a: Array2<f32> = Array2::from_shape_fn((5, 3), |(r, c)| (r * 3 + c) as f32);
+    file.new_dataset::<f32>()
+        .shape((5, 3))
+        .create("matrix_a")
+        .unwrap()
+        .write(&a)
+        .unwrap();
+    let b: Array1<f32> = Array1::from_shape_fn(7, |i| i as f32);
+    file.new_dataset::<f32>()
+        .shape(7)
+        .create("vector_b")
+        .unwrap()
+        .write(&b)
+        .unwrap();
+    drop(file);
+
+    let import_cmd = format!(r#"IMPORT DATASET FROM "{}" AS import_mismatch_ds"#, h5_path);
+    let out = execute_line(&mut db, &import_cmd, 1).expect("Failed to execute IMPORT DATASET FROM");
+
+    match out {
+        DslOutput::Message(msg) => {
+            assert!(msg.contains("Imported dataset 'import_mismatch_ds'"));
+            assert!(
+                msg.contains("field(s) skipped during import"),
+                "message should surface the skipped field, not silently succeed: {msg}"
+            );
+            assert!(
+                msg.contains("matrix_a") || msg.contains("vector_b"),
+                "message should name the skipped field: {msg}"
+            );
+        }
+        other => panic!("Expected Message output, got {other:?}"),
+    }
+
+    let _ = fs::remove_file(h5_path);
+    let _ = fs::remove_dir_all("./data/default/datasets/import_mismatch_ds");
+}

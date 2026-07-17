@@ -44,6 +44,18 @@ pub fn read_shape_metadata(field: &Field) -> Option<Vec<usize>> {
     dims.filter(|d| !d.is_empty())
 }
 
+/// Resolve a field's real dimensions: prefer `field_with_shape`'s metadata
+/// when present and consistent with `flat_len` (the field's actual flat
+/// element count), otherwise fall back to a flat `[flat_len]` shape. Shared
+/// by `storage::record_batch_to_tensors` (the tensor-ingestion path) and
+/// each connector's `inspect()` (which otherwise has no ingestion pass to
+/// piggyback the check on) so both report shape the same way.
+pub fn resolve_shape_dims(field: &Field, flat_len: usize) -> Vec<usize> {
+    read_shape_metadata(field)
+        .filter(|dims| dims.iter().product::<usize>() == flat_len)
+        .unwrap_or_else(|| vec![flat_len])
+}
+
 #[derive(Error, Debug)]
 pub enum ConnectorError {
     #[error("IO error: {0}")]
