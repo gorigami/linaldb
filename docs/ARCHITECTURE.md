@@ -544,13 +544,25 @@ the no-index case.
 
 ### Join Execution
 
-`LogicalPlan::Join` carries a `JoinKind` (`Inner`, `Left`, `Right`, `Full`) and an
-optional similarity threshold; the planner (`query/planner.rs`) always marks the
-output schema's fields nullable, since LEFT/RIGHT/FULL OUTER joins pad unmatched
-rows with `NULL` on one side.
+`LogicalPlan::Join` carries a `JoinType` (`Inner`, `Left`, `Right`, `Full` — the
+DSL-level `JoinKind` from `dsl/ast.rs` maps onto this) and an optional similarity
+threshold; the planner (`query/planner.rs`) always marks the output schema's
+fields nullable, since LEFT/RIGHT/FULL OUTER joins pad unmatched rows with
+`NULL` on one side.
 
-- **Equi-join** (`ON a.col = b.col`): `NestedLoopJoinExec` — no join index exists
-  yet, so this is always a nested-loop scan, not a hash join.
+- **Equi-join** (`ON a.col = b.col`): `HashJoinExec` — builds a
+  `HashMap<Value, Vec<usize>>` on whichever materialized side (left or right)
+  has fewer rows after execution (ties build the right side), and probes with
+  the other — this holds for all 4 join types, not just a fixed side, so
+  `SELECT * FROM tiny JOIN huge ON ...` always hashes `tiny` regardless of
+  which side of the query it's written on. Hash keys are `Value` directly
+  (`Value` already implements `Hash`/`Eq` with float-bits comparison, not a
+  formatted string), cloned only on the build (smaller) side. Which side must
+  be NULL-padded for unmatched rows is decided purely by `JoinType`,
+  independent of which side ended up as the hash build side — build-side
+  selection is an internal performance decision only: output rows and column
+  order (left-then-right) are unaffected, though internal row *order* isn't
+  guaranteed and may shift if the smaller side changes.
 - **Similarity join** (`ON COSINE_SIM(a.col, b.col) > threshold`, two `Vector`
   columns): `SimilarityJoinExec` — brute-force by default, or index-accelerated
   if the right dataset's column has a `CREATE VECTOR INDEX`. Follows the same
