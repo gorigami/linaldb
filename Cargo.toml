@@ -1,6 +1,6 @@
 [package]
 name = "linal"
-version = "0.1.55"
+version = "0.1.57"
 edition = "2021"
 description = "In-memory linear algebra engine for vectors, matrices and tensors"
 
@@ -49,6 +49,10 @@ path = "tools/fixtures/gen_test_data.rs"
 [[example]]
 name = "gen_zarr_data"
 path = "tools/fixtures/gen_zarr_data.rs"
+
+[[example]]
+name = "gen_digits_data"
+path = "tools/fixtures/gen_digits_data.rs"
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }

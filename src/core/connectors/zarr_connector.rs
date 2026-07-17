@@ -1,4 +1,4 @@
-use crate::core::connectors::{Connector, ConnectorError};
+use crate::core::connectors::{field_with_shape, Connector, ConnectorError};
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
@@ -153,7 +153,8 @@ impl ZarrConnector {
             return Ok(());
         }
 
-        fields.push(Field::new(name, DataType::Float32, false));
+        let dims: Vec<usize> = array.shape().iter().map(|&d| d as usize).collect();
+        fields.push(field_with_shape(name, DataType::Float32, false, &dims));
         columns.push(Arc::new(Float32Array::from(data)));
 
         Ok(())

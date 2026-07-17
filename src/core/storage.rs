@@ -635,7 +635,15 @@ pub fn record_batch_to_tensors(batch: &RecordBatch) -> Result<Vec<(String, Tenso
         })?;
 
         let data = arrow_array_to_f32_vec(array)?;
-        let shape = Shape::new(vec![num_rows]);
+        // Connectors stash the original N-D shape as field metadata (see
+        // core::connectors::field_with_shape); use it when present and
+        // consistent with the actual data length, otherwise fall back to
+        // the flat-vector assumption (also covers relational/CSV imports,
+        // which never attach shape metadata at all).
+        let dims = crate::core::connectors::read_shape_metadata(field)
+            .filter(|dims| dims.iter().product::<usize>() == data.len())
+            .unwrap_or_else(|| vec![num_rows]);
+        let shape = Shape::new(dims);
         let id = TensorId::new();
         let metadata = TensorMetadata::new(id, Some("ingestion".to_string()));
         let tensor = Tensor::new(id, shape, data, metadata).map_err(StorageError::Serialization)?;

@@ -9,6 +9,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.57] - 2026-07-17
+
+### Added — end-to-end showcase example: real-data HDF5 digit classification
+
+New `examples/hdf5_digit_classification.lnl` and `tools/fixtures/gen_digits_data.rs`
+(a new `cargo run --example gen_digits_data`). Uses the real UCI Machine
+Learning Repository "Optical Recognition of Handwritten Digits" dataset —
+genuinely downloaded external data, not synthetic — ingested through the
+HDF5 connector, directly exercising both bugs found and fixed this session:
+
+- The `IMPORT DATASET FROM` / `LOAD DATASET` round-trip fix (v0.1.55):
+  step 1 imports the real HDF5 file and loads it back successfully.
+- The N-D shape-preservation fix (v0.1.56): step 2 ingests the same file's
+  genuine (10, 64) real digit-class-centroid matrix via `USE DATASET
+  FROM` and shows it correctly materializes as 10 rows of `Vector(64)`
+  (previously this would have silently produced one nonsensical
+  `Vector[640]`).
+
+The rest of the script computes a real 10x10 digit-class similarity Gram
+matrix via `TRANSPOSE`/`MATMUL` directly on the shape-fixed ingested
+tensor, then performs nearest-centroid classification (vector index +
+`COSINE_SIM` similarity `JOIN`, `ROW_NUMBER` for top-1 match,
+`CASE`-based accuracy scoring) against 30 real held-out query digit
+images, scoring 25/30 (83.3%) — a real, imperfect, above-chance result
+from a real mean-image classifier, honestly reported rather than
+cherry-picked.
+
+New `tests/examples_cli_smoke_test.rs::test_example_hdf5_digit_classification_runs_clean`
+and `tests/examples_integration.rs::test_hdf5_digit_classification_integration`
+(asserts dataset row counts and vector index existence, following the
+`pbmc_cell_typing` test pattern).
+
+`examples/data/digits_centroids.h5` (the derived, checked-in fixture) is
+small (~4.6KB): 10 real per-class pixel centroids, each averaged from
+~370 real downloaded samples, holding out 3 real samples per class as
+queries never included in their own class's average.
+
+## [0.1.56] - 2026-07-17
+
+### Fixed — HDF5/Numpy/Zarr connectors flattened all N-D arrays to 1D, discarding shape
+
+Found via the same real-HDF5-file testing that surfaced v0.1.55's round-trip
+bug: `USE DATASET FROM` on a real 4x3 HDF5 matrix produced a `Vector[12]`
+resource instead of `Matrix[4,3]`. Root cause: `record_batch_to_tensors`
+always built a flat `Shape::new(vec![num_rows])`, and none of the three
+scientific connectors attached the original array shape anywhere it could
+read it from — each flattened via `.iter().cloned().collect()` and handed
+back a plain 1D Arrow array.
+
+Fixed by adding an Arrow `Field` metadata side-channel
+(`core::connectors::field_with_shape` / `read_shape_metadata`, keyed
+`"linal.shape"`) that connectors populate from their own shape APIs
+(`hdf5::Dataset::shape()`, `ndarray::ArrayD::shape()`, zarrs'
+`Array::shape()`) whenever a column is genuinely multi-dimensional.
+`record_batch_to_tensors` now reads it back (falling back to the flat
+assumption if missing or inconsistent with the actual data length — a
+defensive guard against stale/corrupt metadata) to build the real `Shape`.
+This activates two previously-dead code paths that already correctly
+handled rank-2 tensors (`persistence.rs`'s `use_dataset_core` and
+`engine/db.rs`'s `materialize_tensor_dataset`), which had been unreachable
+since every connector-sourced shape was always rank-1.
+
+**Behavior change to note**: a genuine rank>2 array (e.g. a 3D HDF5
+dataset) now correctly gets a real rank-3 `Shape` internally, but
+`USE DATASET FROM` then fails loudly with "Cannot materialize tensor with
+rank > 2" instead of silently returning flattened, mislabeled data as
+before. This is an intentional improvement (loud failure over silent
+wrong data); N-D materialization itself remains out of scope.
+
+New `tests/scientific_shape_preservation_test.rs`, using an inline
+non-square 4x3 fixture (the checked-in `test_data.h5`/`test_data.npy`
+fixtures are a constant 2x2 and can't catch ordering bugs): HDF5 and Numpy
+2D shape preservation at the tensor level, an end-to-end `USE DATASET FROM`
+check that a 4x3 HDF5 file materializes as 4 rows of `Vector(3)`, and a
+rank-3 test documenting that the shape mechanism itself works while
+materialization correctly still fails loudly.
+
 ## [0.1.55] - 2026-07-17
 
 ### Fixed — `IMPORT DATASET FROM` produced a package `LOAD DATASET` could never load back

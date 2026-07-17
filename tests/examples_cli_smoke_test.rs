@@ -84,6 +84,14 @@ fn test_example_pbmc_cell_typing_runs_clean() {
 }
 
 #[test]
+fn test_example_hdf5_digit_classification_runs_clean() {
+    let _guard = DATA_DIR_LOCK.lock().unwrap();
+    let _ = fs::remove_dir_all("./data/hdf5_digit_classification");
+    assert_example_runs_clean("hdf5_digit_classification");
+    let _ = fs::remove_dir_all("./data/hdf5_digit_classification");
+}
+
+#[test]
 fn test_example_smoke_test_runs_clean() {
     let _guard = DATA_DIR_LOCK.lock().unwrap();
     let _ = fs::remove_dir_all("./data/smoke_db_final");
