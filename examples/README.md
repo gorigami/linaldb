@@ -67,12 +67,17 @@ linal run examples/<name>.lnl
 | `tensor_datasets.lnl` | Tensor-backed dataset columns, save/load round trip |
 | `managed_service_demo.lnl` | Multi-database / multi-tenant workflow |
 | `pbmc_cell_typing.lnl` | End-to-end showcase: replicates a real single-cell RNA-seq reference-based cell-typing workflow (synthetic PBMC marker data) using nearly the full feature surface in one coherent story — vector index + similarity `JOIN` for nearest-centroid classification, `ROW_NUMBER`/`RANK` window functions, CTEs, `AVG_VEC` per-type centroids, `CASE`-based accuracy scoring, equi-`JOIN` against a small metadata table, `MATMUL`/`TRANSPOSE`, and persistence |
+| `hdf5_digit_classification.lnl` | End-to-end showcase using genuinely downloaded external data: the real UCI "Optical Recognition of Handwritten Digits" dataset, ingested via the HDF5 connector. Exercises the `IMPORT DATASET FROM`/`LOAD DATASET` round-trip fix and the N-D shape-preservation fix directly, `TRANSPOSE`/`MATMUL` on the real shape-fixed tensor, then nearest-centroid classification (vector index + similarity `JOIN`, `CASE`-based accuracy scoring) against real held-out query digits |
 | `smoke_test.lnl` | Broad single-pass sanity check across many commands |
 | `hardening_test.lnl` | CLI multiline-parsing regression check (used by `tests/cli_hardening_test.rs`) |
-| `data/` | Small fixture files (e.g. `sample_data.csv`) referenced by the examples above |
+| `data/` | Small fixture files (e.g. `sample_data.csv`, `digits_centroids.h5`) referenced by the examples above |
 
 Fixture-generating binaries (not `.lnl`, so they live outside this
 directory): `tools/fixtures/gen_test_data.rs` and
 `tools/fixtures/gen_zarr_data.rs` generate `.npy`/`.h5`/`.zarr` files for
 manually exercising scientific ingestion — run with `cargo run --example
 gen_test_data` / `cargo run --example gen_zarr_data`.
+`tools/fixtures/gen_digits_data.rs` downloads the real UCI digits dataset
+and derives `examples/data/digits_centroids.h5` from it — run with `cargo
+run --example gen_digits_data` (requires network access; re-run only if
+regenerating the fixture, the derived `.h5` is checked in).

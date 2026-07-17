@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.57] - 2026-07-17
+
+### Added — end-to-end showcase example: real-data HDF5 digit classification
+
+New `examples/hdf5_digit_classification.lnl` and `tools/fixtures/gen_digits_data.rs`
+(a new `cargo run --example gen_digits_data`). Uses the real UCI Machine
+Learning Repository "Optical Recognition of Handwritten Digits" dataset —
+genuinely downloaded external data, not synthetic — ingested through the
+HDF5 connector, directly exercising both bugs found and fixed this session:
+
+- The `IMPORT DATASET FROM` / `LOAD DATASET` round-trip fix (v0.1.55):
+  step 1 imports the real HDF5 file and loads it back successfully.
+- The N-D shape-preservation fix (v0.1.56): step 2 ingests the same file's
+  genuine (10, 64) real digit-class-centroid matrix via `USE DATASET
+  FROM` and shows it correctly materializes as 10 rows of `Vector(64)`
+  (previously this would have silently produced one nonsensical
+  `Vector[640]`).
+
+The rest of the script computes a real 10x10 digit-class similarity Gram
+matrix via `TRANSPOSE`/`MATMUL` directly on the shape-fixed ingested
+tensor, then performs nearest-centroid classification (vector index +
+`COSINE_SIM` similarity `JOIN`, `ROW_NUMBER` for top-1 match,
+`CASE`-based accuracy scoring) against 30 real held-out query digit
+images, scoring 25/30 (83.3%) — a real, imperfect, above-chance result
+from a real mean-image classifier, honestly reported rather than
+cherry-picked.
+
+New `tests/examples_cli_smoke_test.rs::test_example_hdf5_digit_classification_runs_clean`
+and `tests/examples_integration.rs::test_hdf5_digit_classification_integration`
+(asserts dataset row counts and vector index existence, following the
+`pbmc_cell_typing` test pattern).
+
+`examples/data/digits_centroids.h5` (the derived, checked-in fixture) is
+small (~4.6KB): 10 real per-class pixel centroids, each averaged from
+~370 real downloaded samples, holding out 3 real samples per class as
+queries never included in their own class's average.
+
 ## [0.1.56] - 2026-07-17
 
 ### Fixed — HDF5/Numpy/Zarr connectors flattened all N-D arrays to 1D, discarding shape

@@ -181,3 +181,64 @@ fn test_pbmc_cell_typing_integration() {
 
     let _ = fs::remove_dir_all("./data/pbmc_celltyping");
 }
+
+#[test]
+fn test_hdf5_digit_classification_integration() {
+    // This script calls IMPORT/SAVE DATASET and actually writes to
+    // ./data/hdf5_digit_classification — clean up before and after so a
+    // failed run doesn't leave stray files behind.
+    let _ = fs::remove_dir_all("./data/hdf5_digit_classification");
+
+    let mut db = TensorDb::new();
+
+    let script = fs::read_to_string("examples/hdf5_digit_classification.lnl")
+        .expect("Failed to read examples/hdf5_digit_classification.lnl");
+
+    execute_script(&mut db, &script).expect("HDF5 digit-classification script execution failed");
+
+    // The script ends with `USE default` — switch back to the instance it
+    // actually created its datasets in before inspecting them.
+    db.use_database("hdf5_digit_classification")
+        .expect("hdf5_digit_classification database should exist");
+
+    // v0.1.55 regression check: IMPORT DATASET FROM followed by LOAD DATASET
+    // must round-trip a real HDF5 file successfully.
+    let centroids_import = db
+        .get_dataset("centroids_import")
+        .expect("centroids_import dataset should exist (IMPORT/LOAD round trip)");
+    assert_eq!(
+        centroids_import.len(),
+        640,
+        "IMPORT DATASET FROM uses the relational row-per-scalar path: 10 classes x 64 pixels"
+    );
+
+    let reference_centroids = db
+        .get_dataset("reference_centroids")
+        .expect("reference_centroids dataset should exist");
+    assert_eq!(
+        reference_centroids.len(),
+        10,
+        "one row per real digit class"
+    );
+
+    let query_digits = db
+        .get_dataset("query_digits")
+        .expect("query_digits dataset should exist");
+    assert_eq!(
+        query_digits.len(),
+        30,
+        "3 real held-out query digits per class x 10 classes"
+    );
+
+    // Verify the vector index used for classification exists.
+    let indices = db.list_indices();
+    let has_vector_idx = indices
+        .iter()
+        .any(|(ds, col, t)| ds == "reference_centroids" && col == "centroid" && t == "VECTOR");
+    assert!(
+        has_vector_idx,
+        "reference_centroids should have a VECTOR index on centroid"
+    );
+
+    let _ = fs::remove_dir_all("./data/hdf5_digit_classification");
+}
