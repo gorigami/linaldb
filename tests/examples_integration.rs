@@ -121,3 +121,63 @@ fn test_features_demo_vdb_integration() {
         .any(|(ds, col, t)| ds == "analytics_data" && col == "embedding" && t == "VECTOR");
     assert!(has_emb_idx, "emb_idx should exist");
 }
+
+#[test]
+fn test_pbmc_cell_typing_integration() {
+    // Unlike the other examples in this file, this script calls SAVE
+    // DATASET and actually writes to ./data/pbmc_celltyping — clean up
+    // before and after so a failed run doesn't leave stray files behind.
+    let _ = fs::remove_dir_all("./data/pbmc_celltyping");
+
+    let mut db = TensorDb::new();
+
+    let script = fs::read_to_string("examples/pbmc_cell_typing.lnl")
+        .expect("Failed to read examples/pbmc_cell_typing.lnl");
+
+    execute_script(&mut db, &script).expect("PBMC cell-typing script execution failed");
+
+    // The script ends with `USE default` — switch back to the instance it
+    // actually created its datasets in before inspecting them.
+    db.use_database("pbmc_celltyping")
+        .expect("pbmc_celltyping database should exist");
+
+    let reference_profiles = db
+        .get_dataset("reference_profiles")
+        .expect("reference_profiles dataset should exist");
+    assert_eq!(reference_profiles.len(), 6, "6 canonical PBMC cell types");
+
+    let query_cells = db
+        .get_dataset("query_cells")
+        .expect("query_cells dataset should exist");
+    assert_eq!(query_cells.len(), 240, "240 synthetic cells generated");
+
+    let filtered_cells = db
+        .get_dataset("filtered_cells")
+        .expect("filtered_cells dataset should exist (QC pipeline output)");
+    assert_eq!(
+        filtered_cells.len(),
+        237,
+        "QC filter (n_genes_detected >= 200) should drop exactly the 3 low-quality cells"
+    );
+
+    let observed_profiles = db
+        .get_dataset("observed_profiles")
+        .expect("observed_profiles dataset should exist (GROUP BY + AVG_VEC output)");
+    assert_eq!(
+        observed_profiles.len(),
+        6,
+        "one empirical centroid per cell type"
+    );
+
+    // Verify the vector index used for classification exists.
+    let indices = db.list_indices();
+    let has_vector_idx = indices
+        .iter()
+        .any(|(ds, col, t)| ds == "reference_profiles" && col == "markers" && t == "VECTOR");
+    assert!(
+        has_vector_idx,
+        "reference_profiles should have a VECTOR index on markers"
+    );
+
+    let _ = fs::remove_dir_all("./data/pbmc_celltyping");
+}
