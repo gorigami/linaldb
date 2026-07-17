@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.52] - 2026-07-17
+
+### Fixed — CASE WHEN (and any comparison in a computed column or aggregate) silently always took the ELSE branch
+
+Found while building a real-world showcase example (single-cell reference
+classification): `SUM(CASE WHEN predicted = actual THEN 1 ELSE 0 END)` — a
+standard accuracy-metric pattern — always returned `0`, even when some rows
+genuinely matched.
+
+Root cause: `evaluate_expression` (`src/query/physical.rs`), the expression
+evaluator used for CASE WHEN conditions, computed `SELECT` columns, and
+aggregate inner expressions, had no handling for comparison operators (`=`,
+`!=`, `>`, `<`, `>=`, `<=`) in its `Expr::BinaryExpr` arm — only arithmetic
+(`+`, `-`, `*`, `/`). Any comparison silently fell through to `Value::Null`,
+and since `Value::Null` is never `Value::Bool(true)`, every `CASE WHEN
+<comparison>` — including the exact form `DSL_REFERENCE.md`'s own example
+uses (`CASE WHEN score > 90 THEN ...`) — always evaluated to the `ELSE`
+branch, with no error raised. `WHERE` clauses were never affected: they
+route through a separate, already-correct implementation
+(`query::planner::evaluate_expr`).
+
+This had **zero test coverage** anywhere in the suite. Fixed by evaluating
+comparison operators generically via `Value::compare()` before falling
+into the arithmetic type-pair match, mirroring the WHERE-clause evaluator.
+New `tests/case_when_comparison_test.rs`: all 6 comparison operators, in a
+plain computed column, a bare aggregate, and a `GROUP BY` aggregate, across
+Int/String types, plus the exact documented `DSL_REFERENCE.md` grade
+example as a direct regression test. Full suite passes, 0 failures.
+
+---
+
 ## [0.1.51] - 2026-07-17
 
 ### Changed — equi-join now hashes the smaller side; renamed `NestedLoopJoinExec` → `HashJoinExec`
