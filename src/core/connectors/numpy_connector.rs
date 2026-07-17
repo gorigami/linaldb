@@ -1,9 +1,9 @@
-use crate::core::connectors::{Connector, ConnectorError};
+use crate::core::connectors::{field_with_shape, Connector, ConnectorError};
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
 use arrow::array::{ArrayRef, Float32Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use ndarray::ArrayD;
 use std::fs::File;
@@ -92,7 +92,8 @@ impl NumpyConnector {
                     continue;
                 }
 
-                fields.push(Field::new(&name, DataType::Float32, false));
+                let dims = arr.shape().to_vec();
+                fields.push(field_with_shape(&name, DataType::Float32, false, &dims));
                 let data: Vec<f32> = arr.iter().cloned().collect();
                 columns.push(Arc::new(Float32Array::from(data)));
             }
@@ -125,12 +126,14 @@ impl NumpyConnector {
         name: &str,
         arr: ArrayD<f32>,
     ) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
+        let dims = arr.shape().to_vec();
         let data: Vec<f32> = arr.iter().cloned().collect();
 
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = Arc::new(Schema::new(vec![field_with_shape(
             name,
             DataType::Float32,
             false,
+            &dims,
         )]));
 
         let array = Arc::new(Float32Array::from(data));

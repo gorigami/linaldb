@@ -1,4 +1,4 @@
-use crate::core::connectors::{Connector, ConnectorError};
+use crate::core::connectors::{field_with_shape, Connector, ConnectorError};
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
@@ -111,9 +111,12 @@ impl Hdf5Connector {
         columns: &mut Vec<ArrayRef>,
         num_row_count: &mut usize,
     ) -> Result<(), ConnectorError> {
-        // We only support numeric datasets for now
-        // Read as 1D vector for now (flattening if multi-dimensional)
-        // LINAL prefers flat vectors for columns
+        // We only support numeric datasets for now. The underlying Arrow
+        // column is always a flat 1D array (LINAL's connector output
+        // convention), but we stash the dataset's original shape as field
+        // metadata so record_batch_to_tensors can rebuild the real
+        // Matrix/Tensor shape instead of assuming a flat Vector.
+        let shape = ds.shape();
 
         let data: Vec<f32> = match ds.read_raw::<f32>() {
             Ok(v) => v,
@@ -138,7 +141,7 @@ impl Hdf5Connector {
             return Ok(());
         }
 
-        fields.push(Field::new(name, DataType::Float32, false));
+        fields.push(field_with_shape(name, DataType::Float32, false, &shape));
         columns.push(Arc::new(Float32Array::from(data)));
 
         Ok(())
