@@ -9,6 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.60] - 2026-07-18
+
+### Fixed — six real, silent engine bugs found while building a real gravitational-wave analysis showcase
+
+Found by constructing `examples/gw_transient_analysis.lnl` (real LIGO/Virgo
+GWOSC data — see v0.1.61) against the built engine, continuing this
+project's recurring "build a real end-to-end example" bug-finding
+technique. All six are fixed here as a single tracked group since they were
+all discovered in one continuous session; the showcase itself ships
+separately in v0.1.61 once these were fixed.
+
+- **`DslOutput::Table`'s `Display` impl never printed row data** (`src/dsl/mod.rs`) —
+  every `SELECT`/`SHOW`/`DATASET ... FROM` result, in both `linal run` and
+  the REPL, showed only a schema summary (name, row/column counts, field
+  types) and never the actual rows, since the code's origin. Only
+  `--format toon` ever exposed real values. Now prints up to 20 rows (with
+  a `... (N more rows)` marker beyond that), with Vector/Matrix cells
+  summarized rather than fully expanded inline.
+- **`Value`'s `Display` for `Float`/`Vector`/`Matrix` never used scientific
+  notation** (`src/core/value.rs`) — real scientific magnitudes (e.g. LIGO
+  strain ~1e-21) printed as 20+ digits of leading/trailing zeros. Now
+  switches to `{:e}` for magnitudes below 1e-4 or at/above 1e15, leaving
+  normal-range values unchanged.
+- **`DATASET <name> FROM <source> SELECT ...` silently dropped any
+  `CASE WHEN`/computed/window column from the materialized dataset**
+  (`src/dsl/executor/query.rs`) — its hand-rolled LogicalPlan builder only
+  ever kept `SelectExpr::Column`/`Aggregate` entries. `execute_create_dataset_from`
+  now delegates to the already-correct `execute_select` instead of
+  re-deriving a simplified plan.
+- **Tensor-first datasets (`dataset()` + `.add_column()`, and everything
+  `USE DATASET FROM` builds internally) were never registered in the
+  queryable legacy dataset store** (`src/engine/db.rs`) — `SHOW <name>`
+  worked (a separate health-check display), but `SHOW ALL DATASETS`,
+  `SELECT ... FROM <name>`, and `MATERIALIZE <name>` all reported "Dataset
+  not found" for the exact workflow §2 of `DSL_REFERENCE.md` documents.
+  New `DatabaseInstance::sync_tensor_dataset_to_legacy`, called from
+  `add_column_to_tensor_dataset` and `use_dataset_core`, keeps a queryable
+  copy in sync on every column change. `LOAD DATASET`'s "name already
+  exists" hard error (`src/dsl/persistence.rs`) is now a replace, since a
+  restore-from-disk should overwrite a same-named in-session dataset
+  rather than refuse to run.
+- **`ORDER BY <alias>` failed for any `CASE WHEN`/computed/vector-function
+  alias** (`src/dsl/executor/query.rs`, `src/query/physical.rs`) — e.g.
+  `SELECT L2_NORM(v) AS energy FROM t ORDER BY energy` errored with
+  "Column not found for sorting: energy", since `ORDER BY`/`LIMIT` were
+  baked into the `LogicalPlan` and executed before the post-processing
+  step that appends computed/window columns. Such `ORDER BY`/`LIMIT` are
+  now deferred to run after post-processing, when the target column
+  actually exists. Extracted `SortExec`'s row-sorting logic into a
+  standalone `query::physical::sort_tuples` to share between both paths.
+- **`AVG_VEC`/`SUM_VEC` output columns always reported `Vector(0)` in their
+  schema** (`src/query/logical.rs`) regardless of the real input vector's
+  width — the computed data was correct, only the reported dimension was
+  wrong (visible in `SHOW SCHEMA`, this crate's own table-cell type
+  header, etc). Now inferred from the aggregated expression the same way
+  `AVG`/`SUM`/`MIN`/`MAX` already were.
+
+### Flagged, not fixed (out of scope for this PR)
+
+- **`Float` is `f32` only — there is no real 64-bit float anywhere in the
+  engine**, despite `DOUBLE`/`FLOAT64` being accepted `CAST`/column-type
+  keywords that silently alias to the same `f32` as `FLOAT`. Real-world
+  large-magnitude scientific values (GPS/Unix timestamps, etc.) lose
+  precision — e.g. a real GPS time like `1126259462.4` displays as
+  `1126259500`. `examples/gw_transient_analysis.lnl` routes around this by
+  precomputing any large-magnitude arithmetic in Rust (f64) rather than in
+  the DSL. A real fix would need a genuine `Float64`/`Double` value
+  variant threaded through `Value`, `Tensor` storage, Arrow interop, and
+  the kernels — a much larger change than fits this PR.
+- **`linal run <file>`'s multi-line statement joiner only tracks
+  paren-balance** (`src/main.rs`) — a statement split across multiple
+  bare lines with no unbalanced parens on any intermediate line (e.g.
+  `DATASET d FROM t` on one line, `SELECT ...` on the next) gets executed
+  as a truncated fragment as soon as paren-balance returns to zero, rather
+  than waiting for the full statement. Every existing example dodges this
+  by keeping each statement on one line; a proper fix needs real
+  statement-completion detection, not a quick patch.
+- **`UNION ALL`'s own trailing `ORDER BY`/`LIMIT` is silently ignored** —
+  `SELECT ... FROM a UNION ALL SELECT ... FROM b ORDER BY x LIMIT n`
+  returns the full unsorted, unlimited combined row set with no error.
+  Wrapping the union in a `FROM (...)` subquery (a separately-documented,
+  independently-working feature) applies `ORDER BY`/`LIMIT` correctly and
+  is used as the workaround in `examples/gw_transient_analysis.lnl`.
+
+---
+
 ## [0.1.59] - 2026-07-17
 
 ### Added — `FIELDS (...)` clause for explicit multi-shape ingestion

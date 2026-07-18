@@ -277,7 +277,20 @@ impl LogicalPlan {
                             }
                             super::logical::AggregateFunction::AvgVec
                             | super::logical::AggregateFunction::SumVec => {
-                                typ = crate::core::value::ValueType::Vector(0);
+                                // Was hardcoded to Vector(0) regardless of the
+                                // real input width -- every AVG_VEC/SUM_VEC
+                                // column reported dimension 0 in its schema
+                                // (SHOW SCHEMA, error messages, this crate's
+                                // own table-cell type header) even though the
+                                // actual computed vector had the correct
+                                // element count. Mirrors AVG's own inference
+                                // just above.
+                                let input_schema = input.schema();
+                                typ = match infer_expr_type_full(inner.as_ref(), &input_schema) {
+                                    t @ (crate::core::value::ValueType::Vector(_)
+                                    | crate::core::value::ValueType::Matrix(_, _)) => t,
+                                    _ => crate::core::value::ValueType::Vector(0),
+                                };
                             }
                             _ => {}
                         }
@@ -329,7 +342,12 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                 _ => ValueType::Float,
             },
             AggregateFunction::Count => ValueType::Int,
-            AggregateFunction::AvgVec | AggregateFunction::SumVec => ValueType::Vector(0),
+            AggregateFunction::AvgVec | AggregateFunction::SumVec => {
+                match infer_expr_type_full(inner, schema) {
+                    t @ (ValueType::Vector(_) | ValueType::Matrix(_, _)) => t,
+                    _ => ValueType::Vector(0),
+                }
+            }
             _ => ValueType::Int,
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),

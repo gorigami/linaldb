@@ -230,45 +230,57 @@ impl PhysicalPlan for SortExec {
     fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
         let rows = self.input.execute(db)?;
         let schema = self.schema();
-
-        // Pre-resolve column indices so the sort closure is allocation-free.
-        let col_refs: Vec<(usize, bool)> = self
-            .columns
-            .iter()
-            .map(|(col, asc)| {
-                let idx = schema.get_field_index(col).ok_or_else(|| {
-                    EngineError::InvalidOp(format!("Column not found for sorting: {}", col))
-                })?;
-                match &schema.fields[idx].value_type {
-                    crate::core::value::ValueType::Vector(_)
-                    | crate::core::value::ValueType::Matrix(_, _) => {
-                        Err(EngineError::InvalidOp(format!(
-                            "Cannot ORDER BY column '{}': Vector and Matrix values have no defined ordering. \
-                             Sort by a scalar expression instead (e.g. a similarity/distance function).",
-                            col
-                        )))
-                    }
-                    _ => Ok((idx, *asc)),
-                }
-            })
-            .collect::<Result<_, _>>()?;
-
-        let mut sorted_rows = rows;
-        sorted_rows.sort_by(|a, b| {
-            for &(col_idx, asc) in &col_refs {
-                let cmp = a.values[col_idx]
-                    .compare(&b.values[col_idx])
-                    .unwrap_or(std::cmp::Ordering::Equal);
-                let ord = if asc { cmp } else { cmp.reverse() };
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-
-        Ok(sorted_rows)
+        sort_tuples(rows, &schema, &self.columns)
     }
+}
+
+/// Shared by `SortExec` (ordering by a base column, baked into the
+/// LogicalPlan and run before the query executes) and `execute_select`'s
+/// post-processing pass (ordering by a `Computed`/`Window` alias, which
+/// doesn't exist in any schema until *after* `apply_window_and_computed_exprs`
+/// appends it — see that call site for why this had to be pulled out into a
+/// standalone function rather than staying a `SortExec`-only method).
+pub fn sort_tuples(
+    rows: Vec<Tuple>,
+    schema: &Schema,
+    columns: &[(String, bool)],
+) -> Result<Vec<Tuple>, EngineError> {
+    // Pre-resolve column indices so the sort closure is allocation-free.
+    let col_refs: Vec<(usize, bool)> = columns
+        .iter()
+        .map(|(col, asc)| {
+            let idx = schema.get_field_index(col).ok_or_else(|| {
+                EngineError::InvalidOp(format!("Column not found for sorting: {}", col))
+            })?;
+            match &schema.fields[idx].value_type {
+                crate::core::value::ValueType::Vector(_)
+                | crate::core::value::ValueType::Matrix(_, _) => {
+                    Err(EngineError::InvalidOp(format!(
+                        "Cannot ORDER BY column '{}': Vector and Matrix values have no defined ordering. \
+                         Sort by a scalar expression instead (e.g. a similarity/distance function).",
+                        col
+                    )))
+                }
+                _ => Ok((idx, *asc)),
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut sorted_rows = rows;
+    sorted_rows.sort_by(|a, b| {
+        for &(col_idx, asc) in &col_refs {
+            let cmp = a.values[col_idx]
+                .compare(&b.values[col_idx])
+                .unwrap_or(std::cmp::Ordering::Equal);
+            let ord = if asc { cmp } else { cmp.reverse() };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+
+    Ok(sorted_rows)
 }
 
 /// Aggregation Executor
