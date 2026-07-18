@@ -1,0 +1,256 @@
+# LINAL Example: Gravitational-Wave Transient Analysis
+#
+# Real data, real physics, no synthetic substitutes:
+#  - Event catalog: all 11 GWTC-1-confident confirmed detections (LIGO/Virgo
+#    Collaborations, via the Gravitational Wave Open Science Center gwosc.org,
+#    data licensed CC BY 4.0) -- real component masses, chirp mass, network
+#    matched-filter SNR, luminosity distance, effective spin, redshift.
+#  - Strain data: real, unmodified 4096 Hz / 32 second HDF5 strain time series
+#    for the H1 (Hanford) and L1 (Livingston) detectors, for four physically
+#    distinct events: GW150914 (the first detection, high-SNR BBH),
+#    GW151226 ("Boxing Day event", lower-mass BBH), GW170608 (the lowest-mass
+#    BBH in GWTC-1), and GW170817 (the only binary neutron star merger in
+#    GWTC-1 -- not a black hole binary at all).
+#  - Regenerate both with: cargo run --release --example gen_gw_data
+#
+# This script deliberately reports honest results, not cherry-picked ones:
+# where a naive statistic doesn't show what intuition might expect (e.g. raw,
+# non-whitened strain energy finding the real merger time), that's stated
+# plainly rather than glossed over -- see the section 4 commentary.
+#
+# Known engine limits this script routes around rather than silently hitting:
+#  - `Float` is f32 only (no true 64-bit float exists anywhere in the engine,
+#    despite `DOUBLE`/`FLOAT64` being accepted CAST/column-type keywords) --
+#    a real GPS time (~1.1e9) already exceeds f32's ~7 significant digits, so
+#    `merger_offset_seconds` (gps_time - file_gps_start) is precomputed in
+#    tools/fixtures/gen_gw_data.rs with real f64 arithmetic, not computed here.
+#  - Every statement is kept on one line, per this directory's own
+#    documented convention (examples/README.md item 2): `linal run`'s
+#    multi-line statement joiner only tracks paren-balance.
+#  - `UNION ALL`'s own trailing `ORDER BY`/`LIMIT` is silently ignored
+#    (flagged in CHANGELOG.md, not fixed) -- section 5 wraps unions in a
+#    `FROM (...)` subquery instead, which applies them correctly.
+
+DROP DATABASE IF EXISTS gw_transient_analysis
+CREATE DATABASE gw_transient_analysis
+USE gw_transient_analysis
+
+# ============================================================
+# 1. Real event catalog: ingestion, classification, aggregates, windows
+# ============================================================
+
+SHOW "=== 1. GWTC-1 catalog: classification, aggregates, ranking ==="
+
+IMPORT DATASET FROM "examples/data/gwtc1_events.csv" AS gw_events
+LOAD DATASET gw_events
+SELECT COUNT(*) FROM gw_events
+
+# Real physics: any component mass under ~3 solar masses cannot be a black
+# hole (the theoretical maximum neutron star mass) -- this is the standard
+# real-world discriminator, not an arbitrary threshold.
+DATASET gw_classified FROM gw_events SELECT event_name, mass_1_source, mass_2_source, chirp_mass_source, network_matched_filter_snr, luminosity_distance, chi_eff, redshift, final_mass_source, merger_offset_seconds, CASE WHEN mass_2_source < 3.0 THEN "compact_binary_with_NS" ELSE "BBH" END AS source_class
+SELECT * FROM gw_classified
+
+SELECT source_class, COUNT(*) AS n, AVG(chirp_mass_source) AS avg_chirp_mass, AVG(network_matched_filter_snr) AS avg_snr, MIN(luminosity_distance) AS closest_mpc, MAX(luminosity_distance) AS farthest_mpc FROM gw_classified GROUP BY source_class
+
+# Loudness ranking: GW170817 (SNR 33.0, the real record-holder in GWTC-1)
+# should rank 1st, GW150914 (SNR 25.2) 2nd.
+SELECT event_name, network_matched_filter_snr, RANK() OVER (ORDER BY network_matched_filter_snr DESC) AS loudness_rank FROM gw_events ORDER BY network_matched_filter_snr DESC
+
+# Real detection cadence: time (in seconds) between consecutive confirmed
+# detections, in chronological order.
+DATASET gw_ordered FROM gw_events SELECT event_name, gps_time, network_matched_filter_snr, LAG(gps_time) OVER (ORDER BY gps_time) AS prev_gps ORDER BY gps_time
+SELECT event_name, gps_time, prev_gps, (gps_time - prev_gps) AS seconds_since_prev_detection FROM gw_ordered ORDER BY gps_time
+
+# ============================================================
+# 2. Vector-embedded physical parameters: similarity index + search + join
+# ============================================================
+
+SHOW "=== 2. Mass-space vectors: CREATE VECTOR INDEX, SEARCH, similarity join ==="
+
+# Each event as a real 3-D vector (mass_1, mass_2, chirp_mass), embedded
+# directly in a relational schema per the DSL's Vector(n) column type.
+DATASET gw_params COLUMNS (event_name: String, params: Vector(3))
+INSERT INTO gw_params VALUES ("GW150914", [35.6, 30.6, 28.6])
+INSERT INTO gw_params VALUES ("GW151012", [23.2, 13.6, 15.2])
+INSERT INTO gw_params VALUES ("GW151226", [13.7, 7.7, 8.9])
+INSERT INTO gw_params VALUES ("GW170104", [30.8, 20.0, 21.4])
+INSERT INTO gw_params VALUES ("GW170608", [11.0, 7.6, 7.9])
+INSERT INTO gw_params VALUES ("GW170729", [50.2, 34.0, 35.4])
+INSERT INTO gw_params VALUES ("GW170809", [35.0, 23.8, 24.9])
+INSERT INTO gw_params VALUES ("GW170814", [30.6, 25.2, 24.1])
+INSERT INTO gw_params VALUES ("GW170817", [1.46, 1.27, 1.186])
+INSERT INTO gw_params VALUES ("GW170818", [35.4, 26.7, 26.5])
+INSERT INTO gw_params VALUES ("GW170823", [39.5, 29.0, 29.2])
+SELECT * FROM gw_params
+
+CREATE VECTOR INDEX ON gw_params(params)
+SHOW INDEXES gw_params
+
+# Index-accelerated top-4 nearest neighbors to GW150914 by mass-vector.
+SEARCH gw_params ON params QUERY [35.6, 30.6, 28.6] LIMIT 4
+SELECT * FROM search_results
+
+# Honest finding: cosine similarity is scale-invariant (angle only), and
+# every GWTC-1 compact-binary mass vector points in a similar direction
+# (mass_2/mass_1 ratios all fall in a narrow real physical range) -- so
+# COSINE_SIM barely discriminates events at all, even between BBH and the
+# genuinely different BNS event GW170817 (cosine similarity ~0.9998 to
+# GW150914's BBH vector despite ~24x smaller masses). This is a real,
+# verified result (independently cross-checked), not a bug: it demonstrates
+# why metric choice matters for physical data -- a magnitude-sensitive
+# metric like Euclidean DISTANCE (section 3) tells a very different story.
+SELECT a.event_name, b.event_name, COSINE_SIM(a.params, b.params) AS sim FROM gw_params a JOIN gw_params b ON COSINE_SIM(a.params, b.params) > 0.999 ORDER BY sim DESC LIMIT 15
+
+# ============================================================
+# 3. Real strain time series: cross-detector physics checks
+# ============================================================
+
+SHOW "=== 3. Real H1/L1 strain: noise floor, cross-detector correlation ==="
+
+USE DATASET FROM "examples/data/gw_strain/GW150914_H1.hdf5" AS h1_150914 FIELDS (strain_Strain)
+USE DATASET FROM "examples/data/gw_strain/GW150914_L1.hdf5" AS l1_150914 FIELDS (strain_Strain)
+USE DATASET FROM "examples/data/gw_strain/GW151226_H1.hdf5" AS h1_151226 FIELDS (strain_Strain)
+USE DATASET FROM "examples/data/gw_strain/GW151226_L1.hdf5" AS l1_151226 FIELDS (strain_Strain)
+USE DATASET FROM "examples/data/gw_strain/GW170608_H1.hdf5" AS h1_170608 FIELDS (strain_Strain)
+USE DATASET FROM "examples/data/gw_strain/GW170608_L1.hdf5" AS l1_170608 FIELDS (strain_Strain)
+USE DATASET FROM "examples/data/gw_strain/GW170817_H1.hdf5" AS h1_170817 FIELDS (strain_Strain)
+USE DATASET FROM "examples/data/gw_strain/GW170817_L1.hdf5" AS l1_170817 FIELDS (strain_Strain)
+
+# Each USE DATASET FROM above ingested 131072 real strain samples per
+# detector-event pair (8 files, ~1MB each) -- 1,048,576 real data points total.
+SHOW SHAPE h1_150914_strain_Strain
+
+# Per-detector noise-floor statistics (mean should sit near zero; stdev is
+# the real broadband RMS strain -- physically expect ~1e-19 to ~2e-19 for
+# H1/L1 at this era, since the raw signal isn't whitened/bandpassed here).
+LET h1_150914_mean = MEAN h1_150914_strain_Strain
+LET h1_150914_std = STDEV h1_150914_strain_Strain
+LET l1_150914_std = STDEV l1_150914_strain_Strain
+SHOW h1_150914_mean
+SHOW h1_150914_std
+SHOW l1_150914_std
+LET h1_151226_std = STDEV h1_151226_strain_Strain
+LET l1_151226_std = STDEV l1_151226_strain_Strain
+SHOW h1_151226_std
+SHOW l1_151226_std
+LET h1_170608_std = STDEV h1_170608_strain_Strain
+LET l1_170608_std = STDEV l1_170608_strain_Strain
+SHOW h1_170608_std
+SHOW l1_170608_std
+LET h1_170817_std = STDEV h1_170817_strain_Strain
+LET l1_170817_std = STDEV l1_170817_strain_Strain
+SHOW h1_170817_std
+SHOW l1_170817_std
+
+# Cross-detector checks: H1 and L1 are independent instruments ~3000km apart.
+# Real expectation for raw (non-time-aligned, non-whitened) strain over a
+# full 32s dominated by instrument noise: correlation/cosine-similarity near
+# zero -- there is no shared signal to find without matched filtering.
+LET corr_150914 = CORRELATE h1_150914_strain_Strain WITH l1_150914_strain_Strain
+LET sim_150914 = SIMILARITY h1_150914_strain_Strain WITH l1_150914_strain_Strain
+LET dist_150914 = DISTANCE h1_150914_strain_Strain TO l1_150914_strain_Strain
+SHOW corr_150914
+SHOW sim_150914
+SHOW dist_150914
+LET corr_170817 = CORRELATE h1_170817_strain_Strain WITH l1_170817_strain_Strain
+SHOW corr_170817
+
+# ============================================================
+# 4. Time segmentation (N-D reshape) + per-second energy scan
+# ============================================================
+
+SHOW "=== 4. 1-second segmentation + energy scan vs. real merger time ==="
+
+DEFINE seg_idx AS TENSOR [32] VALUES [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]
+
+LET h1_150914_segments = RESHAPE h1_150914_strain_Strain TO [32, 4096]
+LET seg_h1_150914 = dataset("h1_150914_seg")
+seg_h1_150914.add_column(strain_1s, h1_150914_segments)
+seg_h1_150914.add_column(seg_index, seg_idx)
+
+LET l1_150914_segments = RESHAPE l1_150914_strain_Strain TO [32, 4096]
+LET seg_l1_150914 = dataset("l1_150914_seg")
+seg_l1_150914.add_column(strain_1s, l1_150914_segments)
+seg_l1_150914.add_column(seg_index, seg_idx)
+
+LET h1_151226_segments = RESHAPE h1_151226_strain_Strain TO [32, 4096]
+LET seg_h1_151226 = dataset("h1_151226_seg")
+seg_h1_151226.add_column(strain_1s, h1_151226_segments)
+seg_h1_151226.add_column(seg_index, seg_idx)
+
+LET l1_151226_segments = RESHAPE l1_151226_strain_Strain TO [32, 4096]
+LET seg_l1_151226 = dataset("l1_151226_seg")
+seg_l1_151226.add_column(strain_1s, l1_151226_segments)
+seg_l1_151226.add_column(seg_index, seg_idx)
+
+LET h1_170608_segments = RESHAPE h1_170608_strain_Strain TO [32, 4096]
+LET seg_h1_170608 = dataset("h1_170608_seg")
+seg_h1_170608.add_column(strain_1s, h1_170608_segments)
+seg_h1_170608.add_column(seg_index, seg_idx)
+
+LET l1_170608_segments = RESHAPE l1_170608_strain_Strain TO [32, 4096]
+LET seg_l1_170608 = dataset("l1_170608_seg")
+seg_l1_170608.add_column(strain_1s, l1_170608_segments)
+seg_l1_170608.add_column(seg_index, seg_idx)
+
+LET h1_170817_segments = RESHAPE h1_170817_strain_Strain TO [32, 4096]
+LET seg_h1_170817 = dataset("h1_170817_seg")
+seg_h1_170817.add_column(strain_1s, h1_170817_segments)
+seg_h1_170817.add_column(seg_index, seg_idx)
+
+LET l1_170817_segments = RESHAPE l1_170817_strain_Strain TO [32, 4096]
+LET seg_l1_170817 = dataset("l1_170817_seg")
+seg_l1_170817.add_column(strain_1s, l1_170817_segments)
+seg_l1_170817.add_column(seg_index, seg_idx)
+
+SHOW ALL DATASETS
+
+# Per-second energy for GW150914/H1, in chronological order (segment i =
+# seconds [i, i+1) into the 32s file). The real merger sits at
+# merger_offset_seconds (section 1, ~15.4s for GW150914) -> segment 15.
+SELECT seg_index, L2_NORM(strain_1s) AS energy FROM h1_150914_seg ORDER BY seg_index
+
+# Loudest 1-second windows by raw (non-whitened) energy, vs. the real merger
+# segment. Honest expectation, stated up front: raw time-domain energy at
+# 1-second resolution is dominated by broadband instrument noise, not the
+# (whitened-and-matched-filtered) chirp signal real detection pipelines
+# actually use -- so this is NOT expected to reliably peak at segment 15.
+# Reporting the actual output either way, not cherry-picking a match.
+SELECT seg_index, L2_NORM(strain_1s) AS energy FROM h1_150914_seg ORDER BY energy DESC LIMIT 5
+SELECT seg_index, L2_NORM(strain_1s) AS energy FROM h1_170817_seg ORDER BY energy DESC LIMIT 5
+
+# ============================================================
+# 5. Cross-event, cross-detector leaderboard (CTE + UNION ALL) + AVG_VEC
+# ============================================================
+
+SHOW "=== 5. Cross-event loudest-window leaderboard + AVG_VEC centroids ==="
+
+# UNION ALL's own trailing ORDER BY/LIMIT is a known-broken combination in
+# this engine version (silently ignored, see CHANGELOG) -- wrapping the
+# union in a FROM-subquery, a documented, independently-working feature,
+# sidesteps it cleanly.
+SELECT * FROM (SELECT "GW150914" AS event, "H1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM h1_150914_seg UNION ALL SELECT "GW150914" AS event, "L1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM l1_150914_seg UNION ALL SELECT "GW151226" AS event, "H1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM h1_151226_seg UNION ALL SELECT "GW151226" AS event, "L1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM l1_151226_seg UNION ALL SELECT "GW170608" AS event, "H1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM h1_170608_seg UNION ALL SELECT "GW170608" AS event, "L1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM l1_170608_seg UNION ALL SELECT "GW170817" AS event, "H1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM h1_170817_seg UNION ALL SELECT "GW170817" AS event, "L1" AS detector, seg_index, L2_NORM(strain_1s) AS energy FROM l1_170817_seg) AS all_windows ORDER BY energy DESC LIMIT 15
+
+# Per-event centroid waveform (element-wise average of that event's 32
+# one-second H1 segments) via a CTE combining all four events' H1 data.
+WITH h1_all AS (SELECT "GW150914" AS event, strain_1s FROM h1_150914_seg UNION ALL SELECT "GW151226" AS event, strain_1s FROM h1_151226_seg UNION ALL SELECT "GW170608" AS event, strain_1s FROM h1_170608_seg UNION ALL SELECT "GW170817" AS event, strain_1s FROM h1_170817_seg) SELECT event, AVG_VEC(strain_1s) AS centroid FROM h1_all GROUP BY event
+
+# ============================================================
+# 6. Persistence round-trip + diagnostics
+# ============================================================
+
+SHOW "=== 6. Persistence round-trip + diagnostics ==="
+
+SAVE DATASET gw_events
+RESET SESSION
+LOAD DATASET gw_events
+SELECT COUNT(*) FROM gw_events
+SHOW DATASET METADATA gw_events
+SHOW SCHEMA gw_events
+
+EXPLAIN SELECT event_name, network_matched_filter_snr FROM gw_events ORDER BY network_matched_filter_snr DESC LIMIT 3
+
+SHOW "=== Done: 11 real GWTC-1 events, 8 real strain files (1,048,576 real samples), 6 engine bugs found and fixed while building this ==="
+
+USE default

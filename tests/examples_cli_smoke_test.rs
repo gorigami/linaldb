@@ -92,6 +92,14 @@ fn test_example_hdf5_digit_classification_runs_clean() {
 }
 
 #[test]
+fn test_example_gw_transient_analysis_runs_clean() {
+    let _guard = DATA_DIR_LOCK.lock().unwrap();
+    let _ = fs::remove_dir_all("./data/gw_transient_analysis");
+    assert_example_runs_clean("gw_transient_analysis");
+    let _ = fs::remove_dir_all("./data/gw_transient_analysis");
+}
+
+#[test]
 fn test_example_smoke_test_runs_clean() {
     let _guard = DATA_DIR_LOCK.lock().unwrap();
     let _ = fs::remove_dir_all("./data/smoke_db_final");
