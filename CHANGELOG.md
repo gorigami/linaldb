@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.61] - 2026-07-18
+
+### Added — real gravitational-wave transient analysis showcase
+
+`examples/gw_transient_analysis.lnl`, the third real-data end-to-end
+showcase after `pbmc_cell_typing.lnl` (synthetic data) and
+`hdf5_digit_classification.lnl` (real UCI digits). Uses real LIGO/Virgo
+data from GWOSC (gwosc.org, CC BY 4.0): all 11 GWTC-1-confident confirmed
+event parameters (masses, chirp mass, SNR, distance, spin, redshift) plus
+real, unmodified 4096 Hz / 32s strain HDF5 for 4 physically distinct
+events x 2 detectors (H1/L1) — 1,048,576 real strain samples total.
+Exercises `CASE WHEN` physics classification (BBH vs. the one real
+neutron-star-containing event, GW170817), aggregates, window functions
+(`RANK`, `LAG`), a Vector-embedded relational schema with
+`CREATE VECTOR INDEX`/`SEARCH`, `CORRELATE`/`SIMILARITY`/`DISTANCE`
+between real cross-detector strain pairs, N-D `RESHAPE` into per-second
+segments with an `L2_NORM` energy scan, a cross-event/cross-detector CTE +
+`UNION ALL` leaderboard, `AVG_VEC` per-event centroids, and a persistence
+round-trip. New fixture generator `tools/fixtures/gen_gw_data.rs`
+downloads the real catalog + strain files (checked in, ~8MB).
+
+Reports two honest, non-cherry-picked findings rather than glossing over
+them: raw (non-whitened) per-second strain energy does not reliably peak
+at the real, independently-computed merger time (real detection pipelines
+whiten and matched-filter first, which is out of scope here); and cosine
+similarity barely discriminates between GWTC-1 events by mass vector,
+even between BBH and the one real BNS event, since chirp mass is nearly
+co-linear with (m1, m2) for any physically-consistent compact binary.
+
+Built directly on top of v0.1.60's six bug fixes, all found while
+constructing this example.
+
+---
+
 ## [0.1.60] - 2026-07-18
 
 ### Fixed — six real, silent engine bugs found while building a real gravitational-wave analysis showcase
