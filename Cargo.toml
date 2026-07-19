@@ -54,10 +54,6 @@ path = "tools/fixtures/gen_zarr_data.rs"
 name = "gen_digits_data"
 path = "tools/fixtures/gen_digits_data.rs"
 
-[[example]]
-name = "gen_gw_data"
-path = "tools/fixtures/gen_gw_data.rs"
-
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
