@@ -113,7 +113,9 @@ impl DatabaseInstance {
             .dataset_vars
             .get(ds_var_or_name)
             .map(|s| s.as_str())
-            .unwrap_or(ds_var_or_name);
+            .unwrap_or(ds_var_or_name)
+            .to_string();
+        let ds_name = ds_name.as_str();
 
         // 4. Validate row count consistency (using immutable borrow first)
         let rows_in_new_col = match tensor.shape.rank() {
@@ -175,6 +177,7 @@ impl DatabaseInstance {
             crate::core::dataset::ResourceReference::tensor(tensor_id),
             schema,
         );
+        self.sync_tensor_dataset_to_legacy(ds_name)?;
         Ok(())
     }
     /// Verify that all columns in a tensor-first dataset point to existing tensors.
@@ -305,6 +308,38 @@ impl DatabaseInstance {
             Some(ds_name.to_string()),
         )
         .map_err(EngineError::InvalidOp)
+    }
+
+    /// Materializes a tensor-first dataset (see `materialize_tensor_dataset`)
+    /// and, unlike that method, also stores/refreshes the result in the
+    /// queryable legacy dataset store under the same name.
+    ///
+    /// Without this, a dataset built via `dataset()` + `.add_column()` (or
+    /// ingested via `USE DATASET FROM`) was only ever materialized as a
+    /// one-shot `DslOutput::Table` for immediate display -- `SHOW ALL
+    /// DATASETS`, `SELECT ... FROM <name>`, and `MATERIALIZE <name>` all
+    /// look exclusively in the legacy store, which nothing ever populated,
+    /// so every subsequent reference to the dataset failed with "Dataset
+    /// not found" even though `SHOW <name>` (the tensor-first health-check
+    /// view) worked fine. Called from every mutation site that changes a
+    /// tensor-first dataset's columns, so the legacy copy never goes stale.
+    pub fn sync_tensor_dataset_to_legacy(&mut self, ds_name: &str) -> Result<Dataset, EngineError> {
+        let materialized = self.materialize_tensor_dataset(ds_name)?;
+        if let Ok(existing) = self.dataset_store.get_mut_by_name(ds_name) {
+            existing.schema = materialized.schema.clone();
+            existing.rows = materialized.rows.clone();
+            existing
+                .metadata
+                .update_stats(&existing.schema, &existing.rows);
+        } else {
+            let id = self.dataset_store.gen_id();
+            let mut fresh = materialized.clone();
+            fresh.id = id;
+            self.dataset_store
+                .insert(fresh, Some(ds_name.to_string()))
+                .map_err(EngineError::from)?;
+        }
+        Ok(materialized)
     }
 
     /// Resets the database biological state (clear all tensors and datasets)

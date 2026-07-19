@@ -205,10 +205,27 @@ impl Value {
     }
 }
 
+/// Real scientific data routinely has magnitudes far outside typical
+/// relational values (e.g. LIGO strain ~1e-21, astronomical distances
+/// ~1e20+): plain decimal `Display` on f32 never switches to scientific
+/// notation, so these print as 20+ digits of leading/trailing zeros instead
+/// of a readable number. Rust's `{:?}` (Debug) on f32 already does this
+/// switch (which is why Tensor's SHOW output, going through Debug on a
+/// Vec<f32>, looks fine) -- this brings `Value`'s own `Display` in line for
+/// the same magnitudes, only for values plain decimal notation renders
+/// unreadable, leaving normal-range values unchanged.
+fn format_f32(v: f32) -> String {
+    if v != 0.0 && (v.abs() < 1e-4 || v.abs() >= 1e15) {
+        format!("{:e}", v)
+    } else {
+        format!("{}", v)
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Float(v) => write!(f, "{}", v),
+            Value::Float(v) => write!(f, "{}", format_f32(*v)),
             Value::Int(v) => write!(f, "{}", v),
             Value::String(v) => write!(f, "\"{}\"", v),
             Value::Bool(v) => write!(f, "{}", v),
@@ -218,7 +235,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", val)?;
+                    write!(f, "{}", format_f32(*val))?;
                 }
                 write!(f, "]")
             }
@@ -233,7 +250,7 @@ impl fmt::Display for Value {
                         if j > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", val)?;
+                        write!(f, "{}", format_f32(*val))?;
                     }
                     write!(f, "]")?;
                 }

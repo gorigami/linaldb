@@ -17,134 +17,46 @@ pub(super) fn execute_create_dataset_from(
     clause: DatasetFromClause,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    let source_ds = db
-        .get_dataset(&clause.source)
-        .map_err(|e| DslError::Engine {
-            line: line_no,
-            source: e,
-        })?;
-    let source_schema = source_ds.schema.clone();
-
-    let mut plan = LogicalPlan::Scan {
-        dataset_name: clause.source.clone(),
-        schema: source_schema,
+    // Delegate to `execute_select` instead of re-deriving a LogicalPlan by
+    // hand: the hand-rolled version here used to build its own Project/
+    // Aggregate plan directly from `clause.select` and only ever kept
+    // `SelectExpr::Column`/`Aggregate` entries, silently dropping any
+    // `SelectExpr::Computed` (CASE WHEN, arithmetic, CAST, ...) or
+    // `SelectExpr::Window` column from the materialized dataset with no
+    // error at all -- e.g. `DATASET d FROM t SELECT a, CASE WHEN ... END AS
+    // b` materialized `d` with only column `a`, `b` entirely missing.
+    // `execute_select` already has the correct, tested post-processing for
+    // both (`apply_window_and_computed_exprs`), so reuse it verbatim.
+    let select_stmt = SelectStmt {
+        ctes: vec![],
+        distinct: false,
+        source: DatasetSource::Named(clause.source),
+        joins: vec![],
+        columns: match clause.select {
+            Some(exprs) => SelectColumns::Named(exprs),
+            None => SelectColumns::All,
+        },
+        filter: clause.filter,
+        group_by: clause.group_by,
+        having: clause.having,
+        order_by: clause.order_by,
+        limit: clause.limit,
+        offset: clause.offset,
+        union: None,
     };
 
-    if let Some(f) = clause.filter {
-        plan = LogicalPlan::Filter {
-            input: Box::new(plan),
-            predicate: dsl_expr_to_logical_expr(&f),
-        };
-    }
-
-    if !clause.group_by.is_empty() {
-        let group_exprs: Vec<LogicalExpr> = clause
-            .group_by
-            .iter()
-            .map(|c| LogicalExpr::Column(c.clone()))
-            .collect();
-        let aggr_exprs: Vec<LogicalExpr> = clause
-            .select
-            .as_ref()
-            .map(|exprs| {
-                exprs
-                    .iter()
-                    .filter_map(|e| match e {
-                        SelectExpr::Aggregate { func, expr, alias } => {
-                            Some(LogicalExpr::AggregateExpr {
-                                func: agg_func_to_logical(func),
-                                expr: Box::new(dsl_expr_to_logical_expr(expr)),
-                                alias: alias.clone(),
-                            })
-                        }
-                        SelectExpr::Column(_)
-                        | SelectExpr::Window { .. }
-                        | SelectExpr::Computed { .. } => None,
-                    })
-                    .collect()
+    let output = execute_select(db, select_stmt, line_no)?;
+    let (result_schema, result_rows) = match output {
+        DslOutput::Table(ds) => (ds.schema, ds.rows),
+        _ => {
+            return Err(DslError::Engine {
+                line: line_no,
+                source: crate::engine::EngineError::InvalidOp(
+                    "DATASET ... FROM: inner SELECT did not produce a table".to_string(),
+                ),
             })
-            .unwrap_or_default();
-        plan = LogicalPlan::Aggregate {
-            input: Box::new(plan),
-            group_expr: group_exprs,
-            aggr_expr: aggr_exprs,
-        };
-    } else if let Some(exprs) = clause.select {
-        let has_aggr = exprs
-            .iter()
-            .any(|e| matches!(e, SelectExpr::Aggregate { .. }));
-        if has_aggr {
-            let aggr_exprs: Vec<LogicalExpr> = exprs
-                .into_iter()
-                .filter_map(|e| match e {
-                    SelectExpr::Aggregate { func, expr, alias } => {
-                        Some(LogicalExpr::AggregateExpr {
-                            func: agg_func_to_logical(&func),
-                            expr: Box::new(dsl_expr_to_logical_expr(&expr)),
-                            alias,
-                        })
-                    }
-                    SelectExpr::Column(_)
-                    | SelectExpr::Window { .. }
-                    | SelectExpr::Computed { .. } => None,
-                })
-                .collect();
-            plan = LogicalPlan::Aggregate {
-                input: Box::new(plan),
-                group_expr: vec![],
-                aggr_expr: aggr_exprs,
-            };
-        } else {
-            let cols: Vec<String> = exprs
-                .into_iter()
-                .filter_map(|e| match e {
-                    SelectExpr::Column(c) => Some(c),
-                    SelectExpr::Aggregate { .. }
-                    | SelectExpr::Window { .. }
-                    | SelectExpr::Computed { .. } => None,
-                })
-                .collect();
-            plan = LogicalPlan::Project {
-                input: Box::new(plan),
-                columns: cols,
-            };
         }
-    }
-
-    if let Some(f) = clause.having {
-        plan = LogicalPlan::Filter {
-            input: Box::new(plan),
-            predicate: dsl_expr_to_logical_expr(&f),
-        };
-    }
-
-    if let Some(ord) = clause.order_by {
-        plan = LogicalPlan::Sort {
-            input: Box::new(plan),
-            columns: ord.columns,
-        };
-    }
-
-    if let Some(n) = clause.limit {
-        plan = LogicalPlan::Limit {
-            input: Box::new(plan),
-            n,
-            offset: clause.offset.unwrap_or(0),
-        };
-    }
-
-    let planner = Planner::new(db);
-    let physical_plan = planner
-        .create_physical_plan(&plan)
-        .map_err(|e| DslError::Engine {
-            line: line_no,
-            source: e,
-        })?;
-    let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
-        line: line_no,
-        source: e,
-    })?;
-    let result_schema = physical_plan.schema();
+    };
 
     db.create_dataset(name.clone(), result_schema)
         .map_err(|e| DslError::Engine {
@@ -278,6 +190,19 @@ pub(super) fn execute_select(
         SelectColumns::All => vec![],
     };
 
+    // `ORDER BY <alias>` where `<alias>` is a Computed/Window column (e.g.
+    // `SELECT L2_NORM(v) AS energy FROM t ORDER BY energy`, or any `CASE
+    // WHEN ... END AS x ... ORDER BY x`) can't be baked into the LogicalPlan
+    // as a `Sort` here: that alias doesn't exist in any physical schema
+    // until `apply_window_and_computed_exprs` appends it further down, so
+    // `SortExec` failed with "Column not found for sorting" on every such
+    // query -- previously the ONLY way to order by a derived column at all.
+    // When `ORDER BY` names a column absent from the plan's own schema at
+    // this point, defer both it and LIMIT/OFFSET to run on the final rows
+    // after post-processing instead (see the bottom of this function).
+    let mut deferred_order: Option<OrderByClause> = None;
+    let mut deferred_limit: Option<(usize, usize)> = None;
+
     if !s.group_by.is_empty() {
         let group_exprs: Vec<LogicalExpr> = s
             .group_by
@@ -314,17 +239,30 @@ pub(super) fn execute_select(
             };
         }
         if let Some(ord) = &s.order_by {
-            plan = LogicalPlan::Sort {
-                input: Box::new(plan),
-                columns: ord.columns.clone(),
-            };
+            let schema_now = plan.schema();
+            if ord
+                .columns
+                .iter()
+                .all(|(c, _)| schema_now.get_field_index(c).is_some())
+            {
+                plan = LogicalPlan::Sort {
+                    input: Box::new(plan),
+                    columns: ord.columns.clone(),
+                };
+            } else {
+                deferred_order = Some(ord.clone());
+            }
         }
-        if let Some(n) = s.limit {
-            plan = LogicalPlan::Limit {
-                input: Box::new(plan),
-                n,
-                offset: s.offset.unwrap_or(0),
-            };
+        if deferred_order.is_none() {
+            if let Some(n) = s.limit {
+                plan = LogicalPlan::Limit {
+                    input: Box::new(plan),
+                    n,
+                    offset: s.offset.unwrap_or(0),
+                };
+            }
+        } else {
+            deferred_limit = s.limit.map(|n| (n, s.offset.unwrap_or(0)));
         }
     } else {
         // A SELECT with no GROUP BY can still contain aggregate functions
@@ -372,17 +310,30 @@ pub(super) fn execute_select(
             };
         }
         if let Some(ord) = &s.order_by {
-            plan = LogicalPlan::Sort {
-                input: Box::new(plan),
-                columns: ord.columns.clone(),
-            };
+            let schema_now = plan.schema();
+            if ord
+                .columns
+                .iter()
+                .all(|(c, _)| schema_now.get_field_index(c).is_some())
+            {
+                plan = LogicalPlan::Sort {
+                    input: Box::new(plan),
+                    columns: ord.columns.clone(),
+                };
+            } else {
+                deferred_order = Some(ord.clone());
+            }
         }
-        if let Some(n) = s.limit {
-            plan = LogicalPlan::Limit {
-                input: Box::new(plan),
-                n,
-                offset: s.offset.unwrap_or(0),
-            };
+        if deferred_order.is_none() {
+            if let Some(n) = s.limit {
+                plan = LogicalPlan::Limit {
+                    input: Box::new(plan),
+                    n,
+                    offset: s.offset.unwrap_or(0),
+                };
+            }
+        } else {
+            deferred_limit = s.limit.map(|n| (n, s.offset.unwrap_or(0)));
         }
         // Only project base columns here (Window/Computed added post-execution).
         // Skip entirely for aggregate plans — AggregateExec's schema already
@@ -557,6 +508,21 @@ pub(super) fn execute_select(
     } else {
         base_schema
     };
+
+    // Apply the ORDER BY / LIMIT that had to be deferred past post-processing
+    // because they target a Computed/Window alias (see where `deferred_order`
+    // is set, above) -- now that `result_schema` includes that column.
+    if let Some(ord) = &deferred_order {
+        result_rows =
+            crate::query::physical::sort_tuples(result_rows, &result_schema, &ord.columns)
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+    }
+    if let Some((n, offset)) = deferred_limit {
+        result_rows = result_rows.into_iter().skip(offset).take(n).collect();
+    }
 
     // Handle UNION
     let (result_rows, result_schema) = if let Some((kind, right_stmt)) = s.union {

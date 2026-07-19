@@ -233,27 +233,18 @@ fn load_dataset_core(
     }
 
     let schema = dataset.schema.clone();
-    match db.create_dataset(dataset_name.to_string(), schema) {
-        Ok(_) => {}
-        Err(crate::engine::EngineError::DatasetError(
-            crate::core::store::DatasetStoreError::NameAlreadyExists(_),
-        )) => {
-            return Err(DslError::Engine {
-                line: line_no,
-                source: crate::engine::EngineError::DatasetError(
-                    crate::core::store::DatasetStoreError::NameAlreadyExists(
-                        dataset_name.to_string(),
-                    ),
-                ),
-            });
-        }
-        Err(e) => {
-            return Err(DslError::Engine {
-                line: line_no,
-                source: e,
-            })
-        }
-    }
+    // LOAD DATASET is a restore-from-disk operation: a dataset already
+    // registered under this name in the current session (from an earlier
+    // LOAD/SAVE, or -- since tensor-first datasets now sync into the legacy
+    // store on every column change, see `sync_tensor_dataset_to_legacy` --
+    // from `dataset()`/`USE DATASET FROM`/`.add_column()` under the same
+    // name) should simply be replaced, not treated as a hard name conflict.
+    let _ = db.remove_dataset(dataset_name);
+    db.create_dataset(dataset_name.to_string(), schema)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
 
     let row_count = dataset.len();
     for row in dataset.rows {
@@ -478,9 +469,13 @@ fn use_dataset_core(
 
     db.active_instance_mut().register_tensor_dataset(ds);
 
+    // Also stores the materialized result in the queryable legacy dataset
+    // store under `ds_name` -- without this, `SELECT ... FROM ds_name` /
+    // `SHOW ALL DATASETS` couldn't see anything `USE DATASET FROM` created
+    // (see `sync_tensor_dataset_to_legacy`'s doc comment).
     Ok(DslOutput::Table(
-        db.active_instance()
-            .materialize_tensor_dataset(ds_name)
+        db.active_instance_mut()
+            .sync_tensor_dataset_to_legacy(ds_name)
             .map_err(|e| DslError::Engine {
                 line: line_no,
                 source: e,

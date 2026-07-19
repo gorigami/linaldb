@@ -9,8 +9,36 @@ pub use error::DslError;
 
 use crate::core::dataset_legacy::Dataset;
 use crate::core::tensor::Tensor;
+use crate::core::value::Value;
 use crate::engine::TensorDb;
 use serde::Serialize;
+
+/// Table-row rendering only: caps how many elements of a Vector/Matrix cell
+/// are shown so a single wide column doesn't dwarf the rest of the row.
+/// Deliberately separate from `Value`'s own `Display` (used elsewhere, e.g.
+/// tensor SHOW / error messages) rather than changing that impl's output.
+fn format_table_cell(v: &Value) -> String {
+    const MAX_ELEMS: usize = 6;
+    match v {
+        Value::Vector(vec) if vec.len() > MAX_ELEMS => {
+            // Value::Float(*x).to_string() (not the raw f32's own to_string())
+            // to reuse the same scientific-notation formatting for extreme
+            // magnitudes as a plain Float cell -- these are the exact
+            // magnitudes (~1e-19 to ~1e-21) real GW strain data has.
+            let head: Vec<String> = vec[..MAX_ELEMS]
+                .iter()
+                .map(|x| Value::Float(*x).to_string())
+                .collect();
+            format!("[{}, ... ({} total)]", head.join(", "), vec.len())
+        }
+        Value::Matrix(m) => format!(
+            "Matrix[{}x{}]",
+            m.len(),
+            m.first().map(|r| r.len()).unwrap_or(0)
+        ),
+        other => other.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub enum DslOutput {
@@ -39,6 +67,17 @@ impl fmt::Display for DslOutput {
                 )?;
                 for field in &ds.schema.fields {
                     writeln!(f, "  - {}: {}", field.name, field.value_type)?;
+                }
+                const MAX_ROWS: usize = 20;
+                if !ds.rows.is_empty() {
+                    writeln!(f, "  ---")?;
+                }
+                for row in ds.rows.iter().take(MAX_ROWS) {
+                    let cells: Vec<String> = row.values.iter().map(format_table_cell).collect();
+                    writeln!(f, "  ({})", cells.join(", "))?;
+                }
+                if ds.rows.len() > MAX_ROWS {
+                    writeln!(f, "  ... ({} more rows)", ds.rows.len() - MAX_ROWS)?;
                 }
                 Ok(())
             }
