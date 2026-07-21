@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.66] - 2026-07-21
+
+### Added — `PSD` keyword form (checkpoint 3 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET psd = PSD signal WINDOW n` — power spectral density estimate via
+  averaged periodograms: splits `signal` into non-overlapping `n`-sample
+  chunks, FFTs each, averages the per-bin power. Real `Vector(n/2+1)`
+  output.
+- **Simplified vs. textbook Welch's method** (documented explicitly, not
+  silently claimed as full Welch's): no chunk overlap and no window
+  function (Hann/Hamming/etc.) applied before each chunk's FFT. Good
+  enough for the noise-floor estimation `WHITEN` (next checkpoint) needs.
+- New lexer tokens (`PSD`, `WINDOW`), `CallExpr::Psd` variant, parser arm
+  mirroring `SCALE ... BY ...`'s existing keyword-plus-parameter pattern.
+- `core::signal::psd` validated by 3 unit tests (single-frequency peak
+  location, white-noise flatness, panics on signal-shorter-than-window as
+  an internal-caller-bug case) — the DSL layer (`eval_psd`) validates
+  rank/length itself first and returns a normal engine error for bad user
+  input, never reaching that panic.
+- `tests/signal_processing_test.rs`: 3 more tests through the full DSL
+  layer, including an exact power check (`(window/2)² `) against theory.
+- `docs/DSL_REFERENCE.md` §3 documents `PSD` alongside `FFT`/`IFFT`/`MAGNITUDE`.
+
+---
+
 ## [0.1.65] - 2026-07-21
 
 ### Added — `MAGNITUDE` keyword form (checkpoint 2 of `SIGNAL_PROCESSING_PLAN.md`)

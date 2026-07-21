@@ -112,12 +112,24 @@ before starting the next.
     just "it ran". Plus a hard-error test for wrong-shaped input.
   - `DSL_REFERENCE.md` §3 entry alongside `FFT`/`IFFT`.
 
-- [ ] **3. `PSD` (Welch's method noise-floor estimate)**
-  - `LET psd = PSD signal WITH WINDOW n` (or similar syntax, finalize
-    during implementation) — average periodogram over overlapping
-    windows, real `Vector(n/2+1)` output.
-  - Test against synthetic white noise (flat expected PSD) and a known
-    single-frequency signal (PSD peak at the right bin).
+- [x] **3. `PSD` (averaged-periodogram noise-floor estimate)** — **Done in v0.1.66**
+  - `LET psd = PSD signal WINDOW n` — real `Vector(n/2+1)` output.
+  - **Simplified vs. textbook Welch's method** (design call made during
+    implementation, documented in `DSL_REFERENCE.md`/`core::signal::psd`):
+    non-overlapping chunks (not 50% overlap) and no window function
+    applied before each chunk's FFT (implicit rectangular window). Good
+    enough for `WHITEN`'s noise-floor estimation need; not a
+    research-grade PSD estimator.
+  - `core::signal::psd` validated with 3 unit tests: single-frequency
+    signal's PSD peaks at the right bin, white noise's PSD is roughly
+    flat (no bin >5x the mean), and a `should_panic` test for
+    signal-shorter-than-window (an internal-caller-bug case). The DSL
+    layer (`eval_psd`) validates rank/length itself and returns a normal
+    engine error for bad user input instead of ever reaching that panic.
+  - `tests/signal_processing_test.rs`: 3 more tests through the full DSL
+    layer (repeated-sine peaks at the right bin with the exact expected
+    power N/2², rejects signal shorter than window, rejects non-Vector
+    input).
 
 - [ ] **4. `WHITEN`**
   - `LET whitened = WHITEN signal WITH psd` — divide `FFT(signal)` by

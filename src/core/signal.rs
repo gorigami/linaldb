@@ -88,6 +88,44 @@ pub fn magnitude(re: &[f32], im: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Power spectral density estimate via averaged periodograms: split
+/// `signal` into non-overlapping chunks of `window` samples (any remainder
+/// that doesn't fill a full chunk is dropped), FFT each chunk, average the
+/// per-bin power (`re^2 + im^2`) across chunks. Returns a real
+/// `Vec<f32>` of length `window / 2 + 1`.
+///
+/// **Simplified vs. textbook Welch's method**: no overlap between chunks
+/// (Welch's method typically uses 50% overlap to use more of the data) and
+/// no window function applied to each chunk before FFT (Welch's method
+/// typically applies a Hann/Hamming window to reduce spectral leakage;
+/// this uses an implicit rectangular window). Good enough for the
+/// noise-floor estimation `WHITEN` needs; not a research-grade PSD
+/// estimator. Documented here and in `DSL_REFERENCE.md` rather than
+/// silently claiming full Welch's method.
+pub fn psd(signal: &[f32], window: usize) -> Vec<f32> {
+    assert!(window > 0, "psd: window must be non-zero");
+    assert!(
+        signal.len() >= window,
+        "psd: signal (len {}) shorter than window ({})",
+        signal.len(),
+        window
+    );
+
+    let num_chunks = signal.len() / window;
+    let bins = window / 2 + 1;
+    let mut sum_power = vec![0.0f32; bins];
+
+    for chunk in signal.chunks_exact(window).take(num_chunks) {
+        let (re, im) = fft_forward(chunk);
+        for i in 0..bins {
+            sum_power[i] += re[i] * re[i] + im[i] * im[i];
+        }
+    }
+
+    let n = num_chunks as f32;
+    sum_power.iter().map(|p| p / n).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +198,74 @@ mod tests {
             peak_bin, target_bin,
             "expected peak magnitude at bin {target_bin}, got {peak_bin}"
         );
+    }
+
+    /// Minimal deterministic xorshift PRNG -- avoids adding a `rand`
+    /// dependency just for one test's synthetic noise, and a fixed seed
+    /// keeps the test reproducible (no flakiness from real randomness).
+    fn xorshift_noise(len: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                // Map to roughly [-1, 1].
+                ((state as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn psd_of_single_frequency_signal_peaks_at_expected_bin() {
+        let window = 64;
+        let target_bin = 5;
+        // 8 repeated windows of the same sine wave -- averaging shouldn't
+        // change where the peak is for a signal with no noise at all.
+        let signal: Vec<f32> = (0..window * 8)
+            .map(|i| {
+                (2.0 * std::f32::consts::PI * target_bin as f32 * (i % window) as f32
+                    / window as f32)
+                    .sin()
+            })
+            .collect();
+        let spectrum = psd(&signal, window);
+        assert_eq!(spectrum.len(), window / 2 + 1);
+        let (peak_bin, _) = spectrum
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        assert_eq!(
+            peak_bin, target_bin,
+            "expected PSD peak at bin {target_bin}, got {peak_bin}"
+        );
+    }
+
+    #[test]
+    fn psd_of_white_noise_is_roughly_flat() {
+        // White noise's expected PSD is flat -- with enough averaging
+        // (many chunks), no single bin should dominate the way a real
+        // signal's would. Loose tolerance (this is inherently statistical,
+        // not exact) -- just confirms no bin is wildly out of proportion
+        // to the mean, distinguishing "flat-ish" from "concentrated at one
+        // bin" the way psd_of_single_frequency_signal_peaks_at_expected_bin
+        // is concentrated.
+        let window = 64;
+        let noise = xorshift_noise(window * 200, 0x2026_0721);
+        let spectrum = psd(&noise, window);
+        let mean: f32 = spectrum.iter().sum::<f32>() / spectrum.len() as f32;
+        let max = spectrum.iter().cloned().fold(0.0f32, f32::max);
+        assert!(
+            max < mean * 5.0,
+            "expected roughly flat PSD for white noise, but max bin ({max}) is >5x the mean ({mean})"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "shorter than window")]
+    fn psd_panics_on_signal_shorter_than_window() {
+        let signal = vec![0.0f32; 10];
+        let _ = psd(&signal, 64);
     }
 }

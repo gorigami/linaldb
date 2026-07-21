@@ -359,6 +359,7 @@ impl Parser {
             | Some(Token::Fft)
             | Some(Token::Ifft)
             | Some(Token::Magnitude)
+            | Some(Token::Psd)
             | Some(Token::Scale)
             | Some(Token::Reshape)
             | Some(Token::Stack) => return self.parse_call_expr(),
@@ -579,6 +580,15 @@ impl Parser {
             Some(Token::Fft) => CallExpr::Fft(Box::new(self.parse_simple_expr()?)),
             Some(Token::Ifft) => CallExpr::Ifft(Box::new(self.parse_simple_expr()?)),
             Some(Token::Magnitude) => CallExpr::Magnitude(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Psd) => {
+                let input = self.parse_simple_expr()?;
+                self.eat(&Token::Window)?;
+                let window = self.eat_usize()?;
+                CallExpr::Psd {
+                    input: Box::new(input),
+                    window,
+                }
+            }
             Some(Token::Scale) => {
                 let input = self.parse_simple_expr()?;
                 self.eat(&Token::By)?;

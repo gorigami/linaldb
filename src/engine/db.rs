@@ -696,6 +696,17 @@ impl TensorDb {
             .eval_magnitude(ctx, output_name, input_name)
     }
 
+    pub fn eval_psd(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        window: usize,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_psd(ctx, output_name, input_name, window)
+    }
+
     pub fn eval_stack(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1419,6 +1430,70 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
         let result = Tensor::new(new_id, shape, mag, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `PSD a WINDOW n` — power spectral density estimate via averaged
+    /// periodograms (see `core::signal::psd`'s doc comment for the exact,
+    /// simplified-vs-Welch's-method algorithm). `a` must be a rank-1
+    /// Vector; result is a real `Vector(n/2+1)`.
+    ///
+    /// Validates rank/length here rather than letting `core::signal::psd`'s
+    /// own `assert!`s fire -- those are appropriate for a Rust-internal
+    /// caller bug, but a bad DSL query (e.g. `WINDOW` larger than the
+    /// signal) is user error that should produce a normal engine error
+    /// message, not unwind/abort the whole process.
+    pub fn eval_psd(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        window: usize,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "PSD requires a rank-1 Vector input, got rank {} (shape {:?})",
+                in_tensor.shape.rank(),
+                in_tensor.shape.dims
+            )));
+        }
+        if window == 0 {
+            return Err(EngineError::InvalidOp(
+                "PSD: WINDOW must be greater than 0".to_string(),
+            ));
+        }
+        if in_tensor.shape.dims[0] < window {
+            return Err(EngineError::InvalidOp(format!(
+                "PSD: signal (length {}) is shorter than WINDOW ({})",
+                in_tensor.shape.dims[0], window
+            )));
+        }
+
+        let signal = in_tensor.to_logical_vec();
+        let spectrum = crate::core::signal::psd(&signal, window);
+        let bins = spectrum.len();
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![bins]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: format!("PSD(window={})", window),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, spectrum, metadata).map_err(EngineError::InvalidOp)?;
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(

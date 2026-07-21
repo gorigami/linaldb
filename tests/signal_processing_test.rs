@@ -1,4 +1,4 @@
-// Checkpoints 1-2 of SIGNAL_PROCESSING_PLAN.md: FFT/IFFT/MAGNITUDE DSL
+// Checkpoints 1-3 of SIGNAL_PROCESSING_PLAN.md: FFT/IFFT/MAGNITUDE/PSD DSL
 // keyword forms. Exercises them through the actual DSL layer (lexer ->
 // parser -> AST -> executor -> engine), not just the raw core::signal
 // functions (already covered by src/core/signal.rs's own unit tests).
@@ -161,4 +161,74 @@ LET bad = MAGNITUDE v
         result.is_err(),
         "MAGNITUDE on a plain Vector (not a Matrix(2,M) spectrum) should be a hard error"
     );
+}
+
+#[test]
+fn psd_peaks_at_expected_bin_for_repeated_sine() {
+    // 8 repeated 64-sample windows of a unit-amplitude sine wave at bin 5
+    // -> PSD peak should land at bin 5, with power == (window/2)^2 = 1024
+    // (magnitude N/2=32 at that bin, squared).
+    let window = 64usize;
+    let target_bin = 5;
+    let values: Vec<String> = (0..window * 8)
+        .map(|i| {
+            let phase = 2.0 * std::f64::consts::PI * target_bin as f64 * (i % window) as f64
+                / window as f64;
+            phase.sin().to_string()
+        })
+        .collect();
+    let script = format!(
+        "VECTOR sig = [{}]\nLET spectrum = PSD sig WINDOW {}\n",
+        values.join(", "),
+        window
+    );
+
+    let mut db = TensorDb::new();
+    execute_script(&mut db, &script).expect("PSD should succeed");
+
+    let spectrum = db.get("spectrum").expect("spectrum should exist");
+    assert_eq!(spectrum.shape.dims, vec![window / 2 + 1]);
+    let data = spectrum.to_logical_vec();
+    let (peak_bin, &peak_val) = data
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap();
+    assert_eq!(
+        peak_bin, target_bin,
+        "expected PSD peak at bin {target_bin}"
+    );
+    assert!(
+        (peak_val - 1024.0).abs() < 1.0,
+        "expected peak power ~1024.0, got {peak_val}"
+    );
+}
+
+#[test]
+fn psd_rejects_signal_shorter_than_window() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+VECTOR v = [1.0, 2.0, 3.0]
+LET bad = PSD v WINDOW 64
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "PSD with WINDOW larger than the signal should be a hard error, not a panic"
+    );
+}
+
+#[test]
+fn psd_rejects_non_vector_input() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+MATRIX m = [[1, 2], [3, 4]]
+LET bad = PSD m WINDOW 2
+"#,
+    );
+    assert!(result.is_err(), "PSD on a Matrix should be a hard error");
 }

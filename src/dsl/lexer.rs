@@ -235,6 +235,10 @@ pub enum Token {
     Ifft,
     #[token("MAGNITUDE")]
     Magnitude,
+    #[token("PSD")]
+    Psd,
+    #[token("WINDOW")]
+    Window,
 
     // ─── Punctuation & operators ──────────────────────────────────────────────
     #[token("[")]

@@ -780,6 +780,11 @@ pub enum CallExpr {
     /// result is a real `Vector(M)`. The convenience most whitening/PSD
     /// work needs without touching phase.
     Magnitude(Box<Expr>),
+    /// `PSD a WINDOW <n>` — power spectral density estimate via averaged
+    /// periodograms (simplified: non-overlapping chunks, no window
+    /// function -- see `core::signal::psd`'s doc comment). `a` must be a
+    /// rank-1 Vector; result is a real `Vector(n/2+1)`.
+    Psd { input: Box<Expr>, window: usize },
     /// `SCALE a BY <factor>`
     Scale { input: Box<Expr>, factor: f64 },
     /// `RESHAPE a TO [dims]`
