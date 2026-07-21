@@ -185,6 +185,7 @@ Use inside SELECT columns, WHERE predicates, or ORDER BY:
 | `L2_NORM(v)` | `Vector → Float` | Euclidean length | `√(∑ vᵢ²)` |
 | `COSINE_SIM(a, b)` | `Vector, Vector → Float` | [-1, 1] | `dot(a,b) / (‖a‖ · ‖b‖)` |
 | `DOT(a, b)` | `Vector, Vector → Float` | Scalar | Dot product `∑ aᵢbᵢ` |
+| `DISTANCE(a, b)` | `Vector, Vector → Float` | Euclidean distance | `√(∑ (aᵢ-bᵢ)²)` — magnitude-sensitive, unlike `COSINE_SIM` (also usable inside `SELECT`, in addition to the standalone `DISTANCE a TO b` keyword form in §3) |
 | `VEC_ADD(a, b)` | `Vector, Vector → Vector` | Same dim | Element-wise addition |
 | `VEC_SCALE(v, s)` | `Vector, Float → Vector` | Same dim | Multiply all elements by `s` |
 | `MAT_SHAPE(m)` | `Matrix → String` | e.g. `"2x2"` | Shape of a matrix value as `"rows x cols"` |
@@ -200,6 +201,17 @@ WHERE COSINE_SIM(embedding, [0.9, 0.1, 0.0]) > 0.7
 ORDER BY score DESC
 LIMIT 10
 ```
+
+**`COSINE_SIM` is angle-only, not magnitude-aware** — `[1, 1, 1]` and
+`[1000, 1000, 1000]` score a perfect `1.0`. This is the right tool for
+pre-normalized semantic embeddings (text/image models, where direction
+*is* the meaning), but the wrong one for vectors whose components share a
+physical scale — masses, prices, counts, distances — where two very
+different-magnitude points can end up scoring as near-identical. Use
+`DISTANCE` (Euclidean) instead when magnitude itself carries the signal;
+see `examples/gw_transient_analysis.lnl` §2 for a real, verified case
+where `COSINE_SIM` fails to separate a ~24x mass difference and
+`DISTANCE` on the same data correctly does.
 
 ### Vector Aggregate Functions
 

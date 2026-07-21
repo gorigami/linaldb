@@ -687,6 +687,9 @@ pub enum VectorFnKind {
     /// `FLATTEN(expr)` — flatten a Matrix (or a no-op on an already-flat
     /// Vector) row-major into a 1D Vector.
     Flatten,
+    /// `DISTANCE(a, b)` — Euclidean distance, SQL-callable form of the
+    /// standalone `DISTANCE a TO b` tensor-DSL keyword (§3).
+    Distance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

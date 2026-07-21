@@ -76,6 +76,9 @@ pub enum VectorFnKind {
     Transpose,
     MatShape,
     Flatten,
+    /// `DISTANCE(a, b)` — Euclidean distance, SQL-callable form of the
+    /// standalone `DISTANCE a TO b` tensor-DSL keyword (§3).
+    Distance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,7 +364,10 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             | VectorFnKind::VecAdd
             | VectorFnKind::VecScale
             | VectorFnKind::Flatten => ValueType::Vector(0),
-            VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
+            VectorFnKind::L2Norm
+            | VectorFnKind::CosineSim
+            | VectorFnKind::Dot
+            | VectorFnKind::Distance => ValueType::Float,
             VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
             VectorFnKind::MatShape => ValueType::String,
         },

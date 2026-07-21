@@ -1065,6 +1065,16 @@ pub fn evaluate_expression(
                     }
                     _ => Value::Null,
                 },
+                VectorFnKind::Distance => match (vals.first(), vals.get(1)) {
+                    (Some(Value::Vector(a)), Some(Value::Vector(b))) => Value::Float(
+                        a.iter()
+                            .zip(b.iter())
+                            .map(|(x, y)| (x - y).powi(2))
+                            .sum::<f32>()
+                            .sqrt(),
+                    ),
+                    _ => Value::Null,
+                },
                 VectorFnKind::VecAdd => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
                         Value::Vector(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())

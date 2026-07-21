@@ -325,6 +325,27 @@ impl Parser {
                 }
                 return self.parse_call_expr();
             }
+            // DISTANCE(a, b) → SQL vector fn; DISTANCE a TO b → tensor algebra.
+            // "DISTANCE" always lexes to this dedicated keyword token (unlike
+            // COSINE_SIM/DOT/etc., which have no keyword token and reach the
+            // SQL-function dispatch below via the generic Ident(_) arm), so
+            // without this dedicated arm the SQL form could never be reached
+            // at all -- it fell straight into parse_call_expr (the standalone
+            // keyword-only parser) and failed on the first comma.
+            Some(Token::Distance) if self.peek_at(1) == Some(&Token::LParen) => {
+                self.advance();
+                self.advance();
+                let mut args = vec![self.parse_expr()?];
+                while self.at(&Token::Comma) {
+                    self.advance();
+                    args.push(self.parse_expr()?);
+                }
+                self.eat(&Token::RParen)?;
+                return Ok(Expr::VectorFn {
+                    func: VectorFnKind::Distance,
+                    args,
+                });
+            }
             Some(Token::Add)
             | Some(Token::Subtract)
             | Some(Token::Multiply)
