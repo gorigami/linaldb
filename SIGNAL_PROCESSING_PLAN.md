@@ -150,15 +150,18 @@ before starting the next.
     non-Vector signal).
   - `docs/DSL_REFERENCE.md` §3 documents `WHITEN` alongside the others.
 
-- [ ] **5. `BANDPASS`**
+- [x] **5. `BANDPASS`** — **Done in v0.1.68**
   - `LET filtered = BANDPASS signal FROM low_hz TO high_hz WITH RATE
-    sample_rate` (finalize exact syntax during implementation) —
-    brick-wall zeroing of FFT bins outside `[low_hz, high_hz]`, then
-    `IFFT`.
-  - Test: bandpassing a signal containing two known separate-frequency
-    components should suppress the one outside the band and preserve
-    the one inside (verified via `MAGNITUDE`/`FFT` on the result, not
-    just "it ran").
+    sample_rate` — brick-wall zeroing of FFT bins outside
+    `[low_hz, high_hz]`, then `IFFT`. `low_hz`/`high_hz`/`sample_rate`
+    validated (non-negative, `low_hz <= high_hz`, `sample_rate > 0`).
+  - Tested with a real two-tone signal (20 Hz + 100 Hz components, 1000 Hz
+    sample rate) bandpassed to 80-150 Hz: verified via `FFT`+`MAGNITUDE`
+    on the result that the 20 Hz component is suppressed (magnitude < 1)
+    and the 100 Hz component survives (magnitude > 50) — both in
+    `core::signal::bandpass`'s own unit test and through the full DSL
+    layer in `tests/signal_processing_test.rs`.
+  - `docs/DSL_REFERENCE.md` §3 documents `BANDPASS` alongside the others.
 
 - [ ] **6. `MATCHED_FILTER` (cross-correlation via FFT)**
   - `LET snr_series = MATCHED_FILTER data WITH template` — `IFFT(FFT(data)

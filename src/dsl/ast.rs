@@ -791,6 +791,16 @@ pub enum CallExpr {
     /// why -- interpolating a differently-sized PSD onto `a` is not
     /// implemented). Result is a real `Vector` the same length as `a`.
     Whiten { signal: Box<Expr>, psd: Box<Expr> },
+    /// `BANDPASS a FROM low_hz TO high_hz WITH RATE sample_rate` —
+    /// brick-wall zeroing of every FFT bin outside `[low_hz, high_hz]`,
+    /// then inverse-transformed back to the time domain. `a` must be a
+    /// rank-1 Vector; result is a real `Vector` the same length as `a`.
+    Bandpass {
+        input: Box<Expr>,
+        low_hz: f64,
+        high_hz: f64,
+        sample_rate: f64,
+    },
     /// `SCALE a BY <factor>`
     Scale { input: Box<Expr>, factor: f64 },
     /// `RESHAPE a TO [dims]`

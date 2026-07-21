@@ -241,6 +241,10 @@ pub enum Token {
     Window,
     #[token("WHITEN")]
     Whiten,
+    #[token("BANDPASS")]
+    Bandpass,
+    #[token("RATE")]
+    Rate,
 
     // ─── Punctuation & operators ──────────────────────────────────────────────
     #[token("[")]

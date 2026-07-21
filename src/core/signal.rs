@@ -174,6 +174,33 @@ pub fn whiten(signal: &[f32], psd: &[f32]) -> Vec<f32> {
     fft_inverse(&whitened_re, &whitened_im, n)
 }
 
+/// Brick-wall bandpass filter: zeros every FFT bin whose frequency falls
+/// outside `[low_hz, high_hz]`, then inverse-transforms back to the time
+/// domain. Bin `i`'s frequency is `i * sample_rate / signal.len()`.
+///
+/// **Simplified vs. a real filter design** (IIR/FIR with a proper
+/// transition band, e.g. Butterworth/Chebyshev): a hard zero/keep cutoff
+/// at the bin boundary introduces ringing (Gibbs phenomenon) at sharp
+/// edges, unlike a designed filter's smooth rolloff. Documented here and
+/// in `DSL_REFERENCE.md` rather than silently claiming a proper filter.
+pub fn bandpass(signal: &[f32], low_hz: f64, high_hz: f64, sample_rate: f64) -> Vec<f32> {
+    let n = signal.len();
+    let (re, im) = fft_forward(signal);
+    let bins = re.len();
+
+    let mut filtered_re = re;
+    let mut filtered_im = im;
+    for i in 0..bins {
+        let freq = i as f64 * sample_rate / n as f64;
+        if freq < low_hz || freq > high_hz {
+            filtered_re[i] = 0.0;
+            filtered_im[i] = 0.0;
+        }
+    }
+
+    fft_inverse(&filtered_re, &filtered_im, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +392,43 @@ mod tests {
         let signal = vec![0.0f32; 8];
         let wrong_psd = vec![1.0f32; 3]; // should be 8/2+1 = 5
         let _ = whiten(&signal, &wrong_psd);
+    }
+
+    #[test]
+    fn bandpass_suppresses_out_of_band_component_keeps_in_band() {
+        // Two known separate-frequency sine components: 20 Hz (should be
+        // suppressed by a 80-150 Hz bandpass) and 100 Hz (should survive).
+        // Sample rate chosen so both frequencies land near integer FFT
+        // bins for a clean, unambiguous check.
+        let sample_rate = 1000.0;
+        let n = 200; // bin spacing = sample_rate/n = 5 Hz
+        let low_freq = 20.0; // bin 4
+        let high_freq = 100.0; // bin 20
+        let signal: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sample_rate;
+                ((2.0 * std::f64::consts::PI * low_freq * t).sin()
+                    + (2.0 * std::f64::consts::PI * high_freq * t).sin()) as f32
+            })
+            .collect();
+
+        let filtered = bandpass(&signal, 80.0, 150.0, sample_rate);
+        assert_eq!(filtered.len(), n);
+
+        let (re, im) = fft_forward(&filtered);
+        let mag = magnitude(&re, &im);
+        let low_bin = (low_freq * n as f64 / sample_rate).round() as usize;
+        let high_bin = (high_freq * n as f64 / sample_rate).round() as usize;
+
+        assert!(
+            mag[low_bin] < 1.0,
+            "20 Hz component should be suppressed (out of the 80-150 Hz band), got magnitude {}",
+            mag[low_bin]
+        );
+        assert!(
+            mag[high_bin] > 50.0,
+            "100 Hz component should survive (inside the 80-150 Hz band), got magnitude {}",
+            mag[high_bin]
+        );
     }
 }

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.68] - 2026-07-21
+
+### Added — `BANDPASS` keyword form (checkpoint 5 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET filtered = BANDPASS signal FROM low_hz TO high_hz WITH RATE sample_rate`
+  — brick-wall bandpass filter: zeros every FFT bin whose frequency
+  (`bin_index * sample_rate / signal.len()`) falls outside
+  `[low_hz, high_hz]`, then inverse-transforms back to the time domain.
+  Real `Vector` output, same length as `signal`. Validates its numeric
+  arguments (non-negative band, `low_hz <= high_hz`, `sample_rate > 0`).
+- **Simplified vs. a real filter design** (documented, not silently
+  claimed as production-grade): a hard bin cutoff introduces ringing
+  (Gibbs phenomenon) at sharp edges, unlike a designed IIR/FIR filter's
+  smooth rolloff.
+- Verified with a real two-tone signal (20 Hz + 100 Hz, 1000 Hz sample
+  rate) bandpassed to 80-150 Hz: the 20 Hz component is suppressed and
+  the 100 Hz component survives, checked via `FFT`+`MAGNITUDE` on the
+  result — in both `core::signal::bandpass`'s own unit test and through
+  the full DSL layer.
+- New lexer tokens (`BANDPASS`, `RATE`, reusing existing `FROM`/`TO`/`WITH`),
+  new `CallExpr::Bandpass` variant, parser arm.
+- `docs/DSL_REFERENCE.md` §3 documents `BANDPASS` alongside `FFT`/`IFFT`/
+  `MAGNITUDE`/`PSD`/`WHITEN`.
+
+---
+
 ## [0.1.67] - 2026-07-21
 
 ### Added — `WHITEN` keyword form (checkpoint 4 of `SIGNAL_PROCESSING_PLAN.md`)

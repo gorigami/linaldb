@@ -283,3 +283,80 @@ LET bad = WHITEN m WITH psd_vals
         "WHITEN on a Matrix signal should be a hard error"
     );
 }
+
+#[test]
+fn bandpass_suppresses_out_of_band_keeps_in_band() {
+    // Same two-tone construction as core::signal's own unit test, verified
+    // through the full DSL layer this time: 20 Hz (outside 80-150 Hz band,
+    // should be suppressed) + 100 Hz (inside, should survive).
+    let sample_rate = 1000.0f64;
+    let n = 200usize;
+    let low_freq = 20.0f64;
+    let high_freq = 100.0f64;
+    let values: Vec<String> = (0..n)
+        .map(|i| {
+            let t = i as f64 / sample_rate;
+            ((2.0 * std::f64::consts::PI * low_freq * t).sin()
+                + (2.0 * std::f64::consts::PI * high_freq * t).sin())
+            .to_string()
+        })
+        .collect();
+    let script = format!(
+        "VECTOR sig = [{}]\n\
+         LET filtered = BANDPASS sig FROM 80.0 TO 150.0 WITH RATE {}\n\
+         LET spectrum = FFT filtered\n\
+         LET mag = MAGNITUDE spectrum\n",
+        values.join(", "),
+        sample_rate
+    );
+
+    let mut db = TensorDb::new();
+    execute_script(&mut db, &script).expect("BANDPASS + FFT + MAGNITUDE should succeed");
+
+    let mag = db.get("mag").expect("mag should exist").to_logical_vec();
+    let low_bin = (low_freq * n as f64 / sample_rate).round() as usize;
+    let high_bin = (high_freq * n as f64 / sample_rate).round() as usize;
+
+    assert!(
+        mag[low_bin] < 1.0,
+        "20 Hz component should be suppressed, got magnitude {}",
+        mag[low_bin]
+    );
+    assert!(
+        mag[high_bin] > 50.0,
+        "100 Hz component should survive, got magnitude {}",
+        mag[high_bin]
+    );
+}
+
+#[test]
+fn bandpass_rejects_non_vector_input() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+MATRIX m = [[1, 2], [3, 4]]
+LET bad = BANDPASS m FROM 10.0 TO 20.0 WITH RATE 100.0
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "BANDPASS on a Matrix should be a hard error"
+    );
+}
+
+#[test]
+fn bandpass_rejects_invalid_band() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+VECTOR sig = [1.0, 2.0, 3.0, 4.0]
+LET bad = BANDPASS sig FROM 100.0 TO 10.0 WITH RATE 1000.0
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "BANDPASS with low_hz > high_hz should be a hard error"
+    );
+}

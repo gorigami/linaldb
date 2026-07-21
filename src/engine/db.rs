@@ -718,6 +718,26 @@ impl TensorDb {
             .eval_whiten(ctx, output_name, signal_name, psd_name)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn eval_bandpass(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        low_hz: f64,
+        high_hz: f64,
+        sample_rate: f64,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut().eval_bandpass(
+            ctx,
+            output_name,
+            input_name,
+            low_hz,
+            high_hz,
+            sample_rate,
+        )
+    }
+
     pub fn eval_stack(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1577,6 +1597,67 @@ impl DatabaseInstance {
             NameEntry {
                 id: out_id,
                 kind: signal_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `BANDPASS a FROM low_hz TO high_hz WITH RATE sample_rate` —
+    /// brick-wall zeroing of FFT bins outside `[low_hz, high_hz]`. See
+    /// `core::signal::bandpass`'s doc comment for the exact algorithm and
+    /// its simplification vs. a real filter design.
+    #[allow(clippy::too_many_arguments)]
+    pub fn eval_bandpass(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        low_hz: f64,
+        high_hz: f64,
+        sample_rate: f64,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "BANDPASS requires a rank-1 Vector input, got rank {} (shape {:?})",
+                in_tensor.shape.rank(),
+                in_tensor.shape.dims
+            )));
+        }
+        if low_hz < 0.0 || high_hz < 0.0 || low_hz > high_hz {
+            return Err(EngineError::InvalidOp(format!(
+                "BANDPASS: invalid band [{low_hz}, {high_hz}] -- both bounds must be \
+                 non-negative and low_hz <= high_hz"
+            )));
+        }
+        if sample_rate <= 0.0 {
+            return Err(EngineError::InvalidOp(format!(
+                "BANDPASS: RATE must be positive, got {sample_rate}"
+            )));
+        }
+
+        let n = in_tensor.shape.dims[0];
+        let signal = in_tensor.to_logical_vec();
+        let filtered = crate::core::signal::bandpass(&signal, low_hz, high_hz, sample_rate);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![n]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: format!("BANDPASS({low_hz}-{high_hz}Hz @ {sample_rate}Hz)"),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, filtered, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
             },
         );
         Ok(())

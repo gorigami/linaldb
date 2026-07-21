@@ -361,6 +361,7 @@ impl Parser {
             | Some(Token::Magnitude)
             | Some(Token::Psd)
             | Some(Token::Whiten)
+            | Some(Token::Bandpass)
             | Some(Token::Scale)
             | Some(Token::Reshape)
             | Some(Token::Stack) => return self.parse_call_expr(),
@@ -597,6 +598,22 @@ impl Parser {
                 CallExpr::Whiten {
                     signal: Box::new(signal),
                     psd: Box::new(psd),
+                }
+            }
+            Some(Token::Bandpass) => {
+                let input = self.parse_simple_expr()?;
+                self.eat(&Token::From)?;
+                let low_hz = self.eat_number()?;
+                self.eat(&Token::To)?;
+                let high_hz = self.eat_number()?;
+                self.eat(&Token::With)?;
+                self.eat(&Token::Rate)?;
+                let sample_rate = self.eat_number()?;
+                CallExpr::Bandpass {
+                    input: Box::new(input),
+                    low_hz,
+                    high_hz,
+                    sample_rate,
                 }
             }
             Some(Token::Scale) => {

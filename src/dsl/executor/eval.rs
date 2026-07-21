@@ -277,6 +277,16 @@ fn eval_call(
             let (signal, psd) = (operand!(signal, "signal"), operand!(psd, "psd"));
             db.eval_whiten(ctx, output, &signal, &psd).map_err(eng)
         }
+        CallExpr::Bandpass {
+            input,
+            low_hz,
+            high_hz,
+            sample_rate,
+        } => {
+            let a = operand!(input, "a");
+            db.eval_bandpass(ctx, output, &a, *low_hz, *high_hz, *sample_rate)
+                .map_err(eng)
+        }
         CallExpr::Scale { input, factor } => {
             let a = operand!(input, "a");
             let op = UnaryOp::Scale(*factor as f32);
@@ -545,6 +555,18 @@ fn call_to_string(c: &CallExpr) -> String {
                 expr_to_string(psd)
             )
         }
+        CallExpr::Bandpass {
+            input,
+            low_hz,
+            high_hz,
+            sample_rate,
+        } => format!(
+            "BANDPASS {} FROM {} TO {} WITH RATE {}",
+            expr_to_string(input),
+            low_hz,
+            high_hz,
+            sample_rate
+        ),
         CallExpr::Scale { input, factor } => {
             format!("SCALE {} BY {}", expr_to_string(input), factor)
         }
