@@ -254,6 +254,17 @@ fn eval_call(
             }
             .map_err(eng)
         }
+        // FFT/IFFT bypass eval_unary/UnaryOp (see eval_fft's doc comment)
+        // and have no lazy form yet, mirroring Transpose/Correlate/
+        // Similarity/Distance above.
+        CallExpr::Fft(a) => {
+            let a = operand!(a, "a");
+            db.eval_fft(ctx, output, &a).map_err(eng)
+        }
+        CallExpr::Ifft(a) => {
+            let a = operand!(a, "a");
+            db.eval_ifft(ctx, output, &a).map_err(eng)
+        }
         CallExpr::Scale { input, factor } => {
             let a = operand!(input, "a");
             let op = UnaryOp::Scale(*factor as f32);
@@ -509,6 +520,8 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Sum(a) => format!("SUM {}", expr_to_string(a)),
         CallExpr::Mean(a) => format!("MEAN {}", expr_to_string(a)),
         CallExpr::Stdev(a) => format!("STDEV {}", expr_to_string(a)),
+        CallExpr::Fft(a) => format!("FFT {}", expr_to_string(a)),
+        CallExpr::Ifft(a) => format!("IFFT {}", expr_to_string(a)),
         CallExpr::Scale { input, factor } => {
             format!("SCALE {} BY {}", expr_to_string(input), factor)
         }

@@ -666,6 +666,26 @@ impl TensorDb {
             .eval_reshape(ctx, output_name, input_name, new_shape)
     }
 
+    pub fn eval_fft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_fft(ctx, output_name, input_name)
+    }
+
+    pub fn eval_ifft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_ifft(ctx, output_name, input_name)
+    }
+
     pub fn eval_stack(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1247,6 +1267,103 @@ impl DatabaseInstance {
             inputs: vec![in_tensor.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `FFT a` — real-to-complex forward FFT. Bypasses the `ComputeBackend`
+    /// trait/`UnaryOp` entirely (unlike every other unary op above): FFT is
+    /// a distinct algorithm from a separate crate (`realfft`), not an
+    /// elementwise op amenable to the SIMD/Rayon-tiered backend dispatch
+    /// the trait exists for. See `core::signal` module docs and
+    /// SIGNAL_PROCESSING_PLAN.md for the `Matrix(2, N)` spectrum convention.
+    pub fn eval_fft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "FFT requires a rank-1 Vector input, got rank {} (shape {:?})",
+                in_tensor.shape.rank(),
+                in_tensor.shape.dims
+            )));
+        }
+
+        let signal = in_tensor.to_logical_vec();
+        let (re, im) = crate::core::signal::fft_forward(&signal);
+        let m = re.len();
+        let mut data = re;
+        data.extend(im);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![2, m]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "FFT".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `IFFT a` — complex-to-real inverse FFT. `a` must be a `Matrix(2, M)`
+    /// spectrum as produced by `FFT`. Assumes the original signal length
+    /// was even (`2*(M-1)`) -- see `CallExpr::Ifft`'s doc comment for why
+    /// that can't be recovered from the spectrum alone.
+    pub fn eval_ifft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 2 || in_tensor.shape.dims[0] != 2 {
+            return Err(EngineError::InvalidOp(format!(
+                "IFFT requires a Matrix(2, M) spectrum input (row 0 = real, row 1 = imaginary), got shape {:?}",
+                in_tensor.shape.dims
+            )));
+        }
+
+        let flat = in_tensor.to_logical_vec();
+        let m = in_tensor.shape.dims[1];
+        let re = &flat[0..m];
+        let im = &flat[m..2 * m];
+        let original_len = 2 * (m - 1);
+        let signal = crate::core::signal::fft_inverse(re, im, original_len);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![original_len]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "IFFT".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, signal, metadata).map_err(EngineError::InvalidOp)?;
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(

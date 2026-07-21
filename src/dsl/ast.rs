@@ -764,6 +764,17 @@ pub enum CallExpr {
     Mean(Box<Expr>),
     /// `STDEV a`
     Stdev(Box<Expr>),
+    /// `FFT a` — real-to-complex forward FFT. `a` must be a rank-1 Vector;
+    /// result is a `Matrix(2, N/2+1)` (row 0 = real parts, row 1 =
+    /// imaginary parts). See SIGNAL_PROCESSING_PLAN.md for the convention.
+    Fft(Box<Expr>),
+    /// `IFFT a` — complex-to-real inverse FFT. `a` must be a `Matrix(2, M)`
+    /// spectrum (as `FFT` produces); result is a real `Vector`. Assumes the
+    /// original signal length was even (`2*(M-1)`) -- the spectrum alone
+    /// can't distinguish an even- from an odd-length source signal (both
+    /// produce the same `M`), and there is no side-channel carrying the
+    /// true length through the DSL layer today.
+    Ifft(Box<Expr>),
     /// `SCALE a BY <factor>`
     Scale { input: Box<Expr>, factor: f64 },
     /// `RESHAPE a TO [dims]`

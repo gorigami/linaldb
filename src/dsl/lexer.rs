@@ -229,6 +229,10 @@ pub enum Token {
     Mean,
     #[token("STDEV")]
     Stdev,
+    #[token("FFT")]
+    Fft,
+    #[token("IFFT")]
+    Ifft,
 
     // ─── Punctuation & operators ──────────────────────────────────────────────
     #[token("[")]

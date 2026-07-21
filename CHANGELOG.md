@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.64] - 2026-07-21
+
+### Added — `FFT`/`IFFT` keyword forms (checkpoint 1 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET spectrum = FFT signal` — real-to-complex forward FFT. `signal` must
+  be a rank-1 `Vector(N)`; result is a `Matrix(2, N/2+1)` (row 0 = real
+  part, row 1 = imaginary part — the `Matrix(2,N)` convention chosen in
+  checkpoint 0 to avoid a new `Value::Complex` variant).
+- `LET signal = IFFT spectrum` — complex-to-real inverse FFT. `spectrum`
+  must be a `Matrix(2, M)`; result is a real `Vector`. Assumes the
+  original signal length was even (`2*(M-1)`) — documented limitation,
+  the spectrum alone can't distinguish an even- from odd-length source.
+- Both bypass the `ComputeBackend` trait/`UnaryOp` enum entirely (new
+  `DatabaseInstance::eval_fft`/`eval_ifft`) since FFT is a distinct
+  algorithm from a separate crate, not an elementwise op the SIMD/Rayon
+  backend-dispatch abstraction is built for.
+- Verified through the full DSL layer (`tests/signal_processing_test.rs`,
+  5 tests): correct output shape, a pure sine wave's spectrum is purely
+  imaginary and concentrated at the exact right bin (checked against
+  theory, not just "it ran"), full FFT→IFFT round-trip, and hard errors
+  (not silently wrong output) for wrong-shaped input to either.
+- `docs/DSL_REFERENCE.md` §3 documents both under a new "Frequency-Domain
+  Operators" heading.
+
+---
+
 ## [0.1.63] - 2026-07-21
 
 ### Added — signal-processing scaffolding (checkpoint 0 of `SIGNAL_PROCESSING_PLAN.md`)

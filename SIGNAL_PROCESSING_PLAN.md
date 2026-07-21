@@ -83,18 +83,24 @@ before starting the next.
   - `cargo build --release` / `cargo fmt --check` / `cargo test --release`
     / `cargo clippy --release` all clean.
 
-- [ ] **1. `FFT` / `IFFT` keyword forms**
+- [x] **1. `FFT` / `IFFT` keyword forms** — **Done in v0.1.64**
   - `LET spectrum = FFT signal` — real `Vector(N)` → `Matrix(2, N/2+1)`
-    (real part row, imaginary part row; only non-negative frequencies,
-    per `realfft`'s real-input optimization).
-  - `LET signal = IFFT spectrum` — inverse, `Matrix(2, N/2+1)` → real
-    `Vector(N)`.
-  - Round-trip test: `IFFT(FFT(x)) ≈ x` for a handful of known signals
-    (impulse, sine wave, random noise) within float tolerance.
-  - Sanity test: `FFT` of a pure sine wave at frequency `f` shows its
-    energy concentrated at the corresponding bin.
-  - `DSL_REFERENCE.md` §3 entry for both, including the `Matrix(2,N)`
-    row-convention documented explicitly.
+    (real part row, imaginary part row).
+  - `LET signal = IFFT spectrum` — inverse, `Matrix(2, M)` → real
+    `Vector(2*(M-1))` (assumes even original length, documented).
+  - New `DatabaseInstance::eval_fft`/`eval_ifft` (bypass `ComputeBackend`/
+    `UnaryOp` entirely — FFT isn't an elementwise op the SIMD/Rayon-tiered
+    backend abstraction fits), wired through `CallExpr::Fft`/`Ifft`, new
+    `Fft`/`Ifft` lexer tokens, and a dedicated parser arm.
+  - `tests/signal_processing_test.rs` (5 tests, through the full DSL
+    layer, not just `core::signal`'s own unit tests): Matrix(2,N/2+1)
+    shape check, pure-sine-wave purely-imaginary-at-its-bin correctness
+    (verified against theory: unit sine over N=8 gives magnitude N/2=4 at
+    the right bin, ~0 elsewhere), full round-trip, and hard-error checks
+    for wrong-shaped `FFT`/`IFFT` input.
+  - `DSL_REFERENCE.md` §3 "Frequency-Domain Operators" section, with the
+    `Matrix(2,N)` convention and `IFFT`'s even-length assumption both
+    documented explicitly.
 
 - [ ] **2. `MAGNITUDE` (power spectrum)**
   - `LET mag = MAGNITUDE spectrum` — `Matrix(2, N/2+1)` → real
