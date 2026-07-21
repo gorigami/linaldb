@@ -233,6 +233,8 @@ pub enum Token {
     Fft,
     #[token("IFFT")]
     Ifft,
+    #[token("MAGNITUDE")]
+    Magnitude,
 
     // ─── Punctuation & operators ──────────────────────────────────────────────
     #[token("[")]

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.65] - 2026-07-21
+
+### Added — `MAGNITUDE` keyword form (checkpoint 2 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET mag = MAGNITUDE spectrum` — power/magnitude spectrum from a
+  `Matrix(2, M)` spectrum (as `FFT` produces): `sqrt(re² + im²)` per bin,
+  real `Vector(M)` output. Same bypass-`ComputeBackend` pattern as
+  `FFT`/`IFFT` (new `eval_magnitude`).
+- Verified against the known analytic case from v0.1.64: a unit-amplitude
+  sine wave over N=8 samples at bin 2 gives magnitude spectrum exactly
+  `[0, 0, 4, 0, 0]` (theory: N/2=4 at that bin), not just "it ran".
+- `docs/DSL_REFERENCE.md` §3 documents it alongside `FFT`/`IFFT`.
+
+---
+
 ## [0.1.64] - 2026-07-21
 
 ### Added — `FFT`/`IFFT` keyword forms (checkpoint 1 of `SIGNAL_PROCESSING_PLAN.md`)

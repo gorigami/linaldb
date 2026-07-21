@@ -775,6 +775,11 @@ pub enum CallExpr {
     /// produce the same `M`), and there is no side-channel carrying the
     /// true length through the DSL layer today.
     Ifft(Box<Expr>),
+    /// `MAGNITUDE a` — power/magnitude spectrum: `sqrt(re^2 + im^2)` per
+    /// bin. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces);
+    /// result is a real `Vector(M)`. The convenience most whitening/PSD
+    /// work needs without touching phase.
+    Magnitude(Box<Expr>),
     /// `SCALE a BY <factor>`
     Scale { input: Box<Expr>, factor: f64 },
     /// `RESHAPE a TO [dims]`

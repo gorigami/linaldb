@@ -358,6 +358,7 @@ impl Parser {
             | Some(Token::Stdev)
             | Some(Token::Fft)
             | Some(Token::Ifft)
+            | Some(Token::Magnitude)
             | Some(Token::Scale)
             | Some(Token::Reshape)
             | Some(Token::Stack) => return self.parse_call_expr(),
@@ -577,6 +578,7 @@ impl Parser {
             Some(Token::Stdev) => CallExpr::Stdev(Box::new(self.parse_simple_expr()?)),
             Some(Token::Fft) => CallExpr::Fft(Box::new(self.parse_simple_expr()?)),
             Some(Token::Ifft) => CallExpr::Ifft(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Magnitude) => CallExpr::Magnitude(Box::new(self.parse_simple_expr()?)),
             Some(Token::Scale) => {
                 let input = self.parse_simple_expr()?;
                 self.eat(&Token::By)?;

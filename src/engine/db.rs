@@ -686,6 +686,16 @@ impl TensorDb {
             .eval_ifft(ctx, output_name, input_name)
     }
 
+    pub fn eval_magnitude(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_magnitude(ctx, output_name, input_name)
+    }
+
     pub fn eval_stack(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1364,6 +1374,51 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
         let result =
             Tensor::new(new_id, shape, signal, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `MAGNITUDE a` — power/magnitude spectrum from a `Matrix(2, M)`
+    /// spectrum (as `FFT` produces): `sqrt(re^2 + im^2)` per bin. Real
+    /// `Vector(M)` output.
+    pub fn eval_magnitude(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 2 || in_tensor.shape.dims[0] != 2 {
+            return Err(EngineError::InvalidOp(format!(
+                "MAGNITUDE requires a Matrix(2, M) spectrum input (row 0 = real, row 1 = imaginary), got shape {:?}",
+                in_tensor.shape.dims
+            )));
+        }
+
+        let flat = in_tensor.to_logical_vec();
+        let m = in_tensor.shape.dims[1];
+        let re = &flat[0..m];
+        let im = &flat[m..2 * m];
+        let mag = crate::core::signal::magnitude(re, im);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![m]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "MAGNITUDE".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result = Tensor::new(new_id, shape, mag, metadata).map_err(EngineError::InvalidOp)?;
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(

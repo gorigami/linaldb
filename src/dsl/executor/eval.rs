@@ -265,6 +265,10 @@ fn eval_call(
             let a = operand!(a, "a");
             db.eval_ifft(ctx, output, &a).map_err(eng)
         }
+        CallExpr::Magnitude(a) => {
+            let a = operand!(a, "a");
+            db.eval_magnitude(ctx, output, &a).map_err(eng)
+        }
         CallExpr::Scale { input, factor } => {
             let a = operand!(input, "a");
             let op = UnaryOp::Scale(*factor as f32);
@@ -522,6 +526,7 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Stdev(a) => format!("STDEV {}", expr_to_string(a)),
         CallExpr::Fft(a) => format!("FFT {}", expr_to_string(a)),
         CallExpr::Ifft(a) => format!("IFFT {}", expr_to_string(a)),
+        CallExpr::Magnitude(a) => format!("MAGNITUDE {}", expr_to_string(a)),
         CallExpr::Scale { input, factor } => {
             format!("SCALE {} BY {}", expr_to_string(input), factor)
         }

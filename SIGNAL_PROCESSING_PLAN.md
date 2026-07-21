@@ -102,12 +102,15 @@ before starting the next.
     `Matrix(2,N)` convention and `IFFT`'s even-length assumption both
     documented explicitly.
 
-- [ ] **2. `MAGNITUDE` (power spectrum)**
-  - `LET mag = MAGNITUDE spectrum` — `Matrix(2, N/2+1)` → real
-    `Vector(N/2+1)`, `sqrt(re² + im²)` per bin. The convenience most
-    whitening/PSD-estimation work actually needs without touching phase.
-  - Test against a known analytic case (e.g. single-frequency sine wave's
-    magnitude spectrum peak location and approximate height).
+- [x] **2. `MAGNITUDE` (power spectrum)** — **Done in v0.1.65**
+  - `LET mag = MAGNITUDE spectrum` — `Matrix(2, M)` → real `Vector(M)`,
+    `sqrt(re² + im²)` per bin. Same bypass-`ComputeBackend` pattern as
+    `FFT`/`IFFT` (new `eval_magnitude`).
+  - Tested against the known analytic case from checkpoint 1: a
+    unit-amplitude sine wave over N=8 at bin 2 gives magnitude spectrum
+    exactly `[0, 0, 4, 0, 0]` (theory: N/2=4 at that bin) — verified, not
+    just "it ran". Plus a hard-error test for wrong-shaped input.
+  - `DSL_REFERENCE.md` §3 entry alongside `FFT`/`IFFT`.
 
 - [ ] **3. `PSD` (Welch's method noise-floor estimate)**
   - `LET psd = PSD signal WITH WINDOW n` (or similar syntax, finalize

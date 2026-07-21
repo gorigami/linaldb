@@ -1,7 +1,7 @@
-// Checkpoint 1 of SIGNAL_PROCESSING_PLAN.md: FFT/IFFT DSL keyword forms.
-// Exercises them through the actual DSL layer (lexer -> parser -> AST ->
-// executor -> engine), not just the raw core::signal functions (already
-// covered by src/core/signal.rs's own unit tests).
+// Checkpoints 1-2 of SIGNAL_PROCESSING_PLAN.md: FFT/IFFT/MAGNITUDE DSL
+// keyword forms. Exercises them through the actual DSL layer (lexer ->
+// parser -> AST -> executor -> engine), not just the raw core::signal
+// functions (already covered by src/core/signal.rs's own unit tests).
 
 use linal::dsl::execute_script;
 use linal::TensorDb;
@@ -116,5 +116,49 @@ LET bad = IFFT v
     assert!(
         result.is_err(),
         "IFFT on a plain Vector (not a Matrix(2,M) spectrum) should be a hard error"
+    );
+}
+
+#[test]
+fn magnitude_matches_theory_for_pure_sine() {
+    // Same signal as fft_of_pure_sine_is_purely_imaginary_at_its_bin:
+    // unit-amplitude sine over N=8 at bin 2 -> magnitude spectrum should
+    // be exactly [0, 0, 4, 0, 0] (theory: magnitude N/2=4 at that bin).
+    let mut db = TensorDb::new();
+    execute_script(
+        &mut db,
+        r#"
+VECTOR sig = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
+LET spectrum = FFT sig
+LET mag = MAGNITUDE spectrum
+"#,
+    )
+    .expect("FFT + MAGNITUDE should succeed");
+
+    let mag = db.get("mag").expect("mag should exist");
+    assert_eq!(mag.shape.dims, vec![5]);
+    let data = mag.to_logical_vec();
+    let expected = [0.0f32, 0.0, 4.0, 0.0, 0.0];
+    for (i, (&got, &exp)) in data.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - exp).abs() < 1e-3,
+            "magnitude at bin {i}: expected {exp}, got {got}"
+        );
+    }
+}
+
+#[test]
+fn magnitude_rejects_non_matrix_2_n_input() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+VECTOR v = [1.0, 2.0, 3.0]
+LET bad = MAGNITUDE v
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "MAGNITUDE on a plain Vector (not a Matrix(2,M) spectrum) should be a hard error"
     );
 }

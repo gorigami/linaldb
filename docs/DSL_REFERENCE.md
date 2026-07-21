@@ -165,11 +165,13 @@ LET scaled = m_a * 10
 
 - `FFT a`: Real-to-complex forward Fast Fourier Transform. `a` must be a rank-1 `Vector(N)`. Result is a `Matrix(2, N/2+1)` — **row 0 is the real part, row 1 is the imaginary part** of each frequency bin (only non-negative frequencies are computed, since a real input signal's spectrum is symmetric — this is the standard real-input FFT optimization, not a data loss).
 - `IFFT a`: Complex-to-real inverse FFT. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces). Result is a real `Vector`. **Assumes the original signal length was even** (reconstructs length `2*(M-1)`) — the spectrum alone can't distinguish an even- from an odd-length source signal (both produce the same `M`), and there is currently no side-channel carrying the true length through the DSL layer. If you need an odd-length round trip, keep the original vector around rather than relying on `IFFT` to recover its exact length.
+- `MAGNITUDE a`: Power/magnitude spectrum. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces). Result is a real `Vector(M)`, `sqrt(re² + im²)` per bin. The convenience most whitening/PSD-estimation work actually needs without touching phase.
 
 ```sql
 VECTOR signal = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
 LET spectrum = FFT signal        -- Matrix(2, 5): real row, imaginary row
 LET recovered = IFFT spectrum    -- back to the original 8-sample Vector
+LET mag = MAGNITUDE spectrum     -- Vector(5): power spectrum
 ```
 
 No new `Value`/`ValueType::Complex` variant exists to represent a complex
