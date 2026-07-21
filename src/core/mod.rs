@@ -4,6 +4,7 @@ pub mod connectors;
 pub mod dataset;
 pub mod dataset_legacy;
 pub mod index;
+pub mod signal;
 pub mod storage;
 pub mod store;
 pub mod tensor;

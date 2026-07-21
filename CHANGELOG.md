@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.63] - 2026-07-21
+
+### Added — signal-processing scaffolding (checkpoint 0 of `SIGNAL_PROCESSING_PLAN.md`)
+
+First step of a tracked, multi-checkpoint effort to give the engine real
+frequency-domain capabilities, motivated by the v0.1.61 GW showcase's
+honest finding that raw time-domain strain energy can't reliably locate a
+real gravitational-wave merger (that needs whitening + matched filtering,
+both fundamentally frequency-domain operations the engine had zero
+primitives for). See `SIGNAL_PROCESSING_PLAN.md` at the repo root for the
+full checkpoint list and design rationale.
+
+- New dependency: `realfft` (wraps `rustfft`) — real-to-complex FFT,
+  chosen for being well-maintained and optimized for real-valued input
+  like strain data, over hand-rolling an FFT.
+- New module `src/core/signal.rs`: `fft_forward`/`fft_inverse` (properly
+  normalized round-trip, unlike `realfft`'s raw unnormalized convention)
+  and `magnitude`. No new `Value`/`ValueType::Complex` variant — a complex
+  spectrum will be represented as an ordinary `Matrix(2, N)` (real row,
+  imaginary row) once wired into the DSL in later checkpoints, keeping
+  every existing `Matrix`-handling code path untouched.
+- Not yet wired into the DSL (no new keywords/parser changes this round) —
+  purely internal scaffolding, verified by 4 unit tests (impulse/sine/
+  odd-length round-trip, sine-wave bin-location sanity).
+
+---
+
 ## [0.1.62] - 2026-07-21
 
 ### Added — `DISTANCE(a, b)` SQL-callable Euclidean distance
