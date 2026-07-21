@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.67] - 2026-07-21
+
+### Added — `WHITEN` keyword form (checkpoint 4 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET whitened = WHITEN signal WITH psd` — flattens `signal`'s noise
+  spectrum against a PSD estimate `psd` (as `PSD` produces): divides each
+  bin of `FFT(signal)` by `sqrt(psd[bin])` (floored at `f32::EPSILON` to
+  avoid a division by exactly zero on a degenerate bin), then
+  inverse-transforms back to the time domain. Real `Vector(N)` output.
+  `psd` must have exactly `N/2+1` entries — resampling a differently-sized
+  PSD onto a longer signal (the way a real pipeline reuses one noise-floor
+  estimate across many segments) is not implemented, a real limitation
+  documented rather than silently mismatched.
+- New lexer token (`WHITEN`, reusing the existing `WITH` token), new
+  `CallExpr::Whiten` variant, parser arm.
+- `core::signal::whiten` validated against a deterministic colored-noise
+  test (first-order low-pass over white noise — a known, non-flat
+  spectral shape): whitening against its own PSD substantially flattens
+  the re-estimated PSD (max/mean ratio drops by more than half) — the
+  actual correctness property the checkpoint asked for, not just "it ran".
+- `tests/signal_processing_test.rs`: 3 more tests through the full DSL
+  layer.
+- `docs/DSL_REFERENCE.md` §3 documents `WHITEN` alongside `FFT`/`IFFT`/
+  `MAGNITUDE`/`PSD`.
+
+---
+
 ## [0.1.66] - 2026-07-21
 
 ### Added — `PSD` keyword form (checkpoint 3 of `SIGNAL_PROCESSING_PLAN.md`)

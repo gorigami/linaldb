@@ -360,6 +360,7 @@ impl Parser {
             | Some(Token::Ifft)
             | Some(Token::Magnitude)
             | Some(Token::Psd)
+            | Some(Token::Whiten)
             | Some(Token::Scale)
             | Some(Token::Reshape)
             | Some(Token::Stack) => return self.parse_call_expr(),
@@ -587,6 +588,15 @@ impl Parser {
                 CallExpr::Psd {
                     input: Box::new(input),
                     window,
+                }
+            }
+            Some(Token::Whiten) => {
+                let signal = self.parse_simple_expr()?;
+                self.eat(&Token::With)?;
+                let psd = self.parse_simple_expr()?;
+                CallExpr::Whiten {
+                    signal: Box::new(signal),
+                    psd: Box::new(psd),
                 }
             }
             Some(Token::Scale) => {

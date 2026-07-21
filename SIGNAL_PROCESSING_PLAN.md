@@ -131,14 +131,24 @@ before starting the next.
     power N/2², rejects signal shorter than window, rejects non-Vector
     input).
 
-- [ ] **4. `WHITEN`**
+- [x] **4. `WHITEN`** — **Done in v0.1.67**
   - `LET whitened = WHITEN signal WITH psd` — divide `FFT(signal)` by
     `sqrt(psd)` elementwise (both real and imaginary rows against the
-    same real PSD row), `IFFT` back to the time domain. Real `Vector(N)`
-    output.
-  - Test: whitening synthetic colored noise (generated with a known,
-    non-flat spectral shape) should flatten its own PSD when
-    re-estimated.
+    same real PSD row, floored at `f32::EPSILON` to avoid a division by
+    exactly zero), `IFFT` back to the time domain. Real `Vector(N)`
+    output. `psd` must have exactly `N/2+1` entries (design call:
+    resampling a differently-sized PSD onto `signal` is not implemented,
+    documented as a real limitation rather than silently mismatched).
+  - `core::signal::whiten` validated with a deterministic-colored-noise
+    test (first-order low-pass "leaky integrator" over white noise, a
+    known non-flat spectral shape): whitening against its own PSD
+    substantially flattens the re-estimated PSD (max/mean ratio drops by
+    more than half) — the actual test the checkpoint asked for, plus a
+    `should_panic` test for mismatched psd length.
+  - `tests/signal_processing_test.rs`: 3 more tests through the full DSL
+    layer (correct output shape, rejects mismatched psd length, rejects
+    non-Vector signal).
+  - `docs/DSL_REFERENCE.md` §3 documents `WHITEN` alongside the others.
 
 - [ ] **5. `BANDPASS`**
   - `LET filtered = BANDPASS signal FROM low_hz TO high_hz WITH RATE

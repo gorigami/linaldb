@@ -707,6 +707,17 @@ impl TensorDb {
             .eval_psd(ctx, output_name, input_name, window)
     }
 
+    pub fn eval_whiten(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        signal_name: &str,
+        psd_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_whiten(ctx, output_name, signal_name, psd_name)
+    }
+
     pub fn eval_stack(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1501,6 +1512,71 @@ impl DatabaseInstance {
             NameEntry {
                 id: out_id,
                 kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `WHITEN a WITH b` — flattens `a`'s noise spectrum against a PSD
+    /// estimate `b` (as `PSD` produces). See `core::signal::whiten`'s doc
+    /// comment for the exact algorithm and the length-matching requirement
+    /// validated below.
+    pub fn eval_whiten(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        signal_name: &str,
+        psd_name: &str,
+    ) -> Result<(), EngineError> {
+        let (signal_ref, signal_kind) = self.get_with_kind(signal_name)?;
+        let signal_tensor = signal_ref.clone();
+        let (psd_ref, _) = self.get_with_kind(psd_name)?;
+        let psd_tensor = psd_ref.clone();
+
+        if signal_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "WHITEN requires a rank-1 Vector signal, got rank {} (shape {:?})",
+                signal_tensor.shape.rank(),
+                signal_tensor.shape.dims
+            )));
+        }
+        if psd_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "WHITEN requires a rank-1 Vector psd, got rank {} (shape {:?})",
+                psd_tensor.shape.rank(),
+                psd_tensor.shape.dims
+            )));
+        }
+        let n = signal_tensor.shape.dims[0];
+        let expected_bins = n / 2 + 1;
+        if psd_tensor.shape.dims[0] != expected_bins {
+            return Err(EngineError::InvalidOp(format!(
+                "WHITEN: psd must have signal.len()/2+1 = {} entries (signal has {}), got {}",
+                expected_bins, n, psd_tensor.shape.dims[0]
+            )));
+        }
+
+        let signal = signal_tensor.to_logical_vec();
+        let psd = psd_tensor.to_logical_vec();
+        let whitened = crate::core::signal::whiten(&signal, &psd);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![n]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "WHITEN".to_string(),
+            inputs: vec![signal_tensor.id, psd_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, whitened, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: signal_kind,
             },
         );
         Ok(())

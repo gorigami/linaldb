@@ -232,3 +232,54 @@ LET bad = PSD m WINDOW 2
     );
     assert!(result.is_err(), "PSD on a Matrix should be a hard error");
 }
+
+#[test]
+fn whiten_produces_correctly_shaped_real_signal() {
+    let mut db = TensorDb::new();
+    execute_script(
+        &mut db,
+        r#"
+VECTOR sig = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
+LET noise_floor = PSD sig WINDOW 8
+LET whitened = WHITEN sig WITH noise_floor
+"#,
+    )
+    .expect("PSD + WHITEN should succeed");
+
+    let whitened = db.get("whitened").expect("whitened should exist");
+    assert_eq!(whitened.shape.dims, vec![8]);
+}
+
+#[test]
+fn whiten_rejects_mismatched_psd_length() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+VECTOR sig = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
+VECTOR wrong_psd = [1.0, 2.0, 3.0]
+LET bad = WHITEN sig WITH wrong_psd
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "WHITEN with a psd of the wrong length should be a hard error, not silently wrong output"
+    );
+}
+
+#[test]
+fn whiten_rejects_non_vector_signal() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+MATRIX m = [[1, 2], [3, 4]]
+VECTOR psd_vals = [1.0, 2.0, 3.0]
+LET bad = WHITEN m WITH psd_vals
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "WHITEN on a Matrix signal should be a hard error"
+    );
+}

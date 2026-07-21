@@ -239,6 +239,8 @@ pub enum Token {
     Psd,
     #[token("WINDOW")]
     Window,
+    #[token("WHITEN")]
+    Whiten,
 
     // ─── Punctuation & operators ──────────────────────────────────────────────
     #[token("[")]

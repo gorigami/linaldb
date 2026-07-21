@@ -785,6 +785,12 @@ pub enum CallExpr {
     /// function -- see `core::signal::psd`'s doc comment). `a` must be a
     /// rank-1 Vector; result is a real `Vector(n/2+1)`.
     Psd { input: Box<Expr>, window: usize },
+    /// `WHITEN a WITH b` — flattens `a`'s noise spectrum against a PSD
+    /// estimate `b` (as `PSD` produces). `b` must have exactly
+    /// `a.len()/2+1` entries (see `core::signal::whiten`'s doc comment for
+    /// why -- interpolating a differently-sized PSD onto `a` is not
+    /// implemented). Result is a real `Vector` the same length as `a`.
+    Whiten { signal: Box<Expr>, psd: Box<Expr> },
     /// `SCALE a BY <factor>`
     Scale { input: Box<Expr>, factor: f64 },
     /// `RESHAPE a TO [dims]`

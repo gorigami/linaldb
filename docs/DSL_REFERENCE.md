@@ -167,13 +167,15 @@ LET scaled = m_a * 10
 - `IFFT a`: Complex-to-real inverse FFT. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces). Result is a real `Vector`. **Assumes the original signal length was even** (reconstructs length `2*(M-1)`) — the spectrum alone can't distinguish an even- from an odd-length source signal (both produce the same `M`), and there is currently no side-channel carrying the true length through the DSL layer. If you need an odd-length round trip, keep the original vector around rather than relying on `IFFT` to recover its exact length.
 - `MAGNITUDE a`: Power/magnitude spectrum. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces). Result is a real `Vector(M)`, `sqrt(re² + im²)` per bin. The convenience most whitening/PSD-estimation work actually needs without touching phase.
 - `PSD a WINDOW n`: Power spectral density (noise-floor) estimate via averaged periodograms. `a` must be a rank-1 `Vector` at least `n` samples long; splits it into non-overlapping `n`-sample chunks (any remainder that doesn't fill a full chunk is dropped), computes each chunk's power spectrum, and averages them elementwise. Result is a real `Vector(n/2+1)`. **Simplified vs. textbook Welch's method**: no 50% chunk overlap, and no window function (Hann/Hamming/etc.) applied before each chunk's FFT — good enough for noise-floor estimation, not a research-grade PSD estimator.
+- `WHITEN a WITH b`: Flattens `a`'s noise spectrum against a PSD estimate `b` (as `PSD` produces): divides each bin of `FFT(a)` by `sqrt(b[bin])`, then inverse-transforms back to the time domain. `b` must have exactly `a.len()/2+1` entries — the same spectrum length `FFT(a)` itself would produce (in practice, estimate it with `PSD a WINDOW <a's own length>`, a single-chunk periodogram; resampling a PSD estimated at a different window size onto a longer signal is not implemented). Result is a real `Vector` the same length as `a`. The standard first step before matched filtering — pulling a real signal out of instrument noise needs the noise spectrum flattened first, or a loud broadband frequency band silently dominates over the signal you're looking for.
 
 ```sql
 VECTOR signal = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
 LET spectrum = FFT signal        -- Matrix(2, 5): real row, imaginary row
 LET recovered = IFFT spectrum    -- back to the original 8-sample Vector
 LET mag = MAGNITUDE spectrum     -- Vector(5): power spectrum
-LET noise_floor = PSD signal WINDOW 4   -- Vector(3): averaged periodogram
+LET noise_floor = PSD signal WINDOW 8   -- Vector(5): matches signal's own FFT length
+LET whitened = WHITEN signal WITH noise_floor   -- Vector(8): flattened spectrum
 ```
 
 No new `Value`/`ValueType::Complex` variant exists to represent a complex
@@ -181,7 +183,7 @@ spectrum — it is an ordinary `Matrix(2, N)` value by convention, so every
 existing `Matrix`-handling feature (`SHOW`, persistence, `TRANSPOSE`, row
 indexing) already works on it unmodified. See `SIGNAL_PROCESSING_PLAN.md`
 at the repo root for the reasoning and the planned follow-on operators
-(`WHITEN`, `BANDPASS`, `MATCHED_FILTER`).
+(`BANDPASS`, `MATCHED_FILTER`).
 
 ---
 

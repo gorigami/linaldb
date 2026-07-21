@@ -126,6 +126,54 @@ pub fn psd(signal: &[f32], window: usize) -> Vec<f32> {
     sum_power.iter().map(|p| p / n).collect()
 }
 
+/// Whitens `signal` against a noise-floor estimate `psd` (as produced by
+/// `psd()`, or any real `Vector` of the right length): divides each bin of
+/// `FFT(signal)` by `sqrt(psd[bin])`, then inverse-transforms back to the
+/// time domain. Flattens the noise spectrum so no single frequency band
+/// dominates -- the standard first step before matched filtering.
+///
+/// `psd` must have exactly `signal.len() / 2 + 1` entries -- the same
+/// spectrum length `FFT(signal)` itself would produce. In practice this
+/// means estimating the PSD with `PSD signal WINDOW <signal.len()>` (a
+/// single-chunk, unaveraged periodogram -- noisier than a properly
+/// averaged multi-chunk PSD, but structurally consistent) or supplying any
+/// other real `Vector` of that exact length. Resampling/interpolating a
+/// PSD estimated at a *different* window size onto a longer signal (the
+/// way a real pipeline would reuse one noise-floor estimate across many
+/// segments) is not implemented -- a real limitation, documented rather
+/// than silently producing a shape-mismatched or wrong result.
+///
+/// Divides by `sqrt(psd[bin]) + f32::EPSILON` rather than a bare
+/// `sqrt(psd[bin])` to avoid a division-by-zero producing `inf`/`NaN` on
+/// a bin with exactly zero estimated power (e.g. the DC bin of a
+/// zero-mean synthetic test signal) -- real noise PSDs are never exactly
+/// zero, so this floor has no effect on real data.
+pub fn whiten(signal: &[f32], psd: &[f32]) -> Vec<f32> {
+    let n = signal.len();
+    let expected_bins = n / 2 + 1;
+    assert_eq!(
+        psd.len(),
+        expected_bins,
+        "whiten: psd must have signal.len()/2+1 = {} entries, got {}",
+        expected_bins,
+        psd.len()
+    );
+
+    let (re, im) = fft_forward(signal);
+    let whitened_re: Vec<f32> = re
+        .iter()
+        .zip(psd.iter())
+        .map(|(r, p)| r / (p.sqrt() + f32::EPSILON))
+        .collect();
+    let whitened_im: Vec<f32> = im
+        .iter()
+        .zip(psd.iter())
+        .map(|(i, p)| i / (p.sqrt() + f32::EPSILON))
+        .collect();
+
+    fft_inverse(&whitened_re, &whitened_im, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +315,55 @@ mod tests {
     fn psd_panics_on_signal_shorter_than_window() {
         let signal = vec![0.0f32; 10];
         let _ = psd(&signal, 64);
+    }
+
+    /// A simple first-order low-pass ("leaky integrator") applied to white
+    /// noise, y[n] = 0.9*y[n-1] + x[n], boosts low frequencies relative to
+    /// high ones -- deterministic, non-flat "colored" noise with a known
+    /// shape (strongly red/low-frequency-heavy), used to verify WHITEN
+    /// actually flattens a non-trivial spectral shape rather than just a
+    /// trivial no-op on already-flat white noise.
+    fn colored_noise(len: usize, seed: u64) -> Vec<f32> {
+        let white = xorshift_noise(len, seed);
+        let mut y = 0.0f32;
+        white
+            .iter()
+            .map(|&x| {
+                y = 0.9 * y + x;
+                y
+            })
+            .collect()
+    }
+
+    #[test]
+    fn whiten_flattens_colored_noise_spectrum() {
+        let n = 4096;
+        let colored = colored_noise(n, 0x2026_0721);
+        let original_psd = psd(&colored, n); // single-chunk, matches WHITEN's required length
+        let whitened = whiten(&colored, &original_psd);
+        assert_eq!(whitened.len(), n);
+
+        let whitened_psd = psd(&whitened, n);
+
+        let ratio = |spectrum: &[f32]| -> f32 {
+            let mean: f32 = spectrum.iter().sum::<f32>() / spectrum.len() as f32;
+            let max = spectrum.iter().cloned().fold(0.0f32, f32::max);
+            max / mean
+        };
+        let before = ratio(&original_psd);
+        let after = ratio(&whitened_psd);
+        assert!(
+            after < before * 0.5,
+            "expected whitening to substantially flatten the spectrum: \
+             max/mean ratio before={before}, after={after}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "psd must have signal.len()/2+1")]
+    fn whiten_panics_on_mismatched_psd_length() {
+        let signal = vec![0.0f32; 8];
+        let wrong_psd = vec![1.0f32; 3]; // should be 8/2+1 = 5
+        let _ = whiten(&signal, &wrong_psd);
     }
 }
