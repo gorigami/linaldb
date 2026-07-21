@@ -93,14 +93,28 @@ SELECT * FROM search_results
 
 # Honest finding: cosine similarity is scale-invariant (angle only), and
 # every GWTC-1 compact-binary mass vector points in a similar direction
-# (mass_2/mass_1 ratios all fall in a narrow real physical range) -- so
-# COSINE_SIM barely discriminates events at all, even between BBH and the
-# genuinely different BNS event GW170817 (cosine similarity ~0.9998 to
-# GW150914's BBH vector despite ~24x smaller masses). This is a real,
-# verified result (independently cross-checked), not a bug: it demonstrates
-# why metric choice matters for physical data -- a magnitude-sensitive
-# metric like Euclidean DISTANCE (section 3) tells a very different story.
+# (mass_2/mass_1 ratios all fall in a narrow real physical range, and
+# chirp_mass is a fixed function of mass_1/mass_2 so it can't add an
+# independent direction) -- so COSINE_SIM barely discriminates events at
+# all, even between BBH and the genuinely different BNS event GW170817
+# (cosine similarity ~0.9998 to GW150914's BBH vector despite ~24x smaller
+# masses). This is a real, verified result (independently cross-checked
+# against a standalone Python computation), not a bug -- it's exactly the
+# tradeoff COSINE_SIM's own doc entry describes (Vector, Vector -> [-1,1],
+# angle only). It demonstrates why metric choice matters for physical
+# data: any vector whose components share a common physical scale (masses,
+# prices, counts, distances -- as opposed to pre-normalized embeddings,
+# where angle-only similarity is usually the point) needs a
+# magnitude-sensitive metric instead, e.g. DISTANCE below.
 SELECT a.event_name, b.event_name, COSINE_SIM(a.params, b.params) AS sim FROM gw_params a JOIN gw_params b ON COSINE_SIM(a.params, b.params) > 0.999 ORDER BY sim DESC LIMIT 15
+
+# Same 11 real mass vectors, Euclidean DISTANCE from GW170817's own vector
+# instead of angle-based similarity: this metric correctly ranks GW170817
+# (distance 0, itself) as the clear outlier and every BBH event as far
+# away, in stark contrast to the COSINE_SIM query above where GW170817
+# barely stood out at all. Same data, same engine, different (correct)
+# tool for a magnitude-sensitive question.
+SELECT event_name, DISTANCE(params, [1.46, 1.27, 1.186]) AS dist_from_gw170817 FROM gw_params ORDER BY dist_from_gw170817 DESC LIMIT 11
 
 # ============================================================
 # 3. Real strain time series: cross-detector physics checks

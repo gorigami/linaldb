@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.62] - 2026-07-21
+
+### Added — `DISTANCE(a, b)` SQL-callable Euclidean distance
+
+Following a deeper discussion of `examples/gw_transient_analysis.lnl`'s
+cosine-similarity finding (v0.1.61): `COSINE_SIM` is angle-only and can't
+tell a ~24x mass difference apart for this data, and the natural
+alternative — `DISTANCE`, magnitude-sensitive — turned out to have no
+SQL-callable form at all, only the standalone `DISTANCE a TO b`
+tensor-DSL keyword (§3). Root cause: unlike `COSINE_SIM`/`DOT` (no
+dedicated lexer token, so they reach the SQL-function dispatch via the
+generic `Ident(_)` path), `"DISTANCE"` lexes to a dedicated keyword token
+used only by the standalone form — so `DISTANCE(a, b)` inside a `SELECT`
+had no path to be recognized at all and failed to parse on the first
+comma. Added a dedicated parser arm (mirroring `NORMALIZE`/`MATMUL`/
+`TRANSPOSE`/`FLATTEN`'s existing dual SQL-form/keyword-form handling):
+`DISTANCE(a, b)` followed by `(` parses as the new SQL form; bare
+`DISTANCE a TO b` is unaffected. `examples/gw_transient_analysis.lnl` §2
+now runs both `COSINE_SIM` and `DISTANCE` on the same real mass vectors
+side by side, making the contrast concrete instead of asserted only in a
+comment. `docs/DSL_REFERENCE.md` §4 documents the new form and adds a
+caveat to `COSINE_SIM`'s example about its magnitude-blindness.
+
+---
+
 ## [0.1.61] - 2026-07-18
 
 ### Added — real gravitational-wave transient analysis showcase

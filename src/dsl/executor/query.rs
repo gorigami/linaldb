@@ -622,7 +622,10 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             | VectorFnKind::VecAdd
             | VectorFnKind::VecScale
             | VectorFnKind::Flatten => ValueType::Vector(0),
-            VectorFnKind::L2Norm | VectorFnKind::CosineSim | VectorFnKind::Dot => ValueType::Float,
+            VectorFnKind::L2Norm
+            | VectorFnKind::CosineSim
+            | VectorFnKind::Dot
+            | VectorFnKind::Distance => ValueType::Float,
             VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
             VectorFnKind::MatShape => ValueType::String,
         },
@@ -1228,6 +1231,7 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 VectorFnKind::Transpose => LVk::Transpose,
                 VectorFnKind::MatShape => LVk::MatShape,
                 VectorFnKind::Flatten => LVk::Flatten,
+                VectorFnKind::Distance => LVk::Distance,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,

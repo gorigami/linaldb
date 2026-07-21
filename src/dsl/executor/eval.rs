@@ -473,6 +473,7 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 VectorFnKind::Transpose => "TRANSPOSE",
                 VectorFnKind::MatShape => "MAT_SHAPE",
                 VectorFnKind::Flatten => "FLATTEN",
+                VectorFnKind::Distance => "DISTANCE",
             };
             let items: Vec<String> = args.iter().map(expr_to_string).collect();
             format!("{}({})", name, items.join(", "))

@@ -94,6 +94,43 @@ fn test_dot_product() {
 }
 
 #[test]
+fn test_distance_sql_form() {
+    // DISTANCE(a, b) inside a SELECT list -- previously only usable as the
+    // standalone `LET x = DISTANCE a TO b` tensor-DSL keyword; "DISTANCE"
+    // lexes to a dedicated keyword token (unlike COSINE_SIM/DOT, which have
+    // none), so the SQL-callable form needed its own parser arm rather than
+    // reaching the existing generic-identifier dispatch.
+    let mut db = db_with_embeddings();
+    let rows = query_rows(
+        &mut db,
+        "SELECT id, DISTANCE(embedding, [1.0, 0.0, 0.0]) AS d FROM docs ORDER BY id",
+    );
+    assert_eq!(rows.len(), 4);
+    if let Value::Float(d) = rows[0][1] {
+        let expected = ((0.9_f32 - 1.0).powi(2) + 0.1_f32.powi(2)).sqrt();
+        assert!(
+            (d - expected).abs() < 1e-4,
+            "DISTANCE([0.9,0.1,0],[1,0,0]) should be ~{}, got {}",
+            expected,
+            d
+        );
+    } else {
+        panic!("Expected Float for d, got {:?}", rows[0][1]);
+    }
+
+    // The standalone keyword form must still work unaffected.
+    execute_script(
+        &mut db,
+        r#"
+VECTOR a = [1.0, 0.0, 0.0]
+VECTOR b = [0.0, 1.0, 0.0]
+LET d = DISTANCE a TO b
+"#,
+    )
+    .expect("standalone DISTANCE a TO b should still parse and execute");
+}
+
+#[test]
 fn test_normalize_returns_unit_vector() {
     let mut db = db_with_embeddings();
     let rows = query_rows(
