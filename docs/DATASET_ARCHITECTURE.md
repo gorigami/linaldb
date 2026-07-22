@@ -81,7 +81,7 @@ LINALDB uses a hybrid approach to balance performance and flexibility:
 **Active Hybrid Model**:
 
 - both systems are active and integrated.
-- **Engine Bridge**: Use `materialize_tensor_dataset()` to convert a Reference View into a Relational Object for high-speed row scanning or Parquet export.
+- **Engine Bridge**: `materialize_tensor_dataset()` converts a Reference View into a Relational Object (`dataset_legacy::Dataset`) for high-speed row scanning or Parquet export. Until v0.1.60 this was the *only* way to reach that conversion, and nothing ever called it except once, transiently, to build the one-shot table `USE DATASET FROM`/`dataset()`+`.add_column()` print to the console — the result was never stored anywhere queryable. `SHOW ALL DATASETS`, `SELECT ... FROM <name>`, and `MATERIALIZE <name>` all read only from the legacy dataset store, which nothing ever populated, so every one of them reported "Dataset not found" for a Reference View dataset that `SHOW <name>` (a separate, tensor-first-specific health-check display) showed just fine — a real bug in the exact workflow `DSL_REFERENCE.md` §2 documents (`LET ds = dataset(...)` + `.add_column()`). Fixed by new `DatabaseInstance::sync_tensor_dataset_to_legacy()` (`src/engine/db.rs`), which calls `materialize_tensor_dataset()` and additionally stores/refreshes the result in the legacy dataset store under the same name. Called from every mutation site that changes a Reference View's columns (`add_column_to_tensor_dataset`) and from `use_dataset_core`, so the legacy copy never goes stale. See CHANGELOG.md v0.1.60.
 
 **Future Work**:
 
