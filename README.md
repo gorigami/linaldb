@@ -126,8 +126,15 @@ Multi-platform server with parallel execution and background workload management
 # Check server health
 linal server status
 
-# Submit a long-running job to the background
-curl -X POST "http://localhost:8080/jobs" -d "SHOW ALL"
+# Submit a long-running job to the background, then check on it
+linal jobs --url http://localhost:8080 submit "SHOW ALL DATASETS"
+linal jobs --url http://localhost:8080 list
+
+# Schedule a recurring task
+linal schedule --url http://localhost:8080 create hourly-report "SHOW ALL DATASETS" 3600
+
+# Stop a server started with `linal serve` / `linal server start`
+linal server --port 8080 stop
 ```
 
 ---

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.71] - 2026-07-22
+
+### Added / Fixed — CLI/server alignment audit
+
+Prompted by planning Python/R interop: the server exposes `/jobs` and
+`/schedule` (async background execution, recurring tasks) with no CLI
+equivalent, and `linal server stop` was a stub that told the user to
+Ctrl+C or `kill` the process manually.
+
+- **`linal server stop` now actually stops the server.** `linal serve` /
+  `linal server start` write a PID file (`linal_server_{port}.pid` in the
+  OS temp dir) on startup and remove it on graceful shutdown. `stop` reads
+  that file and sends a real `SIGTERM` (`kill -TERM`, or `taskkill /F` on
+  Windows) — which the server already handled correctly via its existing
+  `shutdown_signal()` Ctrl-C/SIGTERM listener, just never had a caller.
+  Handles the missing/stale-PID-file case (already stopped, or started
+  outside this CLI) without erroring.
+- **New `linal jobs` subcommand** (`list`/`submit`/`get`/`cancel`/`result`)
+  and **`linal schedule` subcommand** (`list`/`create`/`delete`), both
+  talking to a running server over HTTP (`--url`, default
+  `http://localhost:8080`) — mirrors the existing `linal query --url`
+  remote pattern. Previously these two server features were curl-only.
+
+No engine/DSL changes in this pass — this was a CLI/server surface gap,
+not a bug in `execute_line`'s dispatch (REPL/`run`/`exec`/`query`/`/execute`
+all already share one dispatch point, so DSL features stay in sync across
+every entry point).
+
+---
+
 ## [0.1.70] - 2026-07-22
 
 ### Added — showcase integration, closing out `SIGNAL_PROCESSING_PLAN.md`

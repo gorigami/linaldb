@@ -364,14 +364,16 @@ HTTP server implementation built with **Axum**:
   - `GET /jobs/:id`: Poll for status (Pending, Running, Completed, Failed).
   - `GET /jobs/:id/result`: Retrieve structured `DslOutput`.
   - `DELETE /jobs/:id`: Cancel a **Pending** job. Running or Completed jobs return `400 Bad Request`.
+  - CLI coverage (v0.1.71): `linal jobs --url <server> {list|submit|get|cancel|result}` — before this these endpoints were curl-only.
 - **Background Scheduler** (`scheduler.rs`): Cron-like execution of DSL commands registered at runtime.
   - `POST /schedule`: Register a named task (`name`, `command`, `interval_secs`, optional `target_db`).
   - `GET /schedule`: List active scheduled tasks.
   - `DELETE /schedule/:id`: Remove a scheduled task.
+  - CLI coverage (v0.1.71): `linal schedule --url <server> {list|create|delete}`.
 - **Dataset Delivery** (`dataset_server.rs`): a separate `DatasetServer` router, mounted at `/delivery` in `server/mod.rs`, that serves a saved dataset package's files read-only over HTTP — `GET /delivery/datasets/:name/manifest.json`, `.../schema.json`, `.../stats.json`, `.../data.parquet` — the same four files `storage.rs`'s `save_dataset_package` writes to disk (see Storage Layer). This is what `DELIVER <dataset>` (DSL_REFERENCE.md §9) checks the readiness of.
 - **Database Management API**: `GET /databases`, `POST /databases/:name`, `DELETE /databases/:name`.
 - **Multi-tenant Isolation**: Isolated database contexts via `X-Linal-Database` header. After each request the server restores the previously active database, so concurrent requests with different headers cannot affect each other's context.
-- **Graceful Shutdown**: Native support for `SIGINT` and `SIGTERM` to ensure in-flight requests complete before termination.
+- **Graceful Shutdown**: Native support for `SIGINT` and `SIGTERM` to ensure in-flight requests complete before termination. `linal serve` / `linal server start` write a PID file (`linal_server_{port}.pid` in the OS temp dir) on startup, removed on clean shutdown; `linal server --port <p> stop` (v0.1.71) reads it and sends a real `SIGTERM`/`taskkill` to trigger this same graceful path — previously this CLI command was a stub telling the user to `Ctrl+C` or `kill` manually.
 - **OpenAPI/Swagger documentation**: Interactive API explorer at `/swagger-ui`. Note: only `/execute` and `/health` are currently included in the generated schema; all other routes are functional but undocumented in the spec.
 
 ### 6. Utils Module (`src/utils/`)
