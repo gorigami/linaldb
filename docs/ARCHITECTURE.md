@@ -119,10 +119,9 @@ The core module contains fundamental data structures and abstractions:
 
 #### `value.rs`
 
-- **Value**: Enum representing all possible data types:
-  - `Int`, `Float`, `String`, `Bool`
-  - `Vector(usize)`, `Matrix(usize, usize)`, `Tensor(Shape)`
-- **ValueType**: Type information for schema definitions
+- **Value**: Enum representing all possible data-holding types: `Float(f32)`, `Int(i64)`, `String(String)`, `Bool(bool)`, `Vector(Vec<f32>)`, `Matrix(Vec<Vec<f32>>)`, `Null`. Notably: `Float` is **f32 only** — there is no 64-bit float variant anywhere, despite `DOUBLE`/`FLOAT64` being accepted `CAST`/column-type keywords in the DSL that silently alias to this same `f32` (a real, flagged-but-unfixed gap — see CHANGELOG v0.1.60 — large-magnitude real-world values like GPS/Unix timestamps lose precision).
+- **ValueType**: the corresponding type descriptor used in schemas — `Float`, `Int`, `String`, `Bool`, `Vector(usize)`, `Matrix(usize, usize)`, `Null` (dimension-only, no data)
+- **`Display` for `Value`** (v0.1.60): `Float`/`Vector`/`Matrix` switch to scientific notation (`{:e}`) for magnitudes below `1e-4` or at/above `1e15`, leaving normal-range values as plain decimal — real scientific magnitudes (e.g. LIGO strain ~1e-21, see `examples/gw_transient_analysis.lnl`) previously printed as 20+ digits of leading/trailing zeros.
 
 #### `tuple.rs`
 
@@ -172,6 +171,19 @@ The core module contains fundamental data structures and abstractions:
 - **ConnectorRegistry**: Global registry for format handlers.
 - **CsvConnector**: High-performance Arrow-based CSV ingestion.
 
+#### `signal.rs` (Frequency-Domain Primitives, v0.1.63+)
+
+Added to give the engine real signal-processing capability (motivated by
+building a real gravitational-wave analysis showcase, `examples/gw_transient_analysis.lnl`,
+whose raw-time-domain-energy approach couldn't reliably locate a real
+signal without it). Deliberately separate from `engine/kernels.rs`
+(elementwise/SIMD-tiered tensor math) — this is a distinct numerical
+domain built on a different crate, `realfft` (wraps `rustfft`).
+
+- **`fft_forward`/`fft_inverse`**: real-to-complex forward FFT / complex-to-real inverse, both operating on plain `Vec<f32>` pairs (real, imaginary), not a new `Value`/`Tensor` type.
+- **`magnitude`**, **`psd`** (averaged-periodogram noise-floor estimate, simplified vs. textbook Welch's method — no chunk overlap, no window function), **`whiten`** (flattens a signal's spectrum against a PSD estimate), **`bandpass`** (brick-wall frequency-domain filter), **`matched_filter`** (FFT-based cross-correlation, the real detection statistic — its peak lag is relative to the *template's* own reference point, not an absolute location in the data, see the function's own doc comment).
+- **No new `Value::Complex` variant**: a complex spectrum is represented at the DSL layer as an ordinary `Value::Matrix(2, N)` (row 0 = real, row 1 = imaginary) — every existing `Matrix`-handling code path (Display, storage, SELECT, JOIN, persistence) needed zero changes. Exposed via standalone tensor-DSL keywords only (`FFT`, `IFFT`, `MAGNITUDE`, `PSD ... WINDOW n`, `WHITEN ... WITH ...`, `BANDPASS ... FROM ... TO ... WITH RATE ...`, `MATCHED_FILTER ... WITH ...`) — no SQL/`SELECT`-callable form yet (see DSL_REFERENCE.md §3). Dispatched from `engine/db.rs`'s `eval_fft`/`eval_ifft`/`eval_magnitude`/`eval_psd`/`eval_whiten`/`eval_bandpass`/`eval_matched_filter`, which bypass the `ComputeBackend` trait/`UnaryOp` enum entirely (see Engine Module below) rather than going through the elementwise-op dispatch every other unary tensor operation uses.
+
 ### 2. Engine Module (`src/engine/`)
 
 The engine module orchestrates execution:
@@ -185,6 +197,8 @@ The engine module orchestrates execution:
   - Automatic recovery from disk on startup
   - Configuration via `linal.toml`
   - **Session Management**: Explicit `RESET SESSION` capability to clear in-memory state
+  - **`sync_tensor_dataset_to_legacy()`** (v0.1.60): materializes a Reference View (`core/dataset/`) into the queryable legacy dataset store, keeping it in sync on every column change. See DATASET_ARCHITECTURE.md's "Engine Bridge" note for the bug this fixed — before this, `SHOW ALL DATASETS`/`SELECT`/`MATERIALIZE` couldn't see anything `dataset()`+`.add_column()` or `USE DATASET FROM` built.
+  - **`eval_fft`/`eval_ifft`/`eval_magnitude`/`eval_psd`/`eval_whiten`/`eval_bandpass`/`eval_matched_filter`** (v0.1.63-69): frequency-domain operations (`core::signal`, see Core Module above), each validating input rank/shape then calling straight into `core::signal`'s free functions — bypassing the `ComputeBackend` trait/`UnaryOp` enum entirely, unlike every operation in `operations.rs`/`kernels.rs` below. Rationale: FFT-based operations are a single well-defined algorithm from an external crate, not an elementwise op the SIMD/Rayon-tiered backend abstraction was built for.
 
 #### `operations.rs`
 
@@ -227,9 +241,9 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 - `Expr` — expression sub-language, 25 variants as of v0.1.47 (see `src/dsl/ast.rs` for the current list): scalar/literal (`Ref`, `Int`, `Scalar`, `StringLit`, `Bool`, `VecLiteral`, `MatLiteral`), boolean/predicate (`Infix`, `And`, `Or`, `Not`, `IsNull`, `IsNotNull`, `In`, `Between`), structural (`Call`, `Index`, `Field`, `DatasetRef`), and SQL-surface (`Case`, `Coalesce`, `Nullif`, `ScalarFn`, `Cast`, `VectorFn`)
   - `Expr::VecLiteral` / `Expr::MatLiteral` — inline vector/matrix constants (`[v1, v2, ...]` / `[[r1c1, r1c2], ...]`) usable anywhere in a SQL expression
   - `Expr::Case` / `Expr::Coalesce` / `Expr::Nullif` / `Expr::Cast` — `CASE WHEN`, `COALESCE`, `NULLIF`/`IFNULL`, `CAST(expr AS type)` (including `CAST(... AS VECTOR(n)/MATRIX(r,c))` for in-query reshaping) — see DSL_REFERENCE.md §4
-  - `Expr::VectorFn` — one of ten SQL-style vector/matrix functions (see `VectorFnKind`) usable in SELECT, WHERE, ORDER BY
-- `VectorFnKind` — `Normalize`, `L2Norm`, `CosineSim`, `Dot`, `VecAdd`, `VecScale` (v0.1.31), plus `Matmul`, `Transpose`, `MatShape`, `Flatten` (v0.1.40, for in-`SELECT` matrix operations — distinct from the standalone `CallExpr` keyword forms below)
-- `CallExpr` — 17 named-prefix operations: binary (`ADD`, `MATMUL`, `CORRELATE`, …), unary (`NORMALIZE`, `RESHAPE`, …), n-ary (`STACK`)
+  - `Expr::VectorFn` — one of eleven SQL-style vector/matrix functions (see `VectorFnKind`) usable in SELECT, WHERE, ORDER BY
+- `VectorFnKind` — `Normalize`, `L2Norm`, `CosineSim`, `Dot`, `VecAdd`, `VecScale` (v0.1.31), plus `Matmul`, `Transpose`, `MatShape`, `Flatten` (v0.1.40, for in-`SELECT` matrix operations — distinct from the standalone `CallExpr` keyword forms below), plus `Distance` (v0.1.62 — `DISTANCE(a, b)` as a SQL-callable form alongside the pre-existing standalone `DISTANCE a TO b` keyword; see `parser/expr.rs` below for why it needed its own dedicated parser arm)
+- `CallExpr` — 24 named-prefix operations as of v0.1.69: binary (`ADD`, `MATMUL`, `CORRELATE`, …), unary (`NORMALIZE`, `RESHAPE`, …), n-ary (`STACK`), plus the seven frequency-domain operations added in v0.1.63-69 (`Fft`, `Ifft`, `Magnitude`, `Psd { input, window }`, `Whiten { signal, psd }`, `Bandpass { input, low_hz, high_hz, sample_rate }`, `MatchedFilter { data, template }` — see `core::signal` under Core Module above)
 - `AggFuncAst` — aggregate functions: `Sum`, `Avg`, `Count`, `Min`, `Max`, `AvgVec`, `SumVec` (v0.1.31)
   - `AvgVec` / `SumVec` — element-wise vector aggregates for GROUP BY centroid queries
 - All types (`ColType`, `TensorKindAst`, `InfixOp`, `CmpOp`, `FilterValue`) are decoupled from engine internals; the executor maps them
@@ -250,7 +264,9 @@ Split from a single 2581-line `parser.rs` into five focused files. All files sha
 - **`parser/expr.rs`** — `parse_expr`, `parse_pratt` (Pratt precedence climber), `parse_expr_atom`, `parse_call_expr`, `parse_simple_expr`, `can_start_simple_expr`
   - `parse_vec_literal()` — parses `[n, n, ...]` into `Expr::VecLiteral`; triggered by `Token::LBracket` at atom position (v0.1.31)
   - `Token::Normalize` in atom position: if next token is `(` → SQL-style `Expr::VectorFn { Normalize, ... }`, otherwise → tensor-algebra `CallExpr::Normalize` (v0.1.31)
-  - Ident `L2_NORM` / `COSINE_SIM` / `DOT` / `VEC_ADD` / `VEC_SCALE` followed by `(` → `Expr::VectorFn` (v0.1.31)
+  - Ident `L2_NORM` / `COSINE_SIM` / `DOT` / `VEC_ADD` / `VEC_SCALE` followed by `(` → `Expr::VectorFn` (v0.1.31) — these reach this generic `Ident(_)`-then-string-match path because none of them has its own lexer keyword token
+  - `Token::Distance` in atom position (v0.1.62): if next token is `(` → SQL-style `Expr::VectorFn { Distance, ... }`, otherwise falls through to the standalone `CallExpr::Distance` keyword form (`DISTANCE a TO b`) — needed its own dedicated arm, unlike `L2_NORM`/`COSINE_SIM`/etc. above, because `"DISTANCE"` *does* have a dedicated keyword token (used by the pre-existing standalone form), so it never reaches the generic `Ident(_)` dispatch at all; without this arm, `DISTANCE(a, b)` had no path to be recognized in SQL context and failed parsing on the first comma
+  - `Token::Fft`/`Ifft`/`Magnitude`/`Psd`/`Whiten`/`Bandpass`/`MatchedFilter` (v0.1.63-69): standalone-keyword-only, no SQL/`(`-triggered form yet — mirror the tensor-algebra half of `Normalize`'s dual-form pattern above without the SQL half
 - **`parser/introspection.rs`** — `parse_show`, `parse_explain`, `parse_audit`, `parse_deliver`
 - **`parser/persistence.rs`** — `parse_save`, `parse_load`, `parse_list`, `parse_import`, `parse_export`, `parse_use`
 
@@ -267,10 +283,11 @@ Key properties:
 Split from a single 2014-line `executor.rs` into six focused files, each with a single responsibility.
 
 - **`executor/mod.rs`** — `execute_statement` (single `match` on `Statement`, all `Statement` variants; zero string round-trips); `to_engine_kind`, `col_type_to_value_type` (small helpers); Search and InsertInto arms remain inline
-- **`executor/eval.rs`** — `eval_let` (entry point for Let/Derive arms); `eval_expr_to_name` (recursive `Expr` → engine call, generates temp names via atomic counter); `eval_call` (maps all 18 `CallExpr` variants to engine ops); `apply_index` (subscript operations); `fresh_temp`; `infix_to_binary_op`; `expr_to_string` (debug/tracing only)
+- **`executor/eval.rs`** — `eval_let` (entry point for Let/Derive arms); `eval_expr_to_name` (recursive `Expr` → engine call, generates temp names via atomic counter); `eval_call` (maps all 24 `CallExpr` variants as of v0.1.69 to engine ops — the seven frequency-domain ones route to `db.eval_fft`/etc. directly, not through `UnaryOp`/`eval_unary`, since none of them has a lazy form yet, mirroring how `Transpose`/`Correlate`/`Similarity`/`Distance` already skip the `lazy` branch); `apply_index` (subscript operations); `fresh_temp`; `infix_to_binary_op`; `expr_to_string` (debug/tracing only)
 - **`executor/show.rs`** — `execute_show` (all `ShowTarget` variants; calls engine APIs directly); `format_lineage_tree` (private)
 - **`executor/explain.rs`** — `execute_explain`; builds `LogicalPlan` directly from typed `ExplainTarget` (Dataset/Search/Select) through the `Planner`; reuses shared helpers from `query.rs` via `use super::query::...` to avoid duplication
 - **`executor/query.rs`** — `execute_select`, `execute_create_dataset_from`, `execute_add_computed_column`; shared logical-plan helpers (`agg_func_to_logical`, `dataset_filter_to_logical`, `dsl_expr_to_logical_expr`); `eval_row_expr` (pure per-row evaluator for computed columns, walks `Expr::Infix` with column lookup)
+  - `execute_create_dataset_from` (backs `DATASET <name> FROM <source> ...`) now delegates entirely to `execute_select` (v0.1.60) rather than re-deriving its own simplified `LogicalPlan` — the old hand-rolled version only ever kept `SelectExpr::Column`/`Aggregate` entries, silently dropping any `CASE WHEN`/computed/window column from the materialized dataset with no error at all.
   - `dsl_expr_to_logical_expr` maps `Expr::VecLiteral` → `LogicalExpr::Literal(Value::Vector(...))` and `Expr::VectorFn` → `LogicalExpr::VectorFn` (v0.1.31)
   - `agg_func_to_logical` maps `AggFuncAst::AvgVec` / `SumVec` → `AggregateFunction::AvgVec` / `SumVec` (v0.1.31)
   - `infer_expr_result_type` extended for `VecLiteral` (→ `Vector(n)`) and `VectorFn` (→ `Vector(0)` for shape-returning fns, `Float` for scalar-returning fns) (v0.1.31)
@@ -281,7 +298,7 @@ Split from a single 2014-line `executor.rs` into six focused files, each with a 
 - **`execute_line_with_context()`**: calls `parser::parse`, then dispatches through `execute_statement`; all `Statement` variants are handled in the typed path — no string fallback remains
 - **`execute_line()`**: convenience wrapper (no context)
 - **`execute_script()`**: multi-line runner with paren-balance tracking
-- **`DslOutput`**: structured output enum (`None`, `Message`, `Table`, `TensorTable`, `Tensor`, `LazyTensor`)
+- **`DslOutput`**: structured output enum (`None`, `Message`, `Table`, `TensorTable`, `Tensor`, `LazyTensor`). Two output paths read this: the default human-readable `Display` impl (`linal run` / REPL without `--format toon`) and `--format toon`'s structured `encode_default` serialization. **Until v0.1.60, `DslOutput::Table`'s `Display` impl never printed row data at all** — only a schema summary (name, row/column counts, field types) — since the code's origin; every `SELECT`/`SHOW`/`DATASET ... FROM` result showed real values only via `--format toon`. Now prints up to 20 rows (`... (N more rows)` beyond that), with `Vector`/`Matrix` cells summarized rather than fully expanded inline.
 
 #### `persistence.rs` — SAVE/LOAD/LIST/IMPORT/EXPORT
 
@@ -477,6 +494,7 @@ FROM docs GROUP BY category
 - **Math Integration**: Columns are exposed as standard LINAL symbols via dot notation. `LET x = ds.vec * 2.0` resolves `ds.vec` to its underlying `TensorId` and executes normally.
 - **Reverse Integration**: Results of any tensor operation can be added back to a dataset as a new column, maintaining the zero-copy chain.
 - **Persistence**: While primarily in-memory views, they can be persisted to Parquet using the `SAVE DATASET` command, which triggers on-demand materialization.
+- **Queryability** (v0.1.60): every column change also syncs a materialized copy into the queryable legacy dataset store (`sync_tensor_dataset_to_legacy`, see Engine Module above) — `SHOW ALL DATASETS`, `SELECT ... FROM <name>`, and `MATERIALIZE <name>` all work directly against a tensor-first dataset without needing `SAVE DATASET` first. Before v0.1.60 none of them could see a tensor-first dataset at all (only `SHOW <name>`'s separate health-check display worked) — see DATASET_ARCHITECTURE.md's "Engine Bridge" note.
 
 #### Scientific Dataset Ingestion
 
@@ -592,6 +610,21 @@ nullable schema field before final projection. Multiple window functions with
 cause of the original bug). `SUM`/`AVG`/`SUM_VEC`/`AVG_VEC` as a window
 function compute a *running* aggregate within the window (element-wise for
 vector columns, fixed in v0.1.45) instead of collapsing to one row.
+
+**Deferred `ORDER BY`/`LIMIT` for computed/window aliases** (v0.1.60): the
+statement's own outer `ORDER BY`/`LIMIT` (as opposed to a window function's
+*internal* `PARTITION BY`/`ORDER BY` above) are normally baked directly into
+the `LogicalPlan` as a `Sort`/`Limit` node and run *before*
+`apply_window_and_computed_exprs` executes — fine when ordering by a real
+base column, but a computed/window alias (e.g. `SELECT L2_NORM(v) AS energy
+... ORDER BY energy`) doesn't exist in any schema until that post-processing
+step appends it, so `SortExec` failed with "Column not found for sorting" on
+every such query. `execute_select` now checks whether `ORDER BY`'s column(s)
+exist in the plan's own schema at that point; if not, it skips adding
+`Sort`/`Limit` to the `LogicalPlan` and instead applies them to the final
+rows *after* `apply_window_and_computed_exprs` runs, via a `SortExec` row-sort
+routine extracted into a standalone `query::physical::sort_tuples` shared by
+both the baked-in and deferred paths.
 
 ### Aggregation Execution
 
