@@ -245,6 +245,8 @@ pub enum Token {
     Bandpass,
     #[token("RATE")]
     Rate,
+    #[token("MATCHED_FILTER")]
+    MatchedFilter,
 
     // ─── Punctuation & operators ──────────────────────────────────────────────
     #[token("[")]

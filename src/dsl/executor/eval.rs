@@ -287,6 +287,11 @@ fn eval_call(
             db.eval_bandpass(ctx, output, &a, *low_hz, *high_hz, *sample_rate)
                 .map_err(eng)
         }
+        CallExpr::MatchedFilter { data, template } => {
+            let (data, template) = (operand!(data, "data"), operand!(template, "template"));
+            db.eval_matched_filter(ctx, output, &data, &template)
+                .map_err(eng)
+        }
         CallExpr::Scale { input, factor } => {
             let a = operand!(input, "a");
             let op = UnaryOp::Scale(*factor as f32);
@@ -566,6 +571,11 @@ fn call_to_string(c: &CallExpr) -> String {
             low_hz,
             high_hz,
             sample_rate
+        ),
+        CallExpr::MatchedFilter { data, template } => format!(
+            "MATCHED_FILTER {} WITH {}",
+            expr_to_string(data),
+            expr_to_string(template)
         ),
         CallExpr::Scale { input, factor } => {
             format!("SCALE {} BY {}", expr_to_string(input), factor)

@@ -801,6 +801,16 @@ pub enum CallExpr {
         high_hz: f64,
         sample_rate: f64,
     },
+    /// `MATCHED_FILTER a WITH b` — FFT-based cross-correlation:
+    /// `IFFT(FFT(a) * conj(FFT(b)))`, the standard real-world detection
+    /// statistic. `a`/`b` must be rank-1 Vectors of the same length. See
+    /// `core::signal::matched_filter`'s doc comment for the peak-lag vs.
+    /// template-reference-point relationship (easy to get backwards) and
+    /// the circular- vs. linear-correlation caveat.
+    MatchedFilter {
+        data: Box<Expr>,
+        template: Box<Expr>,
+    },
     /// `SCALE a BY <factor>`
     Scale { input: Box<Expr>, factor: f64 },
     /// `RESHAPE a TO [dims]`

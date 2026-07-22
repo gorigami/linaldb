@@ -163,20 +163,38 @@ before starting the next.
     layer in `tests/signal_processing_test.rs`.
   - `docs/DSL_REFERENCE.md` §3 documents `BANDPASS` alongside the others.
 
-- [ ] **6. `MATCHED_FILTER` (cross-correlation via FFT)**
-  - `LET snr_series = MATCHED_FILTER data WITH template` — `IFFT(FFT(data)
-    * conj(FFT(template)))`, giving a correlation-vs-lag time series (the
-    real detection statistic). Requires complex multiply + conjugate on
-    the `Matrix(2,N)` representation — new small kernel functions, not
-    exposed as their own DSL keywords initially unless a real need shows up.
-  - **Ground-truth correctness test first**: inject a known synthetic
-    sine-Gaussian burst at a known sample offset into synthetic Gaussian
-    noise; confirm `MATCHED_FILTER`'s peak lands at that known offset.
-    This must pass before touching real data at all.
-  - Only after that test passes: apply to real GW150914 H1 strain with a
-    simplified chirp-like template (design decision 5, above); report the
-    actual result in `examples/gw_transient_analysis.lnl` §4, honestly,
-    whichever way it comes out.
+- [x] **6. `MATCHED_FILTER` (cross-correlation via FFT)** — **Done in v0.1.69**
+  - `LET correlation = MATCHED_FILTER data WITH template` — `IFFT(FFT(data)
+    * conj(FFT(template)))`, giving a correlation-vs-lag time series.
+    Complex multiply + conjugate implemented directly against the
+    `Matrix(2,N)`-as-two-`Vec<f32>` representation inside
+    `core::signal::matched_filter` (not exposed as separate DSL keywords).
+  - **Ground-truth test caught a real subtlety before it could reach real
+    data**: the peak lag is relative to the template's own reference
+    point, not an absolute location in the data (`peak_lag + template's
+    own feature offset = true location`, not `peak_lag` alone) — an
+    initial version of the test asserted the naive relationship and failed
+    by exactly the template's centering offset. Fixed the test's
+    assertion and documented the relationship explicitly in both
+    `core::signal::matched_filter`'s doc comment and `DSL_REFERENCE.md`.
+    Re-verified with a deterministic zero-background injection through the
+    full DSL layer too (`tests/signal_processing_test.rs`).
+  - **Applied to real GW150914 H1 strain, honest result: it does NOT find
+    the real merger.** New synthetic (explicitly-labeled, not real GWOSC
+    data) chirp-like template — a linearly-swept 35-250 Hz sine burst,
+    Hann-enveloped, ~0.2s — cross-correlated (after whitening the data
+    against a PSD estimated from a separate, quiet 1-second segment)
+    against the real 1-second segment containing the real merger (segment
+    15, per the real, independently-computed `merger_offset_seconds`).
+    Result: correlation power at the true merger's local sample offset
+    (~1638) is ~100x *below* both the series' peak (found elsewhere,
+    ~sample 3727) and its own mean — the crude template essentially finds
+    nothing there. Confirms empirically what was already expected: a
+    non-physical template approximation and a single-segment (noisy,
+    unaveraged) PSD estimate are not sufficient for real detection, however
+    correct the underlying correlation algorithm is (proven separately by
+    the ground-truth test above). Full detail + the real numbers land in
+    `examples/gw_transient_analysis.lnl` §4 (checkpoint 7).
 
 - [ ] **7. Showcase integration + honesty pass**
   - Update `examples/gw_transient_analysis.lnl` §4's commentary to reflect

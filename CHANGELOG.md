@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.69] - 2026-07-22
+
+### Added — `MATCHED_FILTER` keyword form (checkpoint 6 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET correlation = MATCHED_FILTER data WITH template` — FFT-based
+  cross-correlation (`IFFT(FFT(data) * conj(FFT(template)))`), the
+  standard real-world detection statistic. `data`/`template` must be
+  rank-1 Vectors of the same length; result is a real `Vector` that
+  length.
+- **Ground-truth test caught a real subtlety before it reached real
+  data**: the correlation's peak lag is relative to the template's own
+  reference point, not an absolute location in the data — an initial
+  version of the test asserted the naive relationship and failed by
+  exactly the template's centering offset. Documented explicitly in both
+  `core::signal::matched_filter`'s doc comment and `docs/DSL_REFERENCE.md`,
+  not left implicit.
+- **Applied to real GW150914 H1 strain — honest result: it does not find
+  the real merger.** A new synthetic (explicitly labeled, not real GWOSC
+  data) chirp-like template — linearly-swept 35-250 Hz sine burst,
+  Hann-enveloped, ~0.2s — cross-correlated against the real 1-second
+  segment containing the actual merger (after whitening against a
+  separately-estimated noise floor). Correlation power at the real
+  merger's known local sample offset is ~100x below both the series' peak
+  (found elsewhere) and its own mean. Confirms empirically what was
+  already expected: a non-physical template approximation and a
+  single-segment PSD estimate aren't sufficient for real detection,
+  however correct the underlying algorithm is (proven separately by the
+  ground-truth test). Full detail lands in
+  `examples/gw_transient_analysis.lnl` §4 next.
+- New fixture files (`tools/fixtures/gen_gw_data.rs`): a synthetic chirp
+  template (`chirp_template_1s.h5`) and a reusable 0..4095 sample-index
+  fixture (`sample_index_4096.h5`, needed to label a correlation series'
+  rows with their original position after a query reorders them, at a
+  scale where hand-writing the literal would be impractical).
+- `docs/DSL_REFERENCE.md` §3 documents `MATCHED_FILTER` alongside the
+  other frequency-domain operators.
+
+---
+
 ## [0.1.68] - 2026-07-21
 
 ### Added — `BANDPASS` keyword form (checkpoint 5 of `SIGNAL_PROCESSING_PLAN.md`)

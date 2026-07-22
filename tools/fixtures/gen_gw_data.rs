@@ -16,6 +16,7 @@
 //!
 //! Run with `cargo run --example gen_gw_data`.
 
+use ndarray::Array1;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -186,6 +187,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  wrote {} bytes", bytes.len());
         }
     }
+
+    // Synthetic (NOT real GWOSC data -- a deliberately simplified analysis
+    // tool) chirp-like template for examples/gw_transient_analysis.lnl's
+    // MATCHED_FILTER section: a linearly-swept sine burst spanning roughly
+    // GW150914's real final-inspiral frequency range (~35-250 Hz over
+    // ~0.2s), Hann-enveloped to avoid the spurious high-frequency content
+    // an abrupt on/off would add. NOT a physically accurate post-Newtonian
+    // binary-merger waveform (that's its own separate, much larger physics
+    // computation, out of scope -- see SIGNAL_PROCESSING_PLAN.md design
+    // decision 5) -- a standard-shape stand-in used only to demonstrate the
+    // matched-filtering *technique* on real strain data.
+    //
+    // Placed at the very start of a 4096-sample (1s) buffer (zero
+    // elsewhere) so the template's own reference point is sample 0 --
+    // MATCHED_FILTER's recovered offset is then exactly its peak lag, no
+    // extra arithmetic needed.
+    let sample_rate = 4096.0;
+    let template_len = 4096usize;
+    let chirp_samples = 819usize; // ~0.2s
+    let f0 = 35.0;
+    let f1 = 250.0;
+    let chirp_duration = chirp_samples as f64 / sample_rate;
+
+    let mut template = vec![0.0f32; template_len];
+    for (i, sample) in template.iter_mut().enumerate().take(chirp_samples) {
+        let t = i as f64 / sample_rate;
+        let phase =
+            2.0 * std::f64::consts::PI * (f0 * t + (f1 - f0) * t * t / (2.0 * chirp_duration));
+        let envelope =
+            0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / chirp_samples as f64).cos());
+        *sample = (envelope * phase.sin()) as f32;
+    }
+
+    let template_path = "examples/data/gw_strain/chirp_template_1s.h5";
+    let template_arr = Array1::from_vec(template);
+    let file = hdf5::File::create(template_path)?;
+    let ds = file
+        .new_dataset::<f32>()
+        .shape(template_len)
+        .create("template")?;
+    ds.write(&template_arr)?;
+    eprintln!(
+        "Wrote {template_path} (synthetic {f0}-{f1} Hz chirp-like template, {chirp_samples} \
+         active samples in a {template_len}-sample buffer, NOT real GWOSC data)"
+    );
+
+    // Reusable 0..4095 sample-index fixture: a deterministic integer
+    // sequence, needed to label per-sample rows (e.g. a MATCHED_FILTER
+    // correlation series) with their original position after a query
+    // reorders them -- there's no ROW_NUMBER-over-original-insertion-order
+    // primitive, and hand-writing a 4096-value literal in the .lnl script
+    // would be impractical. Same role as the 32-value seg_idx literal
+    // already inline in the showcase script, just at a scale where
+    // generating it once here and loading it via USE DATASET FROM is far
+    // more practical than writing it out by hand.
+    let sample_index: Vec<f32> = (0..template_len as u32).map(|i| i as f32).collect();
+    let index_path = "examples/data/gw_strain/sample_index_4096.h5";
+    let index_arr = Array1::from_vec(sample_index);
+    let file = hdf5::File::create(index_path)?;
+    let ds = file
+        .new_dataset::<f32>()
+        .shape(template_len)
+        .create("idx")?;
+    ds.write(&index_arr)?;
+    eprintln!(
+        "Wrote {index_path} (deterministic 0..{} index fixture)",
+        template_len - 1
+    );
 
     eprintln!("Done. Real GWOSC data (LIGO/Virgo Collaborations, CC BY 4.0) written under examples/data/.");
     Ok(())

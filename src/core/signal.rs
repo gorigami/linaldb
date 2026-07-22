@@ -201,6 +201,61 @@ pub fn bandpass(signal: &[f32], low_hz: f64, high_hz: f64, sample_rate: f64) -> 
     fft_inverse(&filtered_re, &filtered_im, n)
 }
 
+/// Matched filter via FFT-based cross-correlation: `IFFT(FFT(data) *
+/// conj(FFT(template)))`, giving a real correlation-vs-lag series the same
+/// length as `data`. The peak of this series (by absolute value) is the
+/// standard real-world detection statistic -- the lag where `template`
+/// best matches a copy of itself found in `data`.
+///
+/// `data` and `template` must be the same length.
+///
+/// **The peak lag is relative to `template`'s own reference point, not an
+/// absolute location in `data`.** Concretely: `result[τ] = Σ_n data[n] *
+/// template[(n - τ) mod N]`, which peaks when `τ ≈ (data's feature
+/// location) - (template's own feature location within its buffer)`. If
+/// `template`'s feature (e.g. a burst) sits at index `c` within the
+/// template buffer, and `data`'s copy of that feature is truly at index
+/// `s`, the correlation peaks at `τ ≈ s - c`, **not** at `τ = s` directly
+/// -- recover the real location as `peak_lag + c`. Caught by this
+/// project's own ground-truth test (`matched_filter_ground_truth_...`),
+/// which initially asserted the wrong relationship (`τ = s`) and failed
+/// by exactly the template's own centering offset before this doc comment
+/// and the test's assertion were both corrected -- a genuinely easy
+/// mistake to make, worth stating explicitly rather than leaving implicit.
+///
+/// **This computes circular correlation, not linear correlation** -- the
+/// FFT-multiply trick inherently wraps around at the buffer edges (a
+/// template match straddling the start/end of the buffer would appear to
+/// wrap to the other side), unlike a true linear cross-correlation, which
+/// needs the inputs zero-padded to `2N` first to avoid that. Not done
+/// here: documented as a real simplification rather than silently
+/// producing a wrapped-around result near the edges. Fine for finding a
+/// peak safely inside the buffer (as in this project's usage), not fine
+/// for a template match expected right at the boundary.
+pub fn matched_filter(data: &[f32], template: &[f32]) -> Vec<f32> {
+    assert_eq!(
+        data.len(),
+        template.len(),
+        "matched_filter: data and template must be the same length"
+    );
+    let n = data.len();
+
+    let (data_re, data_im) = fft_forward(data);
+    let (tmpl_re, tmpl_im) = fft_forward(template);
+
+    // Complex multiply data's spectrum by the conjugate of template's
+    // spectrum: (dr + i*di) * (tr - i*ti) = (dr*tr + di*ti) + i*(di*tr - dr*ti).
+    let bins = data_re.len();
+    let mut result_re = vec![0.0f32; bins];
+    let mut result_im = vec![0.0f32; bins];
+    for k in 0..bins {
+        result_re[k] = data_re[k] * tmpl_re[k] + data_im[k] * tmpl_im[k];
+        result_im[k] = data_im[k] * tmpl_re[k] - data_re[k] * tmpl_im[k];
+    }
+
+    fft_inverse(&result_re, &result_im, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +485,90 @@ mod tests {
             "100 Hz component should survive (inside the 80-150 Hz band), got magnitude {}",
             mag[high_bin]
         );
+    }
+
+    /// A sine-Gaussian burst: `exp(-(t-center)^2 / (2*sigma^2)) * sin(2*pi*freq*t)`
+    /// -- a standard, well-established unmodeled-burst template shape (not
+    /// a physically-accurate binary-merger inspiral waveform, which is its
+    /// own separate, much larger physics computation, out of scope here;
+    /// see SIGNAL_PROCESSING_PLAN.md design decision 5).
+    fn sine_gaussian_burst(
+        len: usize,
+        center: f64,
+        sigma: f64,
+        freq_cycles_per_sample: f64,
+    ) -> Vec<f32> {
+        (0..len)
+            .map(|i| {
+                let t = i as f64;
+                let envelope = (-((t - center).powi(2)) / (2.0 * sigma * sigma)).exp();
+                let carrier = (2.0 * std::f64::consts::PI * freq_cycles_per_sample * t).sin();
+                (envelope * carrier) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn matched_filter_ground_truth_recovers_known_injection_offset() {
+        // GROUND TRUTH TEST -- must pass before MATCHED_FILTER is trusted
+        // on any real data (see SIGNAL_PROCESSING_PLAN.md checkpoint 6):
+        // inject a known synthetic burst at a known sample offset into
+        // synthetic noise, template = the same burst shape centered at a
+        // known reference point, and confirm the matched-filter peak
+        // recovers the true injection offset once the template's own
+        // reference point is accounted for (see matched_filter's doc
+        // comment -- this test is what caught that relationship needing
+        // to be stated explicitly in the first place: an earlier version
+        // asserted `peak_lag == true_offset` directly and failed by
+        // exactly `template_center`).
+        let n = 2048;
+        let true_offset = 1300usize;
+        let template_center = 200.0;
+        let sigma = 15.0;
+        let freq = 0.05; // cycles/sample
+
+        // Template: the burst shape on its own, centered at template_center
+        // (away from the wraparound edge -- see matched_filter's circular-
+        // correlation caveat).
+        let template = sine_gaussian_burst(n, template_center, sigma, freq);
+
+        // Data: noise plus the same burst shape injected so its envelope
+        // peaks at true_offset.
+        let mut data = xorshift_noise(n, 0xC0FF_EE01);
+        // Loud injection relative to noise amplitude (~[-1,1]) so the
+        // ground-truth check isn't marginal -- this test is about
+        // confirming the *lag arithmetic* is right, not tuning detection
+        // sensitivity at low SNR.
+        for (i, d) in data.iter_mut().enumerate() {
+            let envelope =
+                (-((i as f64 - true_offset as f64).powi(2)) / (2.0 * sigma * sigma)).exp();
+            let carrier = (2.0 * std::f64::consts::PI * freq * i as f64).sin();
+            *d += (5.0 * envelope * carrier) as f32;
+        }
+
+        let correlation = matched_filter(&data, &template);
+        assert_eq!(correlation.len(), n);
+
+        let (peak_lag, _) = correlation
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+            .unwrap();
+        let recovered_offset = peak_lag as f64 + template_center;
+
+        assert!(
+            (recovered_offset - true_offset as f64).abs() <= 2.0,
+            "expected recovered offset (peak_lag {peak_lag} + template_center \
+             {template_center}) within 2 samples of the true injection offset \
+             {true_offset}, got {recovered_offset}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "same length")]
+    fn matched_filter_panics_on_length_mismatch() {
+        let data = vec![0.0f32; 8];
+        let template = vec![0.0f32; 4];
+        let _ = matched_filter(&data, &template);
     }
 }
