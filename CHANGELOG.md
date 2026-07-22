@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.70] - 2026-07-22
+
+### Added — showcase integration, closing out `SIGNAL_PROCESSING_PLAN.md`
+
+Checkpoint 7 (the last one): `examples/gw_transient_analysis.lnl` §4 now
+includes a genuine `MATCHED_FILTER` attempt on real GW150914 H1 strain,
+right alongside the original raw-`L2_NORM` finding from v0.1.61 (kept,
+not replaced — a documented before/after, both honest):
+
+- Ingests the new synthetic chirp template and sample-index fixtures
+  (v0.1.69) via `USE DATASET FROM`.
+- Extracts the real 1-second segment containing the actual merger
+  (segment 15) and a separate quiet segment (segment 0) for noise-floor
+  estimation — a methodologically real choice: never estimate the noise
+  floor from the same data being searched.
+- `PSD` → `WHITEN` → `MATCHED_FILTER`, entirely with the primitives built
+  across v0.1.63-69, run against real strain data for the first time.
+- Reports the same honest negative result found while building this
+  checkpoint (v0.1.69): correlation power at the real merger's known
+  local sample offset (computed from the same real `merger_offset_seconds`
+  section 1 already displays, not a new magic number) sits ~100x below
+  both the series' actual peak and its own average. The takeaway stated
+  plainly in the script: the underlying algorithm is correct (proven
+  separately against synthetic ground truth), but a non-physical template
+  approximation and a noisy single-segment PSD estimate aren't sufficient
+  for real detection — having the right algorithm isn't the same as
+  having the right template.
+
+`SIGNAL_PROCESSING_PLAN.md` deleted — all 8 checkpoints (0-7) landed, per
+its own completion rule (matching this repo's `CONSISTENCY_PLAN.md`
+convention). `docs/DSL_REFERENCE.md`, `core::signal`, and
+`tests/signal_processing_test.rs` are the durable record of the design
+decisions and verification this plan tracked.
+
+---
+
 ## [0.1.69] - 2026-07-22
 
 ### Added — `MATCHED_FILTER` keyword form (checkpoint 6 of `SIGNAL_PROCESSING_PLAN.md`)
