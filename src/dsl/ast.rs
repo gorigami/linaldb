@@ -764,6 +764,43 @@ pub enum CallExpr {
     Mean(Box<Expr>),
     /// `STDEV a`
     Stdev(Box<Expr>),
+    /// `FFT a` — real-to-complex forward FFT. `a` must be a rank-1 Vector;
+    /// result is a `Matrix(2, N/2+1)` (row 0 = real parts, row 1 =
+    /// imaginary parts). See SIGNAL_PROCESSING_PLAN.md for the convention.
+    Fft(Box<Expr>),
+    /// `IFFT a` — complex-to-real inverse FFT. `a` must be a `Matrix(2, M)`
+    /// spectrum (as `FFT` produces); result is a real `Vector`. Assumes the
+    /// original signal length was even (`2*(M-1)`) -- the spectrum alone
+    /// can't distinguish an even- from an odd-length source signal (both
+    /// produce the same `M`), and there is no side-channel carrying the
+    /// true length through the DSL layer today.
+    Ifft(Box<Expr>),
+    /// `MAGNITUDE a` — power/magnitude spectrum: `sqrt(re^2 + im^2)` per
+    /// bin. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces);
+    /// result is a real `Vector(M)`. The convenience most whitening/PSD
+    /// work needs without touching phase.
+    Magnitude(Box<Expr>),
+    /// `PSD a WINDOW <n>` — power spectral density estimate via averaged
+    /// periodograms (simplified: non-overlapping chunks, no window
+    /// function -- see `core::signal::psd`'s doc comment). `a` must be a
+    /// rank-1 Vector; result is a real `Vector(n/2+1)`.
+    Psd { input: Box<Expr>, window: usize },
+    /// `WHITEN a WITH b` — flattens `a`'s noise spectrum against a PSD
+    /// estimate `b` (as `PSD` produces). `b` must have exactly
+    /// `a.len()/2+1` entries (see `core::signal::whiten`'s doc comment for
+    /// why -- interpolating a differently-sized PSD onto `a` is not
+    /// implemented). Result is a real `Vector` the same length as `a`.
+    Whiten { signal: Box<Expr>, psd: Box<Expr> },
+    /// `BANDPASS a FROM low_hz TO high_hz WITH RATE sample_rate` —
+    /// brick-wall zeroing of every FFT bin outside `[low_hz, high_hz]`,
+    /// then inverse-transformed back to the time domain. `a` must be a
+    /// rank-1 Vector; result is a real `Vector` the same length as `a`.
+    Bandpass {
+        input: Box<Expr>,
+        low_hz: f64,
+        high_hz: f64,
+        sample_rate: f64,
+    },
     /// `SCALE a BY <factor>`
     Scale { input: Box<Expr>, factor: f64 },
     /// `RESHAPE a TO [dims]`

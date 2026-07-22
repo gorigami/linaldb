@@ -1,6 +1,6 @@
 [package]
 name = "linal"
-version = "0.1.62"
+version = "0.1.68"
 edition = "2021"
 description = "In-memory linear algebra engine for vectors, matrices and tensors"
 
@@ -36,6 +36,7 @@ hdf5 = "0.8.1"
 ndarray = "0.15.6"
 ndarray-npy = { version = "0.8.1", features = ["npz"] }
 zarrs = { version = "0.19.0", features = ["ndarray", "filesystem"] }
+realfft = "3.5.0"
 
 [features]
 default = []

@@ -666,6 +666,78 @@ impl TensorDb {
             .eval_reshape(ctx, output_name, input_name, new_shape)
     }
 
+    pub fn eval_fft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_fft(ctx, output_name, input_name)
+    }
+
+    pub fn eval_ifft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_ifft(ctx, output_name, input_name)
+    }
+
+    pub fn eval_magnitude(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_magnitude(ctx, output_name, input_name)
+    }
+
+    pub fn eval_psd(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        window: usize,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_psd(ctx, output_name, input_name, window)
+    }
+
+    pub fn eval_whiten(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        signal_name: &str,
+        psd_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_whiten(ctx, output_name, signal_name, psd_name)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn eval_bandpass(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        low_hz: f64,
+        high_hz: f64,
+        sample_rate: f64,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut().eval_bandpass(
+            ctx,
+            output_name,
+            input_name,
+            low_hz,
+            high_hz,
+            sample_rate,
+        )
+    }
+
     pub fn eval_stack(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1247,6 +1319,338 @@ impl DatabaseInstance {
             inputs: vec![in_tensor.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `FFT a` — real-to-complex forward FFT. Bypasses the `ComputeBackend`
+    /// trait/`UnaryOp` entirely (unlike every other unary op above): FFT is
+    /// a distinct algorithm from a separate crate (`realfft`), not an
+    /// elementwise op amenable to the SIMD/Rayon-tiered backend dispatch
+    /// the trait exists for. See `core::signal` module docs and
+    /// SIGNAL_PROCESSING_PLAN.md for the `Matrix(2, N)` spectrum convention.
+    pub fn eval_fft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "FFT requires a rank-1 Vector input, got rank {} (shape {:?})",
+                in_tensor.shape.rank(),
+                in_tensor.shape.dims
+            )));
+        }
+
+        let signal = in_tensor.to_logical_vec();
+        let (re, im) = crate::core::signal::fft_forward(&signal);
+        let m = re.len();
+        let mut data = re;
+        data.extend(im);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![2, m]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "FFT".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `IFFT a` — complex-to-real inverse FFT. `a` must be a `Matrix(2, M)`
+    /// spectrum as produced by `FFT`. Assumes the original signal length
+    /// was even (`2*(M-1)`) -- see `CallExpr::Ifft`'s doc comment for why
+    /// that can't be recovered from the spectrum alone.
+    pub fn eval_ifft(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 2 || in_tensor.shape.dims[0] != 2 {
+            return Err(EngineError::InvalidOp(format!(
+                "IFFT requires a Matrix(2, M) spectrum input (row 0 = real, row 1 = imaginary), got shape {:?}",
+                in_tensor.shape.dims
+            )));
+        }
+
+        let flat = in_tensor.to_logical_vec();
+        let m = in_tensor.shape.dims[1];
+        let re = &flat[0..m];
+        let im = &flat[m..2 * m];
+        let original_len = 2 * (m - 1);
+        let signal = crate::core::signal::fft_inverse(re, im, original_len);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![original_len]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "IFFT".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, signal, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `MAGNITUDE a` — power/magnitude spectrum from a `Matrix(2, M)`
+    /// spectrum (as `FFT` produces): `sqrt(re^2 + im^2)` per bin. Real
+    /// `Vector(M)` output.
+    pub fn eval_magnitude(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 2 || in_tensor.shape.dims[0] != 2 {
+            return Err(EngineError::InvalidOp(format!(
+                "MAGNITUDE requires a Matrix(2, M) spectrum input (row 0 = real, row 1 = imaginary), got shape {:?}",
+                in_tensor.shape.dims
+            )));
+        }
+
+        let flat = in_tensor.to_logical_vec();
+        let m = in_tensor.shape.dims[1];
+        let re = &flat[0..m];
+        let im = &flat[m..2 * m];
+        let mag = crate::core::signal::magnitude(re, im);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![m]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "MAGNITUDE".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result = Tensor::new(new_id, shape, mag, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `PSD a WINDOW n` — power spectral density estimate via averaged
+    /// periodograms (see `core::signal::psd`'s doc comment for the exact,
+    /// simplified-vs-Welch's-method algorithm). `a` must be a rank-1
+    /// Vector; result is a real `Vector(n/2+1)`.
+    ///
+    /// Validates rank/length here rather than letting `core::signal::psd`'s
+    /// own `assert!`s fire -- those are appropriate for a Rust-internal
+    /// caller bug, but a bad DSL query (e.g. `WINDOW` larger than the
+    /// signal) is user error that should produce a normal engine error
+    /// message, not unwind/abort the whole process.
+    pub fn eval_psd(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        window: usize,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "PSD requires a rank-1 Vector input, got rank {} (shape {:?})",
+                in_tensor.shape.rank(),
+                in_tensor.shape.dims
+            )));
+        }
+        if window == 0 {
+            return Err(EngineError::InvalidOp(
+                "PSD: WINDOW must be greater than 0".to_string(),
+            ));
+        }
+        if in_tensor.shape.dims[0] < window {
+            return Err(EngineError::InvalidOp(format!(
+                "PSD: signal (length {}) is shorter than WINDOW ({})",
+                in_tensor.shape.dims[0], window
+            )));
+        }
+
+        let signal = in_tensor.to_logical_vec();
+        let spectrum = crate::core::signal::psd(&signal, window);
+        let bins = spectrum.len();
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![bins]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: format!("PSD(window={})", window),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, spectrum, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `WHITEN a WITH b` — flattens `a`'s noise spectrum against a PSD
+    /// estimate `b` (as `PSD` produces). See `core::signal::whiten`'s doc
+    /// comment for the exact algorithm and the length-matching requirement
+    /// validated below.
+    pub fn eval_whiten(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        signal_name: &str,
+        psd_name: &str,
+    ) -> Result<(), EngineError> {
+        let (signal_ref, signal_kind) = self.get_with_kind(signal_name)?;
+        let signal_tensor = signal_ref.clone();
+        let (psd_ref, _) = self.get_with_kind(psd_name)?;
+        let psd_tensor = psd_ref.clone();
+
+        if signal_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "WHITEN requires a rank-1 Vector signal, got rank {} (shape {:?})",
+                signal_tensor.shape.rank(),
+                signal_tensor.shape.dims
+            )));
+        }
+        if psd_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "WHITEN requires a rank-1 Vector psd, got rank {} (shape {:?})",
+                psd_tensor.shape.rank(),
+                psd_tensor.shape.dims
+            )));
+        }
+        let n = signal_tensor.shape.dims[0];
+        let expected_bins = n / 2 + 1;
+        if psd_tensor.shape.dims[0] != expected_bins {
+            return Err(EngineError::InvalidOp(format!(
+                "WHITEN: psd must have signal.len()/2+1 = {} entries (signal has {}), got {}",
+                expected_bins, n, psd_tensor.shape.dims[0]
+            )));
+        }
+
+        let signal = signal_tensor.to_logical_vec();
+        let psd = psd_tensor.to_logical_vec();
+        let whitened = crate::core::signal::whiten(&signal, &psd);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![n]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "WHITEN".to_string(),
+            inputs: vec![signal_tensor.id, psd_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, whitened, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: signal_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `BANDPASS a FROM low_hz TO high_hz WITH RATE sample_rate` —
+    /// brick-wall zeroing of FFT bins outside `[low_hz, high_hz]`. See
+    /// `core::signal::bandpass`'s doc comment for the exact algorithm and
+    /// its simplification vs. a real filter design.
+    #[allow(clippy::too_many_arguments)]
+    pub fn eval_bandpass(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        low_hz: f64,
+        high_hz: f64,
+        sample_rate: f64,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        if in_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "BANDPASS requires a rank-1 Vector input, got rank {} (shape {:?})",
+                in_tensor.shape.rank(),
+                in_tensor.shape.dims
+            )));
+        }
+        if low_hz < 0.0 || high_hz < 0.0 || low_hz > high_hz {
+            return Err(EngineError::InvalidOp(format!(
+                "BANDPASS: invalid band [{low_hz}, {high_hz}] -- both bounds must be \
+                 non-negative and low_hz <= high_hz"
+            )));
+        }
+        if sample_rate <= 0.0 {
+            return Err(EngineError::InvalidOp(format!(
+                "BANDPASS: RATE must be positive, got {sample_rate}"
+            )));
+        }
+
+        let n = in_tensor.shape.dims[0];
+        let signal = in_tensor.to_logical_vec();
+        let filtered = crate::core::signal::bandpass(&signal, low_hz, high_hz, sample_rate);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![n]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: format!("BANDPASS({low_hz}-{high_hz}Hz @ {sample_rate}Hz)"),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, filtered, metadata).map_err(EngineError::InvalidOp)?;
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(

@@ -9,6 +9,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.68] - 2026-07-21
+
+### Added — `BANDPASS` keyword form (checkpoint 5 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET filtered = BANDPASS signal FROM low_hz TO high_hz WITH RATE sample_rate`
+  — brick-wall bandpass filter: zeros every FFT bin whose frequency
+  (`bin_index * sample_rate / signal.len()`) falls outside
+  `[low_hz, high_hz]`, then inverse-transforms back to the time domain.
+  Real `Vector` output, same length as `signal`. Validates its numeric
+  arguments (non-negative band, `low_hz <= high_hz`, `sample_rate > 0`).
+- **Simplified vs. a real filter design** (documented, not silently
+  claimed as production-grade): a hard bin cutoff introduces ringing
+  (Gibbs phenomenon) at sharp edges, unlike a designed IIR/FIR filter's
+  smooth rolloff.
+- Verified with a real two-tone signal (20 Hz + 100 Hz, 1000 Hz sample
+  rate) bandpassed to 80-150 Hz: the 20 Hz component is suppressed and
+  the 100 Hz component survives, checked via `FFT`+`MAGNITUDE` on the
+  result — in both `core::signal::bandpass`'s own unit test and through
+  the full DSL layer.
+- New lexer tokens (`BANDPASS`, `RATE`, reusing existing `FROM`/`TO`/`WITH`),
+  new `CallExpr::Bandpass` variant, parser arm.
+- `docs/DSL_REFERENCE.md` §3 documents `BANDPASS` alongside `FFT`/`IFFT`/
+  `MAGNITUDE`/`PSD`/`WHITEN`.
+
+---
+
+## [0.1.67] - 2026-07-21
+
+### Added — `WHITEN` keyword form (checkpoint 4 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET whitened = WHITEN signal WITH psd` — flattens `signal`'s noise
+  spectrum against a PSD estimate `psd` (as `PSD` produces): divides each
+  bin of `FFT(signal)` by `sqrt(psd[bin])` (floored at `f32::EPSILON` to
+  avoid a division by exactly zero on a degenerate bin), then
+  inverse-transforms back to the time domain. Real `Vector(N)` output.
+  `psd` must have exactly `N/2+1` entries — resampling a differently-sized
+  PSD onto a longer signal (the way a real pipeline reuses one noise-floor
+  estimate across many segments) is not implemented, a real limitation
+  documented rather than silently mismatched.
+- New lexer token (`WHITEN`, reusing the existing `WITH` token), new
+  `CallExpr::Whiten` variant, parser arm.
+- `core::signal::whiten` validated against a deterministic colored-noise
+  test (first-order low-pass over white noise — a known, non-flat
+  spectral shape): whitening against its own PSD substantially flattens
+  the re-estimated PSD (max/mean ratio drops by more than half) — the
+  actual correctness property the checkpoint asked for, not just "it ran".
+- `tests/signal_processing_test.rs`: 3 more tests through the full DSL
+  layer.
+- `docs/DSL_REFERENCE.md` §3 documents `WHITEN` alongside `FFT`/`IFFT`/
+  `MAGNITUDE`/`PSD`.
+
+---
+
+## [0.1.66] - 2026-07-21
+
+### Added — `PSD` keyword form (checkpoint 3 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET psd = PSD signal WINDOW n` — power spectral density estimate via
+  averaged periodograms: splits `signal` into non-overlapping `n`-sample
+  chunks, FFTs each, averages the per-bin power. Real `Vector(n/2+1)`
+  output.
+- **Simplified vs. textbook Welch's method** (documented explicitly, not
+  silently claimed as full Welch's): no chunk overlap and no window
+  function (Hann/Hamming/etc.) applied before each chunk's FFT. Good
+  enough for the noise-floor estimation `WHITEN` (next checkpoint) needs.
+- New lexer tokens (`PSD`, `WINDOW`), `CallExpr::Psd` variant, parser arm
+  mirroring `SCALE ... BY ...`'s existing keyword-plus-parameter pattern.
+- `core::signal::psd` validated by 3 unit tests (single-frequency peak
+  location, white-noise flatness, panics on signal-shorter-than-window as
+  an internal-caller-bug case) — the DSL layer (`eval_psd`) validates
+  rank/length itself first and returns a normal engine error for bad user
+  input, never reaching that panic.
+- `tests/signal_processing_test.rs`: 3 more tests through the full DSL
+  layer, including an exact power check (`(window/2)² `) against theory.
+- `docs/DSL_REFERENCE.md` §3 documents `PSD` alongside `FFT`/`IFFT`/`MAGNITUDE`.
+
+---
+
+## [0.1.65] - 2026-07-21
+
+### Added — `MAGNITUDE` keyword form (checkpoint 2 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET mag = MAGNITUDE spectrum` — power/magnitude spectrum from a
+  `Matrix(2, M)` spectrum (as `FFT` produces): `sqrt(re² + im²)` per bin,
+  real `Vector(M)` output. Same bypass-`ComputeBackend` pattern as
+  `FFT`/`IFFT` (new `eval_magnitude`).
+- Verified against the known analytic case from v0.1.64: a unit-amplitude
+  sine wave over N=8 samples at bin 2 gives magnitude spectrum exactly
+  `[0, 0, 4, 0, 0]` (theory: N/2=4 at that bin), not just "it ran".
+- `docs/DSL_REFERENCE.md` §3 documents it alongside `FFT`/`IFFT`.
+
+---
+
+## [0.1.64] - 2026-07-21
+
+### Added — `FFT`/`IFFT` keyword forms (checkpoint 1 of `SIGNAL_PROCESSING_PLAN.md`)
+
+- `LET spectrum = FFT signal` — real-to-complex forward FFT. `signal` must
+  be a rank-1 `Vector(N)`; result is a `Matrix(2, N/2+1)` (row 0 = real
+  part, row 1 = imaginary part — the `Matrix(2,N)` convention chosen in
+  checkpoint 0 to avoid a new `Value::Complex` variant).
+- `LET signal = IFFT spectrum` — complex-to-real inverse FFT. `spectrum`
+  must be a `Matrix(2, M)`; result is a real `Vector`. Assumes the
+  original signal length was even (`2*(M-1)`) — documented limitation,
+  the spectrum alone can't distinguish an even- from odd-length source.
+- Both bypass the `ComputeBackend` trait/`UnaryOp` enum entirely (new
+  `DatabaseInstance::eval_fft`/`eval_ifft`) since FFT is a distinct
+  algorithm from a separate crate, not an elementwise op the SIMD/Rayon
+  backend-dispatch abstraction is built for.
+- Verified through the full DSL layer (`tests/signal_processing_test.rs`,
+  5 tests): correct output shape, a pure sine wave's spectrum is purely
+  imaginary and concentrated at the exact right bin (checked against
+  theory, not just "it ran"), full FFT→IFFT round-trip, and hard errors
+  (not silently wrong output) for wrong-shaped input to either.
+- `docs/DSL_REFERENCE.md` §3 documents both under a new "Frequency-Domain
+  Operators" heading.
+
+---
+
+## [0.1.63] - 2026-07-21
+
+### Added — signal-processing scaffolding (checkpoint 0 of `SIGNAL_PROCESSING_PLAN.md`)
+
+First step of a tracked, multi-checkpoint effort to give the engine real
+frequency-domain capabilities, motivated by the v0.1.61 GW showcase's
+honest finding that raw time-domain strain energy can't reliably locate a
+real gravitational-wave merger (that needs whitening + matched filtering,
+both fundamentally frequency-domain operations the engine had zero
+primitives for). See `SIGNAL_PROCESSING_PLAN.md` at the repo root for the
+full checkpoint list and design rationale.
+
+- New dependency: `realfft` (wraps `rustfft`) — real-to-complex FFT,
+  chosen for being well-maintained and optimized for real-valued input
+  like strain data, over hand-rolling an FFT.
+- New module `src/core/signal.rs`: `fft_forward`/`fft_inverse` (properly
+  normalized round-trip, unlike `realfft`'s raw unnormalized convention)
+  and `magnitude`. No new `Value`/`ValueType::Complex` variant — a complex
+  spectrum will be represented as an ordinary `Matrix(2, N)` (real row,
+  imaginary row) once wired into the DSL in later checkpoints, keeping
+  every existing `Matrix`-handling code path untouched.
+- Not yet wired into the DSL (no new keywords/parser changes this round) —
+  purely internal scaffolding, verified by 4 unit tests (impulse/sine/
+  odd-length round-trip, sine-wave bin-location sanity).
+
+---
+
 ## [0.1.62] - 2026-07-21
 
 ### Added — `DISTANCE(a, b)` SQL-callable Euclidean distance
