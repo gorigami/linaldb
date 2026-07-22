@@ -235,6 +235,76 @@ SELECT seg_index, L2_NORM(strain_1s) AS energy FROM h1_150914_seg ORDER BY energ
 SELECT seg_index, L2_NORM(strain_1s) AS energy FROM h1_170817_seg ORDER BY energy DESC LIMIT 5
 
 # ============================================================
+# 4b. Real matched filtering: whitening + FFT-based cross-correlation
+# ============================================================
+
+SHOW "=== 4b. MATCHED_FILTER on real GW150914 H1 strain (a genuine attempt, honest result) ==="
+
+# The raw-energy scan above was never expected to find the merger (real
+# detection needs whitening + matched filtering, both frequency-domain
+# operations -- see SIGNAL_PROCESSING_PLAN.md). Those primitives now exist
+# in the engine (v0.1.63-69), so here is the real attempt, on real data,
+# reported honestly whichever way it comes out -- not cherry-picked.
+#
+# Template: a synthetic (NOT real GWOSC data) chirp-like burst -- a
+# linearly-swept 35-250 Hz sine, Hann-enveloped, ~0.2s -- built by
+# tools/fixtures/gen_gw_data.rs. This is a standard-shape stand-in for
+# demonstrating the *technique*, not a physically accurate post-Newtonian
+# inspiral waveform (that's its own separate, much larger physics
+# computation, genuinely out of scope for this engine today).
+USE DATASET FROM "examples/data/gw_strain/chirp_template_1s.h5" AS chirp FIELDS (template)
+USE DATASET FROM "examples/data/gw_strain/sample_index_4096.h5" AS idxfix FIELDS (idx)
+
+# The real merger segment (15, from section 1's real, independently-computed
+# merger_offset_seconds ~15.4 for GW150914) and a quiet reference segment (0,
+# far from the merger) used only to estimate the noise floor -- estimating
+# noise from a different segment than the one being searched, not the same
+# one, is the methodologically sound choice.
+LET h1_150914_seg15 = h1_150914_segments[15, *]
+LET h1_150914_seg0 = h1_150914_segments[0, *]
+LET h1_150914_noise_psd = PSD h1_150914_seg0 WINDOW 4096
+LET h1_150914_whitened = WHITEN h1_150914_seg15 WITH h1_150914_noise_psd
+LET h1_150914_correlation = MATCHED_FILTER h1_150914_whitened WITH chirp_template
+
+# The template is placed at the very start of its own 4096-sample buffer
+# (see the fixture generator), so its own reference point is sample 0 --
+# the correlation's peak lag is directly the recovered sample offset within
+# segment 15, no extra arithmetic needed (see MATCHED_FILTER's own
+# documented peak-lag convention in DSL_REFERENCE.md).
+LET h1_150914_corr_power = MULTIPLY h1_150914_correlation h1_150914_correlation
+LET h1_150914_corr_ds = dataset("h1_150914_corr_ds")
+h1_150914_corr_ds.add_column(power, h1_150914_corr_power)
+h1_150914_corr_ds.add_column(sample_idx, idxfix_idx)
+
+# Loudest correlation peaks across the whole 1-second segment:
+SELECT sample_idx, power FROM h1_150914_corr_ds ORDER BY power DESC LIMIT 5
+
+# The real merger's known local sample offset within segment 15 is
+# (15.400 - 15.0) * 4096 = 1638.4 samples (15.400s is the same real,
+# independently-computed merger_offset_seconds shown in section 1 for
+# GW150914 -- not a new magic number). Compare its correlation power
+# directly against the peak found above:
+SELECT sample_idx, power FROM h1_150914_corr_ds WHERE sample_idx > 1630.0 AND sample_idx < 1646.0 ORDER BY sample_idx
+
+# HONEST RESULT: the correlation power around the real merger's true
+# location (sample ~1638) is roughly two orders of magnitude *below* both
+# the series' actual peak (found elsewhere in the segment) and the series'
+# own average power -- this crude template does NOT find the real merger.
+# This is not a bug in MATCHED_FILTER itself: the same algorithm, proven
+# correct against synthetic ground truth with a matching template (see
+# tests/signal_processing_test.rs and core::signal's own unit tests, both
+# of which correctly recover a known injected signal's location), simply
+# has nothing to lock onto here. A crude, non-physical chirp approximation
+# and a single-segment (noisy, unaveraged) noise-floor estimate are not
+# sufficient for real gravitational-wave detection -- real pipelines match
+# against thousands of physically-modeled waveform templates spanning the
+# real parameter space, with much more careful noise-floor estimation, not
+# just "having an FFT-based correlation primitive available". Having the
+# right algorithm is necessary but nowhere near sufficient without the
+# right template -- a genuinely useful, unglamorous lesson from actually
+# trying this on real data instead of stopping at the synthetic proof.
+
+# ============================================================
 # 5. Cross-event, cross-detector leaderboard (CTE + UNION ALL) + AVG_VEC
 # ============================================================
 

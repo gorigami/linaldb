@@ -738,6 +738,17 @@ impl TensorDb {
         )
     }
 
+    pub fn eval_matched_filter(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        data_name: &str,
+        template_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_matched_filter(ctx, output_name, data_name, template_name)
+    }
+
     pub fn eval_stack(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1658,6 +1669,71 @@ impl DatabaseInstance {
             NameEntry {
                 id: out_id,
                 kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `MATCHED_FILTER a WITH b` — FFT-based cross-correlation, the
+    /// standard real-world detection statistic. See
+    /// `core::signal::matched_filter`'s doc comment for the peak-lag vs.
+    /// template-reference-point relationship and the circular- vs.
+    /// linear-correlation caveat.
+    pub fn eval_matched_filter(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        data_name: &str,
+        template_name: &str,
+    ) -> Result<(), EngineError> {
+        let (data_ref, data_kind) = self.get_with_kind(data_name)?;
+        let data_tensor = data_ref.clone();
+        let (template_ref, _) = self.get_with_kind(template_name)?;
+        let template_tensor = template_ref.clone();
+
+        if data_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "MATCHED_FILTER requires a rank-1 Vector data input, got rank {} (shape {:?})",
+                data_tensor.shape.rank(),
+                data_tensor.shape.dims
+            )));
+        }
+        if template_tensor.shape.rank() != 1 {
+            return Err(EngineError::InvalidOp(format!(
+                "MATCHED_FILTER requires a rank-1 Vector template input, got rank {} (shape {:?})",
+                template_tensor.shape.rank(),
+                template_tensor.shape.dims
+            )));
+        }
+        if data_tensor.shape.dims[0] != template_tensor.shape.dims[0] {
+            return Err(EngineError::InvalidOp(format!(
+                "MATCHED_FILTER: data (length {}) and template (length {}) must be the same length",
+                data_tensor.shape.dims[0], template_tensor.shape.dims[0]
+            )));
+        }
+
+        let n = data_tensor.shape.dims[0];
+        let data = data_tensor.to_logical_vec();
+        let template = template_tensor.to_logical_vec();
+        let correlation = crate::core::signal::matched_filter(&data, &template);
+
+        let new_id = self.store.gen_id();
+        let shape = Shape::new(vec![n]);
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "MATCHED_FILTER".to_string(),
+            inputs: vec![data_tensor.id, template_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let result =
+            Tensor::new(new_id, shape, correlation, metadata).map_err(EngineError::InvalidOp)?;
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: data_kind,
             },
         );
         Ok(())

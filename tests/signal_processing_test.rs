@@ -360,3 +360,95 @@ LET bad = BANDPASS sig FROM 100.0 TO 10.0 WITH RATE 1000.0
         "BANDPASS with low_hz > high_hz should be a hard error"
     );
 }
+
+fn sine_gaussian_burst_values(len: usize, center: f64, sigma: f64, freq: f64) -> Vec<String> {
+    (0..len)
+        .map(|i| {
+            let t = i as f64;
+            let envelope = (-((t - center).powi(2)) / (2.0 * sigma * sigma)).exp();
+            let carrier = (2.0 * std::f64::consts::PI * freq * t).sin();
+            (envelope * carrier).to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn matched_filter_recovers_known_injection_offset_through_dsl() {
+    // Same ground-truth construction as core::signal's own unit test, this
+    // time verified through the full DSL layer: template centered at 300,
+    // injected into a flat (zero) background at true_offset=900, recovered
+    // offset = peak_lag + template_center should land within a few samples
+    // of 900. (Deterministic zero background, not noise, since this test
+    // only needs to confirm the DSL wiring reaches the same correct lag
+    // arithmetic core::signal's own test already validated against noise.)
+    let n = 1024;
+    let template_center = 300.0;
+    let true_offset = 900usize;
+    let sigma = 10.0;
+    let freq = 0.08;
+
+    let template_vals = sine_gaussian_burst_values(n, template_center, sigma, freq).join(", ");
+    let data_vals = sine_gaussian_burst_values(n, true_offset as f64, sigma, freq).join(", ");
+
+    let script = format!(
+        "VECTOR template = [{template_vals}]\n\
+         VECTOR data = [{data_vals}]\n\
+         LET correlation = MATCHED_FILTER data WITH template\n"
+    );
+
+    let mut db = TensorDb::new();
+    execute_script(&mut db, &script).expect("MATCHED_FILTER should succeed");
+
+    let correlation = db
+        .get("correlation")
+        .expect("correlation should exist")
+        .to_logical_vec();
+    assert_eq!(correlation.len(), n);
+
+    let (peak_lag, _) = correlation
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+        .unwrap();
+    let recovered_offset = peak_lag as f64 + template_center;
+
+    assert!(
+        (recovered_offset - true_offset as f64).abs() <= 3.0,
+        "expected recovered offset ~{true_offset}, got {recovered_offset} \
+         (peak_lag={peak_lag}, template_center={template_center})"
+    );
+}
+
+#[test]
+fn matched_filter_rejects_length_mismatch() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+VECTOR a = [1.0, 2.0, 3.0]
+VECTOR b = [1.0, 2.0]
+LET bad = MATCHED_FILTER a WITH b
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "MATCHED_FILTER with mismatched data/template lengths should be a hard error"
+    );
+}
+
+#[test]
+fn matched_filter_rejects_non_vector_input() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+MATRIX m = [[1, 2], [3, 4]]
+VECTOR t = [1.0, 2.0, 3.0, 4.0]
+LET bad = MATCHED_FILTER m WITH t
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "MATCHED_FILTER on a Matrix data input should be a hard error"
+    );
+}

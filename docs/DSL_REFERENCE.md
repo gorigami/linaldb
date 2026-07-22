@@ -169,6 +169,7 @@ LET scaled = m_a * 10
 - `PSD a WINDOW n`: Power spectral density (noise-floor) estimate via averaged periodograms. `a` must be a rank-1 `Vector` at least `n` samples long; splits it into non-overlapping `n`-sample chunks (any remainder that doesn't fill a full chunk is dropped), computes each chunk's power spectrum, and averages them elementwise. Result is a real `Vector(n/2+1)`. **Simplified vs. textbook Welch's method**: no 50% chunk overlap, and no window function (Hann/Hamming/etc.) applied before each chunk's FFT — good enough for noise-floor estimation, not a research-grade PSD estimator.
 - `WHITEN a WITH b`: Flattens `a`'s noise spectrum against a PSD estimate `b` (as `PSD` produces): divides each bin of `FFT(a)` by `sqrt(b[bin])`, then inverse-transforms back to the time domain. `b` must have exactly `a.len()/2+1` entries — the same spectrum length `FFT(a)` itself would produce (in practice, estimate it with `PSD a WINDOW <a's own length>`, a single-chunk periodogram; resampling a PSD estimated at a different window size onto a longer signal is not implemented). Result is a real `Vector` the same length as `a`. The standard first step before matched filtering — pulling a real signal out of instrument noise needs the noise spectrum flattened first, or a loud broadband frequency band silently dominates over the signal you're looking for.
 - `BANDPASS a FROM low_hz TO high_hz WITH RATE sample_rate`: Brick-wall bandpass filter — zeros every FFT bin whose frequency (`bin_index * sample_rate / a.len()`) falls outside `[low_hz, high_hz]`, then inverse-transforms back to the time domain. `a` must be a rank-1 `Vector`. Result is a real `Vector` the same length as `a`. **Simplified vs. a real filter design** (IIR/FIR with a proper transition band, e.g. Butterworth/Chebyshev): a hard bin cutoff introduces ringing (Gibbs phenomenon) at sharp edges, unlike a designed filter's smooth rolloff.
+- `MATCHED_FILTER a WITH b`: FFT-based cross-correlation — `IFFT(FFT(a) * conj(FFT(b)))` — the standard real-world signal-detection statistic: the peak of the result (by absolute value) marks the best-matching lag between `a` (the data being searched) and `b` (the template being searched for). `a`/`b` must be rank-1 `Vector`s of the same length; result is a real `Vector` that length. **The peak lag is relative to `b`'s own reference point, not an absolute location in `a`** — if the feature `b` is modeling sits at index `c` within `b`'s own buffer, and `a`'s copy of that feature is truly at index `s`, the correlation peaks at `s - c`, not at `s` directly; recover the true location as `peak_lag + c`. Also computes **circular correlation, not linear correlation** (the FFT-multiply trick wraps around at the buffer edges) — fine for a peak safely inside the buffer, not for a match expected right at the boundary.
 
 ```sql
 VECTOR signal = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
@@ -178,14 +179,15 @@ LET mag = MAGNITUDE spectrum     -- Vector(5): power spectrum
 LET noise_floor = PSD signal WINDOW 8   -- Vector(5): matches signal's own FFT length
 LET whitened = WHITEN signal WITH noise_floor   -- Vector(8): flattened spectrum
 LET filtered = BANDPASS signal FROM 35.0 TO 350.0 WITH RATE 4096.0  -- keep only 35-350 Hz
+LET correlation = MATCHED_FILTER whitened WITH template  -- Vector(8): correlation-vs-lag
 ```
 
 No new `Value`/`ValueType::Complex` variant exists to represent a complex
 spectrum — it is an ordinary `Matrix(2, N)` value by convention, so every
 existing `Matrix`-handling feature (`SHOW`, persistence, `TRANSPOSE`, row
 indexing) already works on it unmodified. See `SIGNAL_PROCESSING_PLAN.md`
-at the repo root for the reasoning and the planned follow-on operator
-(`MATCHED_FILTER`).
+at the repo root for the full design history — this is the last operator
+that plan calls for, though the plan may grow in future rounds.
 
 ---
 

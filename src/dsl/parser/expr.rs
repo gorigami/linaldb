@@ -362,6 +362,7 @@ impl Parser {
             | Some(Token::Psd)
             | Some(Token::Whiten)
             | Some(Token::Bandpass)
+            | Some(Token::MatchedFilter)
             | Some(Token::Scale)
             | Some(Token::Reshape)
             | Some(Token::Stack) => return self.parse_call_expr(),
@@ -614,6 +615,15 @@ impl Parser {
                     low_hz,
                     high_hz,
                     sample_rate,
+                }
+            }
+            Some(Token::MatchedFilter) => {
+                let data = self.parse_simple_expr()?;
+                self.eat(&Token::With)?;
+                let template = self.parse_simple_expr()?;
+                CallExpr::MatchedFilter {
+                    data: Box::new(data),
+                    template: Box::new(template),
                 }
             }
             Some(Token::Scale) => {
