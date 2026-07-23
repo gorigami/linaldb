@@ -200,7 +200,10 @@ async fn test_server_use_database_persists_without_header() {
     let client = Client::new();
 
     client
-        .post(format!("http://localhost:{}/databases/use_persist_db", port))
+        .post(format!(
+            "http://localhost:{}/databases/use_persist_db",
+            port
+        ))
         .send()
         .await
         .unwrap();

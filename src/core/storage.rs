@@ -485,13 +485,14 @@ fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
         .fields()
         .iter()
         .map(|f| {
-            let value_type = logical_vector_or_matrix_type(f).unwrap_or_else(|| match f.data_type() {
-                DataType::Int64 | DataType::Int32 => ValueType::Int,
-                DataType::Float32 | DataType::Float64 => ValueType::Float,
-                DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
-                DataType::Boolean => ValueType::Bool,
-                _ => ValueType::String,
-            });
+            let value_type =
+                logical_vector_or_matrix_type(f).unwrap_or_else(|| match f.data_type() {
+                    DataType::Int64 | DataType::Int32 => ValueType::Int,
+                    DataType::Float32 | DataType::Float64 => ValueType::Float,
+                    DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
+                    DataType::Boolean => ValueType::Bool,
+                    _ => ValueType::String,
+                });
             let mut field = crate::core::tuple::Field::new(f.name().clone(), value_type);
             if f.is_nullable() {
                 field = field.nullable();
@@ -624,7 +625,9 @@ fn arrow_array_to_values(
                 .collect())
         }
         ValueType::Vector(_) => match array.data_type() {
-            DataType::FixedSizeList(_, size) => vector_array_to_values(array, *size as usize, num_rows),
+            DataType::FixedSizeList(_, size) => {
+                vector_array_to_values(array, *size as usize, num_rows)
+            }
             _ => legacy_json_column_to_values(array, num_rows, "Vector"),
         },
         ValueType::Matrix(_, _) => match array.data_type() {
@@ -726,12 +729,15 @@ fn legacy_json_column_to_values(
     num_rows: usize,
     type_name: &str,
 ) -> Result<Vec<Value>, StorageError> {
-    let string_array = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-        StorageError::Serialization(format!(
-            "Expected StringArray for legacy {} column",
-            type_name
-        ))
-    })?;
+    let string_array = array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            StorageError::Serialization(format!(
+                "Expected StringArray for legacy {} column",
+                type_name
+            ))
+        })?;
     Ok((0..num_rows)
         .map(|i| {
             if string_array.is_null(i) {
@@ -958,9 +964,13 @@ fn build_vector_column(column_data: &[&Value], declared_dim: usize) -> (DataType
             }
             let item_field = Arc::new(ArrowField::new("item", DataType::Float32, false));
             let values: ArrayRef = Arc::new(Float32Array::from(flat));
-            if let Ok(list) = FixedSizeListArray::try_new(item_field.clone(), dim as i32, values, None)
+            if let Ok(list) =
+                FixedSizeListArray::try_new(item_field.clone(), dim as i32, values, None)
             {
-                return (DataType::FixedSizeList(item_field, dim as i32), Arc::new(list));
+                return (
+                    DataType::FixedSizeList(item_field, dim as i32),
+                    Arc::new(list),
+                );
             }
         }
     }
@@ -1006,9 +1016,12 @@ fn build_matrix_column(
 
             let inner_item_field = Arc::new(ArrowField::new("item", DataType::Float32, false));
             let inner_values: ArrayRef = Arc::new(Float32Array::from(flat));
-            if let Ok(inner_list) =
-                FixedSizeListArray::try_new(inner_item_field.clone(), cols as i32, inner_values, None)
-            {
+            if let Ok(inner_list) = FixedSizeListArray::try_new(
+                inner_item_field.clone(),
+                cols as i32,
+                inner_values,
+                None,
+            ) {
                 let inner_data_type = DataType::FixedSizeList(inner_item_field, cols as i32);
                 let outer_item_field = Arc::new(ArrowField::new("item", inner_data_type, false));
                 let outer_values: ArrayRef = Arc::new(inner_list);

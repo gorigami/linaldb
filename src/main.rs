@@ -583,7 +583,10 @@ fn remove_pid_file(port: u16) {
 
 async fn handle_server_stop(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let path = pid_file_path(port);
-    let pid: u32 = match fs::read_to_string(&path).ok().and_then(|s| s.trim().parse().ok()) {
+    let pid: u32 = match fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+    {
         Some(pid) => pid,
         None => {
             println!(
