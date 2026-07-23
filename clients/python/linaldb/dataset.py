@@ -46,8 +46,23 @@ class Dataset:
     def _delivery_url(self, path: str) -> str:
         return f"{self._client.url}/delivery/datasets/{self.name}/{path}"
 
+    def _delivery_headers(self) -> dict:
+        # /delivery resolves the same per-database subdirectory /execute
+        # does via this header (contract §2, engine v0.1.73) -- without
+        # it, a Client configured for a non-default database would
+        # silently hit the *default* database's copy of a same-named
+        # dataset instead (or 404 if there isn't one), not the one this
+        # Client actually points at. Found while building a real example
+        # against a non-default database, not caught by checkpoint 2's
+        # tests, which only ever used the default database.
+        if self._client.database:
+            return {"X-Linal-Database": self._client.database}
+        return {}
+
     def _get_json(self, path: str) -> dict:
-        resp = self._client._session.get(self._delivery_url(path), timeout=30)
+        resp = self._client._session.get(
+            self._delivery_url(path), headers=self._delivery_headers(), timeout=30
+        )
         if resp.status_code != 200:
             raise LinalError(
                 f"GET /delivery/datasets/{self.name}/{path} failed "
@@ -73,7 +88,9 @@ class Dataset:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        resp = self._client._session.get(self._delivery_url("data.parquet"), timeout=60)
+        resp = self._client._session.get(
+            self._delivery_url("data.parquet"), headers=self._delivery_headers(), timeout=60
+        )
         if resp.status_code != 200:
             raise LinalError(
                 f"GET /delivery/datasets/{self.name}/data.parquet failed "

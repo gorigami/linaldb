@@ -82,3 +82,32 @@ def test_schema_manifest_stats(linal_server, unique_name):
     assert col_by_name["emb"]["value_type"] == {"Vector": 3}
     assert manifest["formats"]["parquet"] == "data.parquet"
     assert stats["row_count"] == 1
+
+
+def test_dataset_export_honors_non_default_database(linal_server, unique_name):
+    # Regression test: Dataset's HTTP calls didn't send X-Linal-Database
+    # at all, so a Client configured for a non-default database silently
+    # fell back to the server's default database for /delivery -- found
+    # while building a real example against a non-default database
+    # (checkpoint 5), not by checkpoint 2's tests, which only ever used
+    # the default database. A same-named dataset in each database, with
+    # different data, proves the header is actually being honored (not
+    # just "it didn't 404").
+    default_client = linaldb.connect(linal_server)
+    db_name = f"db_{unique_name}"
+    default_client.execute(f"CREATE DATABASE {db_name}")
+
+    default_client.execute(f"DATASET {unique_name} COLUMNS (id: Int, emb: Vector(2))")
+    default_client.execute(f"INSERT INTO {unique_name} VALUES (1, [1.0, 1.0])")
+    default_client.execute(f"SAVE DATASET {unique_name}")
+
+    scoped_client = linaldb.connect(linal_server, database=db_name)
+    scoped_client.execute(f"DATASET {unique_name} COLUMNS (id: Int, emb: Vector(2))")
+    scoped_client.execute(f"INSERT INTO {unique_name} VALUES (1, [9.0, 9.0])")
+    scoped_client.execute(f"SAVE DATASET {unique_name}")
+
+    default_table = default_client.dataset(unique_name).to_arrow()
+    scoped_table = scoped_client.dataset(unique_name).to_arrow()
+
+    assert default_table.column("emb").to_pylist() == [[1.0, 1.0]]
+    assert scoped_table.column("emb").to_pylist() == [[9.0, 9.0]]

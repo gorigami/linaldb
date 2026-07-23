@@ -87,3 +87,34 @@ test_that("linal_dataset_schema/manifest/stats", {
   expect_equal(manifest$formats$parquet, "data.parquet")
   expect_equal(stats$row_count, 1)
 })
+
+test_that("dataset export honors a non-default database", {
+  # Regression test: linal_dataset()'s HTTP calls didn't send
+  # X-Linal-Database at all, so a connection configured for a non-default
+  # database silently fell back to the server's default database for
+  # /delivery -- found while building a real example against a
+  # non-default database (checkpoint 5), not by checkpoint 4's tests,
+  # which only ever used the default database. A same-named dataset in
+  # each database, with different data, proves the header is actually
+  # honored (not just "it didn't 404").
+  base_url <- test_server_url()
+  default_conn <- linal_connect(base_url)
+  name <- unique_name()
+  db_name <- paste0("db_", name)
+  linal_execute(default_conn, sprintf("CREATE DATABASE %s", db_name))
+
+  linal_execute(default_conn, sprintf("DATASET %s COLUMNS (id: Int, emb: Vector(2))", name))
+  linal_execute(default_conn, sprintf("INSERT INTO %s VALUES (1, [1.0, 1.0])", name))
+  linal_execute(default_conn, sprintf("SAVE DATASET %s", name))
+
+  scoped_conn <- linal_connect(base_url, database = db_name)
+  linal_execute(scoped_conn, sprintf("DATASET %s COLUMNS (id: Int, emb: Vector(2))", name))
+  linal_execute(scoped_conn, sprintf("INSERT INTO %s VALUES (1, [9.0, 9.0])", name))
+  linal_execute(scoped_conn, sprintf("SAVE DATASET %s", name))
+
+  default_df <- linal_dataset_read(linal_dataset(default_conn, name))
+  scoped_df <- linal_dataset_read(linal_dataset(scoped_conn, name))
+
+  expect_equal(default_df$emb[[1]], c(1.0, 1.0))
+  expect_equal(scoped_df$emb[[1]], c(9.0, 9.0))
+})

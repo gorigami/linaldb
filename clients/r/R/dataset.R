@@ -19,8 +19,27 @@ linal_dataset <- function(conn, name) {
   sprintf("%s/delivery/datasets/%s/%s", ds$conn$url, ds$name, path)
 }
 
+#' /delivery resolves the same per-database subdirectory /execute does via
+#' this header (contract Sec.2, engine v0.1.73) -- without it, a
+#' connection configured for a non-default database would silently hit
+#' the *default* database's copy of a same-named dataset instead (or 404
+#' if there isn't one), not the one this connection actually points at.
+#' Found while building a real example against a non-default database,
+#' not caught by checkpoint 4's tests, which only ever used the default
+#' database. Mirrors the equivalent fix in the Python client's dataset.py.
+#' @keywords internal
+#' @noRd
+.linal_delivery_request <- function(ds, path, timeout_secs) {
+  req <- httr2::request(.linal_delivery_url(ds, path))
+  req <- httr2::req_timeout(req, timeout_secs)
+  if (!is.null(ds$conn$database)) {
+    req <- httr2::req_headers(req, `X-Linal-Database` = ds$conn$database)
+  }
+  req
+}
+
 .linal_delivery_get_json <- function(ds, path) {
-  req <- httr2::req_timeout(httr2::request(.linal_delivery_url(ds, path)), 30)
+  req <- .linal_delivery_request(ds, path, 30)
   resp <- httr2::req_perform(httr2::req_error(req, is_error = function(resp) FALSE))
   if (httr2::resp_status(resp) != 200) {
     stop(linal_error(sprintf(
@@ -86,7 +105,7 @@ linal_dataset_stats <- function(ds) {
 #' @rdname linal_dataset
 #' @export
 linal_dataset_read <- function(ds) {
-  req <- httr2::req_timeout(httr2::request(.linal_delivery_url(ds, "data.parquet")), 60)
+  req <- .linal_delivery_request(ds, "data.parquet", 60)
   resp <- httr2::req_perform(httr2::req_error(req, is_error = function(resp) FALSE))
   if (httr2::resp_status(resp) != 200) {
     stop(linal_error(sprintf(
