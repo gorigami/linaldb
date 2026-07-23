@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.72] - 2026-07-23
+
+### Fixed — Vector/Matrix columns now write as real Arrow columns in Parquet
+
+Found while designing the Python/R interop work: `dataset_to_record_batch`
+(`src/core/storage.rs`) mapped every `Vector`/`Matrix` column to Arrow
+`Utf8` and stored each cell as a JSON-encoded string (e.g. the literal text
+`{"Vector":[1.0,2.0,3.0]}`) — the fallback path silently used for the
+engine's own headline feature. Any external Parquet reader (pandas,
+polars, pyarrow, R's `arrow` package) got a string column requiring
+manual per-cell `json.loads()`/unwrapping to recover the numeric data,
+for exactly the columns meant to be first-class.
+
+Fixed: `Vector`/`Matrix` columns with no `NULL`s and a uniform width now
+write as native Arrow `FixedSizeList<Float32>` /
+`FixedSizeList<FixedSizeList<Float32>>` columns — genuine numeric arrays,
+verified end-to-end with a real pyarrow read (`pd.read_parquet` gives back
+proper `[1.0, 2.0, 3.0]` lists, not strings). `schema.json`
+(`DatasetSchema::from(Arc<ArrowSchema>)`) and the legacy `.meta.json`
+sidecar schema (`arrow_schema_to_tuple_schema`) both correctly round-trip
+the new type via a shared `vector_or_matrix_type` helper, so `LOAD DATASET`
+reconstructs `Value::Vector`/`Value::Matrix` rows (not stringified JSON)
+from the native encoding.
+
+**A column with any actual `NULL` value still falls back to the legacy
+JSON-string encoding** — found by verifying against pyarrow specifically
+(not just this engine's own round-trip, which is arrow-rs on both ends and
+didn't catch it): a `FixedSizeList` Parquet column with a null slot reads
+back fine through arrow-rs's own reader but pyarrow raises `ArrowInvalid:
+Expected all lists to be of size=N but index M had size=0`. Root-caused to
+how Parquet's definition/repetition levels encode a null fixed-size slot;
+rather than chase a cross-library Parquet encoding bug, scoped this fix to
+the common case (fully-populated vector/matrix columns, e.g. dense
+embeddings) and kept the previously-existing, already-correct JSON
+fallback for the rarer any-`NULL` case. Read-side
+(`arrow_array_to_values`) dispatches on the actual Arrow column type it
+finds, not a hardcoded assumption, so both encodings — and Parquet files
+written by pre-v0.1.72 versions of this engine — load correctly.
+
+No DSL-visible change; this is a storage-layer/Parquet-interop fix.
+
+---
+
 ## [0.1.71] - 2026-07-22
 
 ### Added / Fixed — CLI/server alignment audit

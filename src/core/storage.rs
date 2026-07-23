@@ -7,7 +7,8 @@ use crate::core::tensor::{Shape, Tensor, TensorId, TensorMetadata};
 use crate::core::tuple::{Schema, Tuple};
 use crate::core::value::{Value, ValueType};
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
+    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int32Array,
+    Int64Array, StringArray,
 };
 use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
@@ -382,16 +383,20 @@ impl From<Arc<ArrowSchema>> for DatasetSchema {
             .fields()
             .iter()
             .map(|f| {
-                let vt = match f.data_type() {
-                    DataType::Int64 => ValueType::Int,
-                    DataType::Float32 | DataType::Float64 => ValueType::Float,
-                    DataType::Boolean => ValueType::Bool,
-                    _ => ValueType::String,
+                let (vt, shape_dims) = match f.data_type() {
+                    DataType::Int64 => (ValueType::Int, vec![]),
+                    DataType::Float32 | DataType::Float64 => (ValueType::Float, vec![]),
+                    DataType::Boolean => (ValueType::Bool, vec![]),
+                    other => match vector_or_matrix_type(other) {
+                        Some(ValueType::Vector(dim)) => (ValueType::Vector(dim), vec![dim]),
+                        Some(ValueType::Matrix(r, c)) => (ValueType::Matrix(r, c), vec![r, c]),
+                        _ => (ValueType::String, vec![]),
+                    },
                 };
                 ColumnSchema::new(
                     f.name().clone(),
                     vt,
-                    crate::core::tensor::Shape::new(vec![]),
+                    crate::core::tensor::Shape::new(shape_dims),
                 )
                 .with_nullable(f.is_nullable())
             })
@@ -400,13 +405,34 @@ impl From<Arc<ArrowSchema>> for DatasetSchema {
     }
 }
 
+/// Recognize the native Vector/Matrix Arrow encoding — `FixedSizeList<Float32>`
+/// for a vector, `FixedSizeList<FixedSizeList<Float32>>` for a matrix — used
+/// by both `DatasetSchema`'s and `core::tuple::Schema`'s Arrow-schema
+/// conversions so `schema.json` and the legacy `.meta.json` sidecar agree
+/// with what `dataset_to_record_batch` actually writes.
+fn vector_or_matrix_type(data_type: &DataType) -> Option<ValueType> {
+    match data_type {
+        DataType::FixedSizeList(inner, size) => match inner.data_type() {
+            DataType::Float32 => Some(ValueType::Vector(*size as usize)),
+            DataType::FixedSizeList(innermost, inner_size)
+                if matches!(innermost.data_type(), DataType::Float32) =>
+            {
+                Some(ValueType::Matrix(*size as usize, *inner_size as usize))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Convert an Arrow schema into LINAL's legacy relational `core::tuple::Schema`,
 /// used as the authoritative schema `load_dataset` reconstructs rows against.
 /// Mirrors `dataset_to_record_batch`'s reverse mapping (Int, Float, String,
-/// Bool); anything else falls back to `String` — not reachable by any current
-/// connector (HDF5/Numpy/Zarr only ever emit Float32; CSV import produces
-/// Int64/Float64/Utf8/Boolean), and `load_dataset` will surface a clean
-/// `StorageError` rather than silently corrupt data if it ever is.
+/// Bool, Vector/Matrix via `vector_or_matrix_type`); anything else falls back
+/// to `String` — not reachable by any current connector (HDF5/Numpy/Zarr only
+/// ever emit Float32; CSV import produces Int64/Float64/Utf8/Boolean), and
+/// `load_dataset` will surface a clean `StorageError` rather than silently
+/// corrupt data if it ever is.
 fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
     let fields = arrow_schema
         .fields()
@@ -417,7 +443,7 @@ fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
                 DataType::Float32 | DataType::Float64 => ValueType::Float,
                 DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
                 DataType::Boolean => ValueType::Bool,
-                _ => ValueType::String,
+                other => vector_or_matrix_type(other).unwrap_or(ValueType::String),
             };
             let mut field = crate::core::tuple::Field::new(f.name().clone(), value_type);
             if f.is_nullable() {
@@ -550,26 +576,124 @@ fn arrow_array_to_values(
                 })
                 .collect())
         }
-        ValueType::Vector(_) | ValueType::Matrix(_, _) => {
-            let string_array = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| {
-                    StorageError::Serialization("Expected StringArray for complex type".to_string())
-                })?;
-            Ok((0..num_rows)
-                .map(|i| {
-                    if string_array.is_null(i) {
-                        Value::Null
-                    } else {
-                        let json_str = string_array.value(i);
-                        serde_json::from_str(json_str).unwrap_or(Value::Null)
-                    }
-                })
-                .collect())
-        }
+        ValueType::Vector(_) => match array.data_type() {
+            DataType::FixedSizeList(_, size) => vector_array_to_values(array, *size as usize, num_rows),
+            _ => legacy_json_column_to_values(array, num_rows, "Vector"),
+        },
+        ValueType::Matrix(_, _) => match array.data_type() {
+            DataType::FixedSizeList(_, _) => matrix_array_to_values(array, num_rows),
+            _ => legacy_json_column_to_values(array, num_rows, "Matrix"),
+        },
         ValueType::Null => Ok(vec![Value::Null; num_rows]),
     }
+}
+
+/// Decode a `FixedSizeList<Float32>` column (built by `dataset_to_record_batch`)
+/// back into `Value::Vector` cells.
+fn vector_array_to_values(
+    array: &ArrayRef,
+    size: usize,
+    num_rows: usize,
+) -> Result<Vec<Value>, StorageError> {
+    let list_array = array
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| {
+            StorageError::Serialization("Expected FixedSizeListArray for Vector column".to_string())
+        })?;
+    let float_values = list_array
+        .values()
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| {
+            StorageError::Serialization("Expected Float32 values inside Vector column".to_string())
+        })?
+        .values();
+
+    Ok((0..num_rows)
+        .map(|i| {
+            if list_array.is_null(i) {
+                Value::Null
+            } else {
+                let start = i * size;
+                Value::Vector(float_values[start..start + size].to_vec())
+            }
+        })
+        .collect())
+}
+
+/// Decode a `FixedSizeList<FixedSizeList<Float32>>` column (built by
+/// `dataset_to_record_batch`) back into `Value::Matrix` cells.
+fn matrix_array_to_values(array: &ArrayRef, num_rows: usize) -> Result<Vec<Value>, StorageError> {
+    let outer_list = array
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| {
+            StorageError::Serialization("Expected FixedSizeListArray for Matrix column".to_string())
+        })?;
+    let outer_size = outer_list.value_length() as usize;
+
+    let inner_list = outer_list
+        .values()
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| {
+            StorageError::Serialization(
+                "Expected nested FixedSizeListArray for Matrix column".to_string(),
+            )
+        })?;
+    let inner_size = inner_list.value_length() as usize;
+    let float_values = inner_list
+        .values()
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| {
+            StorageError::Serialization("Expected Float32 values inside Matrix column".to_string())
+        })?
+        .values();
+
+    Ok((0..num_rows)
+        .map(|i| {
+            if outer_list.is_null(i) {
+                Value::Null
+            } else {
+                let row_start = i * outer_size;
+                let rows = (0..outer_size)
+                    .map(|r| {
+                        let start = (row_start + r) * inner_size;
+                        float_values[start..start + inner_size].to_vec()
+                    })
+                    .collect();
+                Value::Matrix(rows)
+            }
+        })
+        .collect())
+}
+
+/// Decode the legacy per-cell JSON-string encoding used before native
+/// `FixedSizeList` support existed, so datasets saved by an older engine
+/// version (or columns whose vectors/matrices weren't uniformly shaped, see
+/// `build_vector_column`/`build_matrix_column`) still load correctly.
+fn legacy_json_column_to_values(
+    array: &ArrayRef,
+    num_rows: usize,
+    type_name: &str,
+) -> Result<Vec<Value>, StorageError> {
+    let string_array = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+        StorageError::Serialization(format!(
+            "Expected StringArray for legacy {} column",
+            type_name
+        ))
+    })?;
+    Ok((0..num_rows)
+        .map(|i| {
+            if string_array.is_null(i) {
+                Value::Null
+            } else {
+                serde_json::from_str(string_array.value(i)).unwrap_or(Value::Null)
+            }
+        })
+        .collect())
 }
 
 /// Convert Arrow ArrayRef to f32 vector for LINAL tensors
@@ -653,27 +777,8 @@ pub fn record_batch_to_tensors(batch: &RecordBatch) -> Result<Vec<(String, Tenso
 
 /// Convert Dataset to Arrow RecordBatch
 pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, StorageError> {
-    // Build Arrow schema from dataset schema
-    let arrow_fields: Vec<ArrowField> = dataset
-        .schema
-        .fields
-        .iter()
-        .map(|f| {
-            let data_type = match &f.value_type {
-                ValueType::Int => DataType::Int64,
-                ValueType::Float => DataType::Float32,
-                ValueType::String => DataType::Utf8,
-                ValueType::Bool => DataType::Boolean,
-                _ => DataType::Utf8, // Fallback for complex types (serialize as JSON string)
-            };
-            ArrowField::new(&f.name, data_type, f.nullable)
-        })
-        .collect();
-
-    let arrow_schema = Arc::new(ArrowSchema::new(arrow_fields));
-
-    // Convert rows to Arrow arrays
-    let mut arrays: Vec<ArrayRef> = Vec::new();
+    let mut arrow_fields: Vec<ArrowField> = Vec::with_capacity(dataset.schema.fields.len());
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(dataset.schema.fields.len());
 
     for field in &dataset.schema.fields {
         let column_data: Vec<&Value> = dataset
@@ -689,7 +794,7 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
             })
             .collect();
 
-        let array: ArrayRef = match &field.value_type {
+        let (data_type, array): (DataType, ArrayRef) = match &field.value_type {
             ValueType::Int => {
                 let values: Vec<Option<i64>> = column_data
                     .iter()
@@ -699,7 +804,7 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
                         _ => None,
                     })
                     .collect();
-                Arc::new(Int64Array::from(values))
+                (DataType::Int64, Arc::new(Int64Array::from(values)))
             }
             ValueType::Float => {
                 let values: Vec<Option<f32>> = column_data
@@ -711,7 +816,7 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
                         _ => None,
                     })
                     .collect();
-                Arc::new(Float32Array::from(values))
+                (DataType::Float32, Arc::new(Float32Array::from(values)))
             }
             ValueType::String => {
                 let values: Vec<Option<&str>> = column_data
@@ -722,7 +827,7 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
                         _ => None,
                     })
                     .collect();
-                Arc::new(StringArray::from(values))
+                (DataType::Utf8, Arc::new(StringArray::from(values)))
             }
             ValueType::Bool => {
                 let values: Vec<Option<bool>> = column_data
@@ -733,25 +838,149 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
                         _ => None,
                     })
                     .collect();
-                Arc::new(BooleanArray::from(values))
+                (DataType::Boolean, Arc::new(BooleanArray::from(values)))
             }
-            _ => {
-                // For complex types (Vector, Matrix), serialize as JSON strings
-                let values: Vec<Option<String>> = column_data
-                    .iter()
-                    .map(|v| match v {
-                        Value::Null => None,
-                        v => Some(serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())),
-                    })
-                    .collect();
-                Arc::new(StringArray::from(values))
+            ValueType::Vector(declared_dim) => build_vector_column(&column_data, *declared_dim),
+            ValueType::Matrix(declared_rows, declared_cols) => {
+                build_matrix_column(&column_data, *declared_rows, *declared_cols)
             }
+            ValueType::Null => build_legacy_json_column(&column_data),
         };
 
+        arrow_fields.push(ArrowField::new(&field.name, data_type, field.nullable));
         arrays.push(array);
     }
 
+    let arrow_schema = Arc::new(ArrowSchema::new(arrow_fields));
     RecordBatch::try_new(arrow_schema, arrays).map_err(StorageError::Arrow)
+}
+
+/// Build a native `FixedSizeList<Float32>` Arrow column for a `Vector` field
+/// — real numeric columns instead of the old per-cell JSON-string encoding,
+/// so Parquet consumers (pandas/polars/R `arrow`, not just this engine) see
+/// actual vector data. Prefers the schema's declared dimension (from a
+/// `VECTOR(n)` column type); if that's unset (`0`, e.g. some computed-column
+/// paths don't infer a static width) falls back to the first non-empty
+/// row's length. Falls back further to the legacy JSON-string encoding if
+/// the column's vectors aren't uniformly sized (a `FixedSizeList` can't
+/// represent that) **or if the column contains any `NULL`**: empirically,
+/// a `FixedSizeList` column written with a null slot round-trips fine
+/// through this engine's own arrow-rs-based reader but pyarrow rejects it
+/// (`ArrowInvalid: Expected all lists to be of size=N but index M had
+/// size=0`) — found by verifying against a real external Parquet reader
+/// rather than trusting our own round-trip, which is exactly why this
+/// engine's Python/R interop work checks that in the first place. A
+/// fully-populated (no-null) vector/matrix column, by far the common case
+/// for embeddings, is unaffected and gets the real numeric column.
+fn build_vector_column(column_data: &[&Value], declared_dim: usize) -> (DataType, ArrayRef) {
+    let num_rows = column_data.len();
+    let dim = if declared_dim > 0 {
+        Some(declared_dim)
+    } else {
+        column_data.iter().find_map(|v| match v {
+            Value::Vector(v) if !v.is_empty() => Some(v.len()),
+            _ => None,
+        })
+    };
+
+    if let Some(dim) = dim {
+        let no_nulls = column_data
+            .iter()
+            .all(|v| matches!(v, Value::Vector(v) if v.len() == dim));
+
+        if no_nulls {
+            let mut flat: Vec<f32> = Vec::with_capacity(num_rows * dim);
+            for v in column_data {
+                if let Value::Vector(vec) = v {
+                    flat.extend_from_slice(vec);
+                }
+            }
+            let item_field = Arc::new(ArrowField::new("item", DataType::Float32, false));
+            let values: ArrayRef = Arc::new(Float32Array::from(flat));
+            if let Ok(list) = FixedSizeListArray::try_new(item_field.clone(), dim as i32, values, None)
+            {
+                return (DataType::FixedSizeList(item_field, dim as i32), Arc::new(list));
+            }
+        }
+    }
+
+    build_legacy_json_column(column_data)
+}
+
+/// Matrix counterpart of `build_vector_column`: a native
+/// `FixedSizeList<FixedSizeList<Float32>>` column, rows-then-cols nested,
+/// with the same declared-dims-first / infer-from-data / fall-back-to-JSON
+/// strategy.
+fn build_matrix_column(
+    column_data: &[&Value],
+    declared_rows: usize,
+    declared_cols: usize,
+) -> (DataType, ArrayRef) {
+    let num_rows = column_data.len();
+    let dims = if declared_rows > 0 && declared_cols > 0 {
+        Some((declared_rows, declared_cols))
+    } else {
+        column_data.iter().find_map(|v| match v {
+            Value::Matrix(m) if !m.is_empty() && !m[0].is_empty() => Some((m.len(), m[0].len())),
+            _ => None,
+        })
+    };
+
+    if let Some((rows, cols)) = dims {
+        // No-null requirement: see `build_vector_column`'s doc comment —
+        // the same pyarrow-incompatible-null-encoding issue applies here.
+        let no_nulls = column_data
+            .iter()
+            .all(|v| matches!(v, Value::Matrix(m) if m.len() == rows && m.iter().all(|r| r.len() == cols)));
+
+        if no_nulls {
+            let mut flat: Vec<f32> = Vec::with_capacity(num_rows * rows * cols);
+            for v in column_data {
+                if let Value::Matrix(m) = v {
+                    for r in m {
+                        flat.extend_from_slice(r);
+                    }
+                }
+            }
+
+            let inner_item_field = Arc::new(ArrowField::new("item", DataType::Float32, false));
+            let inner_values: ArrayRef = Arc::new(Float32Array::from(flat));
+            if let Ok(inner_list) =
+                FixedSizeListArray::try_new(inner_item_field.clone(), cols as i32, inner_values, None)
+            {
+                let inner_data_type = DataType::FixedSizeList(inner_item_field, cols as i32);
+                let outer_item_field = Arc::new(ArrowField::new("item", inner_data_type, false));
+                let outer_values: ArrayRef = Arc::new(inner_list);
+                if let Ok(outer_list) = FixedSizeListArray::try_new(
+                    outer_item_field.clone(),
+                    rows as i32,
+                    outer_values,
+                    None,
+                ) {
+                    return (
+                        DataType::FixedSizeList(outer_item_field, rows as i32),
+                        Arc::new(outer_list),
+                    );
+                }
+            }
+        }
+    }
+
+    build_legacy_json_column(column_data)
+}
+
+/// Legacy per-cell JSON-string encoding, kept as the fallback for
+/// non-uniform Vector/Matrix columns and used as-is for `Null`-typed
+/// columns (unchanged from the pre-FixedSizeList behavior).
+fn build_legacy_json_column(column_data: &[&Value]) -> (DataType, ArrayRef) {
+    let values: Vec<Option<String>> = column_data
+        .iter()
+        .map(|v| match v {
+            Value::Null => None,
+            v => Some(serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())),
+        })
+        .collect();
+    (DataType::Utf8, Arc::new(StringArray::from(values)))
 }
 
 impl StorageEngine for ParquetStorage {

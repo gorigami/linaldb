@@ -70,7 +70,18 @@ LINALDB uses a hybrid approach to balance performance and flexibility:
 1. **Relational/Heavy Path** (`dataset_legacy.rs`):
     - Optimized for **row-level operations** (INSERT/UPDATE).
     - Used for standard SQL `DATASET` creation and `SELECT` query results.
-    - Primary format for **Persistence** (Parquet).
+    - Primary format for **Persistence** (Parquet). `Vector`/`Matrix` columns
+      write as native Arrow `FixedSizeList` types (v0.1.72,
+      `core::storage::dataset_to_record_batch`) when the column has no
+      `NULL`s and a uniform width — real numeric columns readable by
+      pandas/polars/pyarrow/R `arrow`, not JSON strings. A column with any
+      actual `NULL` falls back to the pre-v0.1.72 per-cell JSON-string
+      encoding: writing a nullable `FixedSizeList` round-trips fine through
+      this engine's own arrow-rs reader but pyarrow rejects it
+      (`ArrowInvalid: Expected all lists to be of size=N ...`) — an
+      external-reader-verified limitation, not a theoretical one. Read-side
+      (`arrow_array_to_values`) transparently supports both encodings, so
+      older Parquet packages keep loading.
 2. **Semantic/Light Path** (`core/dataset/`):
     - Optimized for **Zero-Copy Views** and **Tensor Algebra**.
     - Allows linking independent tensors as virtual columns (`ATTACH`).
