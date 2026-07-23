@@ -38,8 +38,15 @@ def test_execute_raises_linal_error_with_real_server_message(linal_server):
 def test_execute_none_result_for_use(linal_server):
     client = linaldb.connect(linal_server)
     client.execute("CREATE DATABASE pytest_use_target")
-    result = client.execute("USE pytest_use_target")
-    assert result == "Switched to database 'pytest_use_target'"
+    try:
+        result = client.execute("USE pytest_use_target")
+        assert result == "Switched to database 'pytest_use_target'"
+    finally:
+        # A headerless USE now genuinely persists across requests on the
+        # shared session-scoped server (see engine v0.1.74's fix) -- every
+        # other test in this session sends headerless requests assuming
+        # "default", so this must switch back rather than leak state.
+        client.execute("USE default")
 
 
 def test_query_returns_dataframe(linal_server, unique_name):

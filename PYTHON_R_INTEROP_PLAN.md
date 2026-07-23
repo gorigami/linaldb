@@ -314,22 +314,78 @@ working state.
     license string), 0 ERRORs, 0 NOTEs. Full Python suite (21/21)
     reconfirmed unaffected (no engine changes this checkpoint).
 
-- [ ] **5. Real end-to-end example, both languages**
-  - Per this project's own recurring lesson (a real workflow against real
-    data finds bugs isolated unit tests don't — confirmed four separate
-    times across the PBMC/HDF5/GW rounds, and again by v0.1.72 itself),
-    build one real example per client under `clients/python/examples/`
-    and `clients/r/examples/`: start a real `linal serve`, load a
-    non-trivial real dataset (reuse an existing real fixture — e.g. the
-    HDF5 digit-classification or GW data already checked into
-    `examples/data/` — rather than inventing synthetic data), query it
-    via `/execute`, export it via `/delivery`, and confirm the numbers
-    match between the two paths.
-  - Explicitly budget time in this checkpoint for **hidden bugs this
-    surfaces** — document them the same way every prior real-example
-    round did (what broke, root cause, fix, which layer). This is the
-    checkpoint most likely to find something, based on this project's own
-    track record.
+- [x] **5. Real end-to-end example, both languages** — **Done 2026-07-23,
+  engine v0.1.74 — the checkpoint's own prediction held: two more real
+  bugs found, one of them severe**
+  - Built one real example per client — `clients/python/examples/
+    digit_classification.py` and `clients/r/examples/
+    digit_classification.R` — reusing the real, already-checked-in UCI
+    handwritten-digits data from `examples/hdf5_digit_classification.lnl`
+    (real downloaded samples, not synthetic) rather than duplicating ~40
+    real 64-dimension vectors as literal data in two more files: both
+    scripts start a real `linal serve` and **replay that `.lnl` file's
+    actual DSL statements through the client itself** (a small
+    paren-balance-aware line joiner mirroring `linal run`'s own
+    multi-line statement joiner in `src/main.rs`, since most statements
+    in that file are one physical line but its `DATASET ... COLUMNS
+    (...)` blocks genuinely span several). Both scripts then: run the
+    real nearest-centroid classification query via `/execute`, export
+    `query_digits`/`reference_centroids` via `/delivery`
+    (`to_pandas()`/`linal_dataset_read()`), and **independently
+    recompute** cosine-similarity classification from the raw exported
+    vectors in plain numpy/base R — comparing every per-row similarity
+    value, every predicted label, and the aggregate accuracy against what
+    `/execute`'s SQL engine reported. Both scripts: exact match, 25/30
+    (83.3%) — the same real, already-known-genuine accuracy figure from
+    the original `.lnl` file, now independently reproduced three ways
+    (original CLI run, Python from `/delivery` data, R from `/delivery`
+    data).
+  - **Bug found before the example even ran, by reviewing the code with
+    a non-default-database scenario in mind**: both `Dataset` (Python)
+    and `linal_dataset()` (R) sent every `/delivery` HTTP request with no
+    `X-Linal-Database` header at all, so a client configured for a
+    non-default database silently fell back to the server's *default*
+    database instead. Neither checkpoint 2 nor checkpoint 4's tests
+    caught this — both only ever used the default database. Fixed in
+    both clients; added a same-named-dataset-in-two-databases regression
+    test to each (22/22 Python, 55/55 R before the next finding below).
+  - **A severe, previously-undiscovered engine bug found while getting
+    the example to actually run**: `USE <database>` sent to `/execute`
+    with no `X-Linal-Database` header reported success but had **no
+    lasting effect at all** — `execute_command`'s "restore previous
+    database" logic ran unconditionally after every command, silently
+    reverting any active-database change a headerless request made,
+    including one whose own command was an explicit `USE`. This meant
+    the entire session-level `USE` workflow over HTTP had likely been a
+    no-op since the multi-tenancy header feature was first added — every
+    dataset the replayed `.lnl` script's own `USE
+    hdf5_digit_classification` was supposed to scope actually landed in
+    `default`. Root-caused with runtime `eprintln!` instrumentation after
+    code-reading alone didn't explain the symptom (a minimal pure-engine
+    reproduction proved `TensorDb`/`execute_line` had no bug at all,
+    narrowing it correctly to the HTTP layer). Fixed in engine v0.1.74:
+    the restore now only fires for a request that itself supplied the
+    header. New regression test
+    `test_server_use_database_persists_without_header` — the existing
+    `test_server_multitenancy` never caught this because it always sends
+    the header on every request, never exercising "switch once via a
+    plain `USE`, then rely on that being remembered."
+  - **A latent test-isolation bug the engine fix immediately exposed**:
+    both clients' own test suites had a test that calls `USE <db>` and
+    never switches back — accidentally "protected" by the very engine bug
+    just fixed (headerless `USE` never really persisting meant the leak
+    was invisible). Once fixed, every other headerless test in the same
+    session started running against the leaked-into database instead of
+    `default`, and 6 Python dataset-export tests failed. Fixed both
+    suites to restore `USE default` afterward (`try/finally` in Python,
+    `withr::defer()` in R) — a real, worth-remembering lesson: fixing a
+    bug that was silently providing test isolation can surface real gaps
+    in the tests themselves, not just in the code under test.
+  - Final state: 22/22 Python tests, 55/55 R tests (including a full
+    `R CMD check` pass), full Rust suite (172 lib + all integration
+    suites) all green. Both example scripts produce byte-identical
+    cross-validated classification numbers between `/execute` and
+    `/delivery`.
 
 - [ ] **6. Docs pass**
   - `README.md`: new "Python / R Clients" section (install + minimal

@@ -41,6 +41,11 @@ test_that("linal_execute returns NULL-shaped Message for USE", {
   conn <- linal_connect(test_server_url())
   db_name <- unique_name("db")
   linal_execute(conn, sprintf("CREATE DATABASE %s", db_name))
+  # A headerless USE now genuinely persists across requests on the shared
+  # server (see engine v0.1.74's fix) -- every other test in this session
+  # sends headerless requests assuming "default", so restore it afterward
+  # rather than leak state across tests.
+  withr::defer(linal_execute(conn, "USE default"))
   result <- linal_execute(conn, sprintf("USE %s", db_name))
   expect_equal(result, sprintf("Switched to database '%s'", db_name))
 })
