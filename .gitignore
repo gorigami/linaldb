@@ -3,3 +3,17 @@
 /temp
 /data
 .linal_history
+
+# Python client (clients/python)
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+clients/python/dist/
+clients/python/build/
+
+# R client (clients/r)
+clients/r/.Rhistory
+clients/r/.RData
+clients/r/*.Rproj.user/
+clients/r/man/*.Rd

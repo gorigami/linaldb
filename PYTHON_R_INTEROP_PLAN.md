@@ -95,15 +95,27 @@ Each checkpoint: implement + test + doc update together, `cargo test`
 checkpoint may span more than one commit but should land as a coherent
 working state.
 
-- [ ] **0. Scaffolding + shared contract doc**
-  - Create `clients/python/` and `clients/r/` directory skeletons
-    (packaging metadata, empty modules, test directories) — no
-    functional client code yet.
-  - Write `clients/CONTRACT.md`: the shared HTTP/Parquet wire contract
-    both clients implement against (formalizes design decision 6 above),
-    so the two implementations can be built independently without
-    drifting from each other.
-  - No DSL/engine changes this checkpoint — pure scaffolding.
+- [x] **0. Scaffolding + shared contract doc** — **Done 2026-07-23**
+  - `clients/python/` (`pyproject.toml`, `linaldb/__init__.py`, `tests/`,
+    `examples/`) and `clients/r/` (`DESCRIPTION`, `NAMESPACE`,
+    `R/linaldb-package.R`, `tests/testthat/`, `examples/`) skeletons —
+    packaging metadata only, no functional client code yet. Verified the
+    Python package actually imports (`import linaldb` → `__version__`);
+    R package not yet loadable-checked (no `devtools`/R toolchain
+    available in this environment — do that before checkpoint 3 starts).
+  - `clients/CONTRACT.md` written and, importantly, **fact-checked against
+    a live v0.1.72 server** rather than written from the DSL reference
+    alone — an initial draft of the `Table` JSON shape was wrong (assumed
+    a flat `rows: [[...]]` array; the real shape nests cells under a
+    `values` key per row and repeats the schema three times per
+    response). Also confirmed empirically: `Value::Null` serializes as
+    the bare string `"Null"`, not `{"Null": ...}` — easy to get wrong
+    from the enum definition alone since serde's unit-variant-in-an-
+    externally-tagged-enum behavior isn't obvious without checking.
+  - Added `.gitignore` entries for both clients (`__pycache__/`,
+    `*.egg-info/`, `.pytest_cache/`, R's `.Rhistory`/`.RData`/etc.).
+  - No engine changes; `cargo build`/`cargo test --lib` reconfirmed
+    unaffected by the new `clients/` directory.
 
 - [ ] **1. Python client core (`/execute`)**
   - `linaldb.connect(url, database=None) -> Client`.
