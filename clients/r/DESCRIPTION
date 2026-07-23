@@ -16,11 +16,11 @@ License: LinalDB Community License v1.0 (see ../../LICENSE; not a
 Encoding: UTF-8
 Imports:
     httr2,
-    jsonlite
+    jsonlite,
+    arrow
 Suggests:
     testthat (>= 3.0.0),
     processx,
-    withr,
-    arrow
+    withr
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0

@@ -270,11 +270,49 @@ working state.
     free by successfully binding `serverSocket()` to it (closing
     immediately), retry on collision.
 
-- [ ] **4. R client dataset export (`/delivery`)**
-  - Mirrors checkpoint 2: `linal_dataset(conn, name)`, reading
-    `data.parquet` via the `arrow` package, same schema.json-trusting /
-    dual-encoding handling, same non-null + actual-null integration test
-    pair.
+- [x] **4. R client dataset export (`/delivery`)** — **Done 2026-07-23**
+  - Mirrors checkpoint 2: `linal_dataset(conn, name)` +
+    `linal_dataset_schema()`/`_manifest()`/`_stats()`/`linal_dataset_read()`
+    (returns a `data.frame`)/`linal_dataset_to_arrow()` (returns a real
+    `arrow::Table`, built by re-encoding the already-unwrapped
+    `data.frame` via `arrow::arrow_table()` rather than patching the raw
+    Arrow Table's columns directly — one source of truth for the
+    unwrapping logic instead of two implementations that could drift).
+    `arrow` moved back to `DESCRIPTION`'s `Imports` (was `Suggests` as of
+    checkpoint 3, correctly, since checkpoint 3 didn't call it yet).
+  - Verified the native-vs-fallback column type detection against real
+    engine-written Parquet files (not just R's own round-trip
+    assumptions) before writing the unwrap logic: a fallback (`NULL`
+    present) column reads back with Arrow field type class `"Utf8"`;
+    a native column reads back as `"FixedSizeListType"` — confirmed by
+    saving both through a real `linal serve` instance and inspecting
+    `schema$field(i)$type` directly, the same "verify against a live
+    server, not assumption" discipline checkpoint 0's `CONTRACT.md` used.
+  - Integration tests (`test-dataset-integration.R`) mirror
+    `test_dataset_integration.py` exactly: native no-null Vector column,
+    native Matrix column, the legacy-fallback Vector column with an
+    actual `NULL`, `linal_dataset_to_arrow()`, and
+    `schema()`/`manifest()`/`stats()`. One test needed
+    `ignore_attr = TRUE`: `arrow`'s own `as.data.frame()` represents a
+    *nested* `FixedSizeList<FixedSizeList<Float>>` (Matrix) column as its
+    own `arrow_fixed_size_list`/`vctrs_list_of` S3 class rather than a
+    bare R list (a flat `FixedSizeList<Float>`/Vector column simplifies
+    to a plain list of numeric vectors, but a nested one doesn't) — a
+    real, if narrow, arrow-R-package behavior worth remembering, not a
+    client bug.
+  - Re-ran the full `R CMD check` cycle from checkpoint 3 (not just
+    `load_all()`) with checkpoint 4's additions and found one more real,
+    small issue: a roxygen doc comment containing literal
+    `` `{"Vector": [...]}` `` text triggered `checkRd`'s "Lost braces;
+    missing escapes or markup?" — Rd's markup parser treats bare `{}` as
+    its own syntax. Fixed by rewording to avoid literal JSON braces in
+    `@export`ed docs (an internal `@noRd` function's doc comment has the
+    same pattern but is harmless, since `@noRd` produces no `.Rd` file to
+    check).
+  - Final `R CMD check`: 53/53 tests pass in the real check sandbox (40
+    from checkpoint 3 + 13 new), 1 WARNING (the known non-standard
+    license string), 0 ERRORs, 0 NOTEs. Full Python suite (21/21)
+    reconfirmed unaffected (no engine changes this checkpoint).
 
 - [ ] **5. Real end-to-end example, both languages**
   - Per this project's own recurring lesson (a real workflow against real
