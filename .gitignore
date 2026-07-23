@@ -11,6 +11,7 @@ __pycache__/
 .pytest_cache/
 clients/python/dist/
 clients/python/build/
+clients/python/.venv/
 
 # R client (clients/r)
 clients/r/.Rhistory

@@ -117,18 +117,40 @@ working state.
   - No engine changes; `cargo build`/`cargo test --lib` reconfirmed
     unaffected by the new `clients/` directory.
 
-- [ ] **1. Python client core (`/execute`)**
-  - `linaldb.connect(url, database=None) -> Client`.
-  - `Client.execute(dsl: str) -> ExecuteResult` — unwraps the tagged
-    `Value` JSON into native Python types (`Vector` → `list[float]` or
-    `numpy.ndarray`, `Matrix` → nested list/`numpy.ndarray`, `Null` →
-    `None`); raises `LinalError` with the server's real error message on
-    `status: error`, not a generic HTTP exception.
+- [x] **1. Python client core (`/execute`)** — **Done 2026-07-23**
+  - `linaldb.connect(url, database=None) -> Client` (`clients/python/linaldb/client.py`).
+  - `Client.execute(dsl: str)` — unwraps the tagged `Value` JSON into
+    native Python types (`Vector` → `list[float]`, `Matrix` → nested
+    list, `Null`/unit-variant → `None`) via new `linaldb/wire.py`
+    (`unwrap_value`/`unwrap_result`/`TableResult`/`TensorResult`, kept
+    separate from `client.py` so it's unit-testable with no HTTP
+    involved); raises `LinalError` with the server's real error message
+    on `status: "error"`.
   - `Client.query(dsl: str) -> pandas.DataFrame` convenience wrapper
-    (requires the `pandas` extra).
-  - Unit tests against fixture JSON (all `Value` variants, both
-    `status: ok`/`error`, malformed/timeout responses). Integration test
-    against a real `linal serve` subprocess running a small real script.
+    (requires the `pandas` extra; raises `LinalError` if the result isn't
+    table-shaped).
+  - `TensorTable` unwrapping deliberately **not implemented** — no DSL
+    command was found in this checkpoint that produces one on the wire to
+    verify against (unlike `Table`, which was captured from a real
+    response for `clients/CONTRACT.md`). Raises a clear `LinalError`
+    rather than guessing the shape; revisit if/when a real example turns
+    up (checkpoint 5's real example is a natural place to hit this).
+  - `TensorResult.to_numpy()` similarly caveated in its docstring — the
+    contiguous/zero-offset reshape assumption was never verified against
+    a live `Tensor` response either (contract §1 flags the same gap).
+  - **Real tests, not just written-and-hoped**: created a `.venv` under
+    `clients/python/`, installed the package with its `dev` extra
+    (`pytest`, `pandas`), and ran the full suite against a real `linal
+    serve` subprocess (`tests/conftest.py`'s `linal_server` fixture —
+    finds the built binary under `target/{debug,release}/linal`, launches
+    it on a free port, polls `/health`, tears down via SIGTERM). 16/16
+    tests pass: 9 fixture-based unit tests in `test_wire.py` (including
+    the exact real payload captured for `CONTRACT.md`) + 7 integration
+    tests in `test_client_integration.py` (Message/Table/error results,
+    the `X-Linal-Database` header actually isolating two databases,
+    `NULL` round-tripping through a Vector column, `query()`'s DataFrame
+    output). Confirmed no leaked server subprocess after the run.
+  - No engine changes this checkpoint.
 
 - [ ] **2. Python client dataset export (`/delivery`)**
   - `Client.dataset(name) -> Dataset` — fetches `manifest.json`/
