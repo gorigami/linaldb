@@ -9,6 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.73] - 2026-07-23
+
+### Fixed — `/delivery` never worked against a real `SAVE DATASET`, and `schema.json` mis-typed fallback-encoded columns
+
+Found building checkpoint 2 of the Python client (`clients/python/`,
+`Dataset.to_arrow()`/`.to_pandas()`) and driving it against a real server
+instead of trusting the endpoint worked because it existed and had tests.
+Two bugs, both real, both previously undiscovered:
+
+1. **`/delivery/*` 404'd for every dataset ever saved through the
+   standard `SAVE DATASET` path, in every database including the default
+   one.** `dsl::persistence`'s `resolve_persistence_path`/
+   `instance_base_dir` always write a dataset package to
+   `{data_dir}/{database}/datasets/{name}/...` (the active database name
+   is a path segment — `SAVE DATASET`'s own success message literally
+   says `Saved dataset 'x' (v1) to './data/default'`), but
+   `src/server/dataset_server.rs`'s handlers read
+   `{data_dir}/datasets/{name}/...`, missing that segment entirely. The
+   existing `dataset_delivery_test.rs` never caught this because it
+   constructed its fixture directory by hand via `ParquetStorage::
+   save_dataset` directly, matching whatever the handler currently
+   expected, rather than going through the real DSL `SAVE DATASET` path —
+   a unit test validating a layer in isolation missed a real disagreement
+   between it and its neighbor, the same class of gap as several prior
+   rounds in this project's history. Fixed: every `/delivery` handler now
+   resolves `{data_dir}/{database}/datasets/{name}/...`, reading the
+   database name from the same `X-Linal-Database` header `/execute`
+   already honors (default `"default"`). Added
+   `test_dataset_delivery_matches_real_save_dataset_path` — drives a real
+   `TensorDb` through actual `DATASET`/`INSERT`/`SAVE DATASET` statements
+   and confirms `/delivery` can then reach it, closing the exact gap that
+   let the original bug ship.
+2. **`schema.json` reported a Vector/Matrix column that fell back to the
+   legacy JSON-string Parquet encoding (v0.1.72, real `NULL` present) as
+   plain `"String"`**, since `DatasetSchema::from(Arc<ArrowSchema>)` is
+   derived purely from the *physical* Arrow type actually written —
+   correct for the physical type, but not what a client needs to know the
+   column's *logical* type, which was the entire reason `clients/
+   CONTRACT.md` called `schema.json` "authoritative" for column typing.
+   Fixed the same way `core::connectors::SHAPE_METADATA_KEY` already
+   solves an analogous problem: `dataset_to_record_batch` now attaches a
+   new `linal.logical_value_type` Arrow field metadata entry
+   (`"Vector:3"`/`"Matrix:2,2"`) whenever it falls back to `Utf8`,  read
+   back by both `DatasetSchema::from` and `arrow_schema_to_tuple_schema`
+   via new `logical_vector_or_matrix_type` (checks the metadata first,
+   falls back to the existing physical-type inference otherwise).
+
+Both fixes verified against the real Python client end-to-end (native
+FixedSizeList column, legacy-fallback column with an actual `NULL`, and
+a Matrix column), not just against Rust's own test suite. `cargo clean`
+run after this session's heavy build/test cycle (freed 19.1GiB); full
+rebuild + full test suite (172 lib + all integration suites) reconfirmed
+green from a clean `target/`.
+
+---
+
 ## [0.1.72] - 2026-07-23
 
 ### Fixed — Vector/Matrix columns now write as real Arrow columns in Parquet

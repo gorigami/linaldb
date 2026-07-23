@@ -79,4 +79,11 @@ class Client:
             )
         return pd.DataFrame(result.rows, columns=result.columns)
 
-    # `.dataset(name)` for /delivery Parquet export lands in checkpoint 2.
+    def dataset(self, name: str) -> "Dataset":
+        """A handle to a saved dataset's `/delivery/*` export (contract
+        §2) — `.schema()`/`.stats()`/`.manifest()`/`.to_arrow()`/
+        `.to_pandas()`.
+        """
+        from .dataset import Dataset
+
+        return Dataset(self, name)

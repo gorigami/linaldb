@@ -81,7 +81,15 @@ LINALDB uses a hybrid approach to balance performance and flexibility:
       (`ArrowInvalid: Expected all lists to be of size=N ...`) — an
       external-reader-verified limitation, not a theoretical one. Read-side
       (`arrow_array_to_values`) transparently supports both encodings, so
-      older Parquet packages keep loading.
+      older Parquet packages keep loading. `schema.json` (the
+      `/delivery`-exposed package metadata, see Server Module in
+      `ARCHITECTURE.md`) correctly reports the *logical* type even for a
+      fallback-encoded column (v0.1.73) via a `linal.logical_value_type`
+      Arrow field-metadata entry, mirroring the existing
+      `core::connectors::SHAPE_METADATA_KEY` pattern — without it,
+      `schema.json` would report a fallback column as plain `"String"`,
+      since it's otherwise derived purely from the physical (post-fallback)
+      Arrow type.
 2. **Semantic/Light Path** (`core/dataset/`):
     - Optimized for **Zero-Copy Views** and **Tensor Algebra**.
     - Allows linking independent tensors as virtual columns (`ATTACH`).

@@ -34,13 +34,23 @@ def _free_port() -> int:
 
 
 @pytest.fixture(scope="session")
-def linal_server():
+def linal_server(tmp_path_factory):
     binary = _find_linal_binary()
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
 
+    # Run with cwd set to a fresh temp dir so the server's `./data`
+    # auto-recovery (see docs/ARCHITECTURE.md's Persistence section)
+    # never picks up state from a previous test run -- a real issue hit
+    # while building this fixture: fixed-name `CREATE DATABASE` calls in
+    # the test suite started failing with "already exists" once a
+    # `clients/python/data/` directory accumulated from earlier manual
+    # runs launched with that directory as cwd.
+    server_cwd = tmp_path_factory.mktemp("linal_server")
+
     proc = subprocess.Popen(
         [str(binary), "serve", "--port", str(port)],
+        cwd=server_cwd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,

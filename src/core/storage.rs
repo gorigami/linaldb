@@ -383,13 +383,13 @@ impl From<Arc<ArrowSchema>> for DatasetSchema {
             .fields()
             .iter()
             .map(|f| {
-                let (vt, shape_dims) = match f.data_type() {
-                    DataType::Int64 => (ValueType::Int, vec![]),
-                    DataType::Float32 | DataType::Float64 => (ValueType::Float, vec![]),
-                    DataType::Boolean => (ValueType::Bool, vec![]),
-                    other => match vector_or_matrix_type(other) {
-                        Some(ValueType::Vector(dim)) => (ValueType::Vector(dim), vec![dim]),
-                        Some(ValueType::Matrix(r, c)) => (ValueType::Matrix(r, c), vec![r, c]),
+                let (vt, shape_dims) = match logical_vector_or_matrix_type(f) {
+                    Some(ValueType::Vector(dim)) => (ValueType::Vector(dim), vec![dim]),
+                    Some(ValueType::Matrix(r, c)) => (ValueType::Matrix(r, c), vec![r, c]),
+                    _ => match f.data_type() {
+                        DataType::Int64 => (ValueType::Int, vec![]),
+                        DataType::Float32 | DataType::Float64 => (ValueType::Float, vec![]),
+                        DataType::Boolean => (ValueType::Bool, vec![]),
                         _ => (ValueType::String, vec![]),
                     },
                 };
@@ -425,6 +425,53 @@ fn vector_or_matrix_type(data_type: &DataType) -> Option<ValueType> {
     }
 }
 
+/// Arrow `Field` metadata key `dataset_to_record_batch` attaches to a
+/// Vector/Matrix column that fell back to the legacy JSON-string `Utf8`
+/// encoding (a real `NULL` present — see `build_vector_column`), so its
+/// *logical* type survives even though its *physical* Arrow type is
+/// indistinguishable from a genuine String column. Without this, a Parquet
+/// consumer reading `schema.json` (which is generated straight from the
+/// physical Arrow schema, via `DatasetSchema::from(Arc<ArrowSchema>)`)
+/// would see `value_type: "String"` for a column that both the original
+/// `CREATE`d schema and `load_dataset`'s reconstructed rows still correctly
+/// treat as a Vector/Matrix — found by driving the real Python client's
+/// `Dataset.to_arrow()` against exactly this case (v0.1.73). Mirrors the
+/// existing `core::connectors::SHAPE_METADATA_KEY` pattern.
+const LOGICAL_VALUE_TYPE_METADATA_KEY: &str = "linal.logical_value_type";
+
+fn encode_logical_value_type(vt: &ValueType) -> Option<String> {
+    match vt {
+        ValueType::Vector(dim) => Some(format!("Vector:{}", dim)),
+        ValueType::Matrix(rows, cols) => Some(format!("Matrix:{},{}", rows, cols)),
+        _ => None,
+    }
+}
+
+fn decode_logical_value_type(raw: &str) -> Option<ValueType> {
+    let (kind, rest) = raw.split_once(':')?;
+    match kind {
+        "Vector" => rest.parse::<usize>().ok().map(ValueType::Vector),
+        "Matrix" => {
+            let (rows, cols) = rest.split_once(',')?;
+            Some(ValueType::Matrix(rows.parse().ok()?, cols.parse().ok()?))
+        }
+        _ => None,
+    }
+}
+
+/// `vector_or_matrix_type`, but checking `LOGICAL_VALUE_TYPE_METADATA_KEY`
+/// first — the metadata-aware entry point both Arrow-schema-to-LINAL-schema
+/// conversions (`DatasetSchema::from`, `arrow_schema_to_tuple_schema`)
+/// should use instead of calling `vector_or_matrix_type` on the physical
+/// type directly.
+fn logical_vector_or_matrix_type(field: &ArrowField) -> Option<ValueType> {
+    field
+        .metadata()
+        .get(LOGICAL_VALUE_TYPE_METADATA_KEY)
+        .and_then(|raw| decode_logical_value_type(raw))
+        .or_else(|| vector_or_matrix_type(field.data_type()))
+}
+
 /// Convert an Arrow schema into LINAL's legacy relational `core::tuple::Schema`,
 /// used as the authoritative schema `load_dataset` reconstructs rows against.
 /// Mirrors `dataset_to_record_batch`'s reverse mapping (Int, Float, String,
@@ -438,13 +485,13 @@ fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
         .fields()
         .iter()
         .map(|f| {
-            let value_type = match f.data_type() {
+            let value_type = logical_vector_or_matrix_type(f).unwrap_or_else(|| match f.data_type() {
                 DataType::Int64 | DataType::Int32 => ValueType::Int,
                 DataType::Float32 | DataType::Float64 => ValueType::Float,
                 DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
                 DataType::Boolean => ValueType::Bool,
-                other => vector_or_matrix_type(other).unwrap_or(ValueType::String),
-            };
+                _ => ValueType::String,
+            });
             let mut field = crate::core::tuple::Field::new(f.name().clone(), value_type);
             if f.is_nullable() {
                 field = field.nullable();
@@ -847,7 +894,21 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
             ValueType::Null => build_legacy_json_column(&column_data),
         };
 
-        arrow_fields.push(ArrowField::new(&field.name, data_type, field.nullable));
+        let mut arrow_field = ArrowField::new(&field.name, data_type.clone(), field.nullable);
+        // The Vector/Matrix builders above fall back to a plain Utf8
+        // column when they can't use a native FixedSizeList (see
+        // build_vector_column/build_matrix_column's doc comments) —
+        // stash the real logical type as field metadata so schema.json /
+        // the legacy .meta.json sidecar don't report a fallback-encoded
+        // Vector/Matrix column as plain "String" (v0.1.73).
+        if matches!(data_type, DataType::Utf8) {
+            if let Some(encoded) = encode_logical_value_type(&field.value_type) {
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert(LOGICAL_VALUE_TYPE_METADATA_KEY.to_string(), encoded);
+                arrow_field = arrow_field.with_metadata(metadata);
+            }
+        }
+        arrow_fields.push(arrow_field);
         arrays.push(array);
     }
 

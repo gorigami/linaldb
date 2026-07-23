@@ -152,20 +152,62 @@ working state.
     output). Confirmed no leaked server subprocess after the run.
   - No engine changes this checkpoint.
 
-- [ ] **2. Python client dataset export (`/delivery`)**
-  - `Client.dataset(name) -> Dataset` — fetches `manifest.json`/
-    `schema.json`/`stats.json`.
-  - `Dataset.to_pandas() -> pandas.DataFrame` / `Dataset.to_arrow() ->
-    pyarrow.Table` — reads `data.parquet` directly via `pyarrow`,
-    trusting `schema.json`'s `value_type` for any column where the
-    Parquet physical type is ambiguous between "native FixedSizeList" and
-    "legacy JSON-string fallback" (design decision 6's null case).
-  - Real end-to-end integration test: start a real server, `SAVE` a
-    dataset with a non-null Vector/Matrix column (expect real numeric
-    columns back) *and* one with an actual-null Vector column (expect the
-    JSON-string fallback, and that `to_pandas()` still unwraps it
-    correctly rather than leaking the raw JSON text) — exercises both
-    v0.1.72 code paths from the client side, not just the engine side.
+- [x] **2. Python client dataset export (`/delivery`)** — **Done 2026-07-23,
+  engine v0.1.73**
+  - `Client.dataset(name) -> Dataset` (new `linaldb/dataset.py`) —
+    `.manifest()`/`.schema()`/`.stats()`, `.to_arrow() -> pyarrow.Table`,
+    `.to_pandas()`. Trusts `schema.json`'s `value_type` to detect the
+    legacy JSON-string fallback encoding (a column typed Vector/Matrix
+    whose actual Parquet column is `Utf8`/`string`) and transparently
+    unwraps it via `wire.unwrap_value`, reusing the same tagged-JSON
+    parser as `/execute` results.
+  - **Two real, previously undiscovered engine bugs found and fixed
+    (v0.1.73), both by driving this checkpoint's own integration tests
+    against a real server rather than trusting `/delivery` worked because
+    it existed and had a test**:
+    1. `/delivery/*` 404'd for **every** dataset ever saved through the
+       real `SAVE DATASET` path, in every database including `default`.
+       `dsl::persistence` always writes to
+       `{data_dir}/{database}/datasets/{name}/...`; `dataset_server.rs`'s
+       handlers read `{data_dir}/datasets/{name}/...`, missing the
+       database segment. The pre-existing `dataset_delivery_test.rs`
+       never caught it because it built its fixture directory by hand to
+       match whatever the handler currently expected, instead of going
+       through the real DSL save path. Fixed: handlers now resolve the
+       database segment via the same `X-Linal-Database` header
+       `/execute` already honors (default `"default"`). Added
+       `test_dataset_delivery_matches_real_save_dataset_path`, which
+       drives a real `TensorDb` through actual DSL statements and closes
+       the exact gap that hid the original bug.
+    2. `schema.json` reported a fallback-encoded Vector/Matrix column as
+       plain `"String"` — it's derived from the *physical* Arrow type,
+       which is indistinguishable from a real String column once a
+       column has fallen back to JSON-string encoding. This directly
+       contradicted `clients/CONTRACT.md`'s claim that `schema.json` is
+       authoritative for logical column typing — a claim that was true
+       for the native-encoding case checkpoint 0 verified, but not yet
+       true for the fallback case, which checkpoint 0 didn't happen to
+       exercise. Fixed via a new `linal.logical_value_type` Arrow
+       field-metadata entry (mirrors `core::connectors::
+       SHAPE_METADATA_KEY`'s existing pattern), attached whenever
+       `dataset_to_record_batch` falls back, read back by both
+       `DatasetSchema::from` and `arrow_schema_to_tuple_schema` via new
+       `logical_vector_or_matrix_type`.
+  - Real end-to-end integration tests (`test_dataset_integration.py`):
+    native no-null Vector column, native Matrix column, the legacy
+    fallback Vector column with an actual `NULL` (this is the test that
+    caught both bugs above), `to_pandas()`, and `manifest()`/`schema()`/
+    `stats()`. 21/21 Python tests pass (16 from checkpoint 1 + 5 new).
+  - Also fixed test isolation: the `linal_server` fixture now launches
+    the server subprocess with its `cwd` set to a fresh `tmp_path_factory`
+    directory instead of `clients/python/` — a real issue hit while
+    re-running this checkpoint's tests: the server's disk auto-recovery
+    picked up a `data/` directory left over from earlier manual runs in
+    that directory, and fixed-name `CREATE DATABASE` calls in the test
+    suite started failing with "already exists" on rerun.
+  - `cargo clean` run after this checkpoint's build/test cycle (freed
+    19.1GiB); full rebuild from a clean `target/` reconfirmed both the
+    full Rust suite and the full Python suite green.
 
 - [ ] **3. R client core (`/execute`)**
   - Mirrors checkpoint 1: `linal_connect(url, database = NULL)`,
