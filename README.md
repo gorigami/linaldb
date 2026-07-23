@@ -137,6 +137,37 @@ linal schedule --url http://localhost:8080 create hourly-report "SHOW ALL DATASE
 linal server --port 8080 stop
 ```
 
+### 6. Python & R Clients
+
+Thin HTTP clients for both languages — no compiled extension, talk to a
+running `linal serve` over `/execute` (ad-hoc DSL) and `/delivery` (real
+Parquet dataset export). See [`clients/CONTRACT.md`](clients/CONTRACT.md)
+for the wire contract both implement against.
+
+```python
+# pip install -e clients/python (not yet published to PyPI)
+import linaldb
+
+client = linaldb.connect("http://localhost:8080")
+df = client.query("SELECT id, embedding FROM docs WHERE score > 0.8")
+df = client.dataset("my_dataset").to_pandas()
+```
+
+```r
+# devtools::install(file.path("clients", "r")) (not yet published to CRAN)
+library(linaldb)
+
+conn <- linal_connect("http://localhost:8080")
+df <- linal_query(conn, "SELECT id, embedding FROM docs WHERE score > 0.8")
+df <- linal_dataset_read(linal_dataset(conn, "my_dataset"))
+```
+
+Full docs and a real end-to-end example (real UCI handwritten-digits
+data, classified via `/execute`, cross-checked against the same data
+independently recomputed from `/delivery`) for each:
+[`clients/python/README.md`](clients/python/README.md) /
+[`clients/r/README.md`](clients/r/README.md).
+
 ---
 
 ## 📖 Documentation Hub
@@ -148,6 +179,7 @@ LINALDB is extensively documented to help you scale from local experiments to pr
 - **[DSL Reference](docs/DSL_REFERENCE.md)**: Complete guide to keywords, operators, and syntax.
 - **[Examples](examples/README.md)**: Runnable `.lnl` scripts covering every major feature area.
 - **[Error Reference](docs/ERROR_REFERENCE.md)**: Troubleshooting guide for engine and DSL errors.
+- **[Python Client](clients/python/README.md)** / **[R Client](clients/r/README.md)**: Thin HTTP clients over `/execute` + `/delivery`, plus the shared [wire contract](clients/CONTRACT.md).
 
 ---
 

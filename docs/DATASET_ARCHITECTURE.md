@@ -89,7 +89,16 @@ LINALDB uses a hybrid approach to balance performance and flexibility:
       `core::connectors::SHAPE_METADATA_KEY` pattern — without it,
       `schema.json` would report a fallback column as plain `"String"`,
       since it's otherwise derived purely from the physical (post-fallback)
-      Arrow type.
+      Arrow type. **This Parquet format is a real external interop
+      surface, not just an internal storage detail**: it's exactly what
+      `/delivery` serves to the Python (`clients/python/`) and R
+      (`clients/r/`) clients' `to_arrow()`/`to_pandas()`/
+      `linal_dataset_read()` — every fix noted above was found and
+      verified by driving those clients against a real server, not just
+      by round-tripping through this engine's own reader. See
+      `clients/CONTRACT.md` §2 for the exact contract a consumer of this
+      format needs to know (including which encoding a given column
+      landed in).
 2. **Semantic/Light Path** (`core/dataset/`):
     - Optimized for **Zero-Copy Views** and **Tensor Algebra**.
     - Allows linking independent tensors as virtual columns (`ATTACH`).

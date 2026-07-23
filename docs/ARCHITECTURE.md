@@ -376,7 +376,32 @@ HTTP server implementation built with **Axum**:
 - **Graceful Shutdown**: Native support for `SIGINT` and `SIGTERM` to ensure in-flight requests complete before termination. `linal serve` / `linal server start` write a PID file (`linal_server_{port}.pid` in the OS temp dir) on startup, removed on clean shutdown; `linal server --port <p> stop` (v0.1.71) reads it and sends a real `SIGTERM`/`taskkill` to trigger this same graceful path — previously this CLI command was a stub telling the user to `Ctrl+C` or `kill` manually.
 - **OpenAPI/Swagger documentation**: Interactive API explorer at `/swagger-ui`. Note: only `/execute` and `/health` are currently included in the generated schema; all other routes are functional but undocumented in the spec.
 
-### 6. Utils Module (`src/utils/`)
+### 6. Client Bindings (`clients/`)
+
+Not part of the Rust crate — thin, no-compiled-extension HTTP clients in
+`clients/python/` (pip package `linaldb`) and `clients/r/` (R package
+`linaldb`), consuming exactly the two HTTP surfaces described above:
+`/execute` for ad-hoc DSL and `/delivery` for saved-dataset Parquet
+export. Both were built together against one shared wire-contract
+document, [`clients/CONTRACT.md`](../clients/CONTRACT.md) — written by
+inspecting real server responses (`curl`, and later each client's own
+integration tests against a real `linal serve` subprocess) rather than
+assumed from this document or the DSL reference alone, which caught
+several real discrepancies during development (see
+`PYTHON_R_INTEROP_PLAN.md`'s checkpoint notes, still in the repo root
+until all its checkpoints land, for the specifics — including three real
+server-side bugs this effort found and fixed: the two `/delivery`
+path-resolution issues noted above, and a severe one where `USE
+<database>` sent to `/execute` without the header had no lasting effect
+at all, also noted above).
+
+Both clients are Tier A only (HTTP + Parquet, no compiled extension) by
+deliberate design choice — a deeper Tier B (in-process `pyo3`/`extendr`
+bindings with Arrow C Data Interface zero-copy handoff, no server
+process required) was scoped out as a distinct, later effort; see the
+plan file's design decisions for the reasoning.
+
+### 7. Utils Module (`src/utils/`)
 
 Utility functions:
 

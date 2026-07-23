@@ -387,22 +387,42 @@ working state.
     cross-validated classification numbers between `/execute` and
     `/delivery`.
 
-- [ ] **6. Docs pass**
-  - `README.md`: new "Python / R Clients" section (install + minimal
-    usage snippet for each), linked from the Documentation Hub.
-  - `docs/ARCHITECTURE.md`: new subsection under/near the Server Module
-    describing the client bindings as consumers of `/execute` +
-    `/delivery`, referencing `clients/CONTRACT.md`.
-  - `docs/DATASET_ARCHITECTURE.md`: note that the Parquet persistence
-    format is now a real external interop surface (not just an internal
-    storage detail), pointing at the v0.1.72 entry already there.
-  - `CHANGELOG.md`: per-checkpoint entries already required by the
-    process below; this step is a final consistency pass across all of
-    them plus the client packages' own README/CHANGELOG files.
-  - `clients/python/README.md` / `clients/r/README.md`: standalone
-    install/usage docs for anyone landing directly in that directory
-    (e.g. from PyPI/CRAN metadata) without having read the main repo
-    README first.
+- [x] **6. Docs pass** — **Done 2026-07-23**
+  - `README.md`: new "6. Python & R Clients" capability section (install
+    + minimal usage snippet for each language, pointing at the real
+    example scripts), linked from the Documentation Hub alongside a new
+    Python/R Client entry.
+  - `docs/ARCHITECTURE.md`: new "6. Client Bindings (`clients/`)"
+    subsection (Core Components renumbered: Utils Module is now 7)
+    describing both clients as consumers of `/execute` + `/delivery`,
+    referencing `clients/CONTRACT.md` and summarizing the three real
+    server bugs this whole effort found and fixed, and noting Tier B was
+    deliberately scoped out as a separate later effort.
+  - `docs/DATASET_ARCHITECTURE.md`: added a note to the existing
+    Parquet-encoding bullet that this format is a real external interop
+    surface (not just internal storage), verified by driving the actual
+    clients against a real server rather than by round-tripping through
+    the engine's own reader — pointing at `clients/CONTRACT.md` §2.
+  - `CHANGELOG.md`: verified consistent (v0.1.71-v0.1.74 entries all
+    present, in order) — no new engine changes this checkpoint, pure
+    docs pass.
+  - `clients/python/README.md` / `clients/r/README.md`: both were still
+    written in checkpoint-0-era "scaffolding only, not yet implemented"
+    language despite being fully functional since checkpoint 5 — updated
+    status, minimum engine version (`>= 0.1.74`), and added pointers to
+    the real example scripts.
+  - New `clients/python/CHANGELOG.md` / `clients/r/CHANGELOG.md` —
+    neither client package had one yet; the plan's own checkpoint text
+    referenced "the client packages' own... CHANGELOG files" as something
+    to keep consistent, which presupposed they existed. Added minimal
+    ones summarizing the v0.1.0 (unreleased) build.
+  - `clients/CONTRACT.md`: bumped its "verified against" version to
+    v0.1.74 and added an explicit note on `USE`-without-header session
+    persistence semantics (checkpoint 5's severe finding) — this is
+    exactly the kind of behavior a client author needs to know about and
+    wasn't previously documented in the contract at all.
+  - Full Rust suite reconfirmed green (docs-only checkpoint, no code
+    changes, but re-verified anyway rather than assumed).
 
 - [ ] **7. Wrap-up**
   - Full `cargo test` (engine side) + both clients' test suites green.

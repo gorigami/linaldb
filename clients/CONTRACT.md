@@ -8,7 +8,7 @@ document, that's a bug in the client, the doc, or both — fix the
 disagreement, don't just pick one side.
 
 Everything here was verified directly against the server implementation
-(`src/server/mod.rs`, `src/core/storage.rs`) as of engine v0.1.72, not
+(`src/server/mod.rs`, `src/core/storage.rs`) as of engine v0.1.74, not
 assumed from the DSL reference alone.
 
 ## 1. `POST /execute` — ad-hoc DSL execution
@@ -21,7 +21,23 @@ Query params: `?format=json` (recommended for clients — default is
 `toon`, a human-oriented text format not meant for programmatic parsing).
 
 Headers: `X-Linal-Database: <name>` to target a non-default database for
-that one request.
+that one request only (the server reverts to whatever was active before
+once this request finishes, so concurrent requests targeting different
+databases via the header can't clobber each other's context).
+
+**A request with no `X-Linal-Database` header operates on — and can
+change — the server's session-wide active database.** A plain `USE <db>`
+statement sent with no header genuinely persists: every subsequent
+headerless request sees the new active database, exactly like the
+embedded CLI/REPL (confirmed against a live v0.1.74 server; **this was
+a real, severe bug before v0.1.74** — the restore-after-request logic
+described above used to run unconditionally, silently undoing a
+headerless request's own `USE`, so the whole session-level `USE`
+workflow was a no-op over HTTP). A client wanting to pin every request to
+one database regardless of ambient session state should pass the header
+on every request (as both `clients/python`'s and `clients/r`'s
+`database=`/`database` connection parameter already do) rather than rely
+on a one-time `USE`.
 
 Response body (`format=json`):
 
