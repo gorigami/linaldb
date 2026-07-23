@@ -176,3 +176,84 @@ async fn test_server_scheduling() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 }
+
+/// Regression test for a real bug (fixed in v0.1.74): `execute_command`'s
+/// "restore previous database to ensure per-request isolation" logic ran
+/// *unconditionally* after every command, even for a plain headerless
+/// request whose `target_db` was `None` — meaning a `USE <db>` DSL
+/// statement sent to `/execute` with no `X-Linal-Database` header would
+/// report success but have its own effect silently reverted before the
+/// response even went out. Every subsequent headerless request, no matter
+/// how many, kept seeing the *old* active database — the entire
+/// session-level `USE` workflow was a no-op over HTTP, even though the
+/// same command works correctly via the embedded CLI/REPL (which never
+/// goes through this restore logic at all). `test_server_multitenancy`
+/// above didn't catch this because it always sends the header on every
+/// single request — it never exercises the "switch once via a plain `USE`,
+/// then rely on that being remembered" pattern a real interactive session
+/// (or a Python/R client that issues `USE` without setting `database=`)
+/// would actually use.
+#[tokio::test]
+async fn test_server_use_database_persists_without_header() {
+    let port = 8204;
+    let _db = setup_server(port).await;
+    let client = Client::new();
+
+    client
+        .post(format!("http://localhost:{}/databases/use_persist_db", port))
+        .send()
+        .await
+        .unwrap();
+
+    // Headerless USE -- this is the exact case that silently no-op'd.
+    let resp = client
+        .post(format!("http://localhost:{}/execute?format=json", port))
+        .header("Content-Type", "text/plain")
+        .body("USE use_persist_db")
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+
+    // Still headerless -- if USE didn't really persist, this creates `v`
+    // in `default` instead of `use_persist_db`.
+    client
+        .post(format!("http://localhost:{}/execute", port))
+        .header("Content-Type", "text/plain")
+        .body("VECTOR v = [7]")
+        .send()
+        .await
+        .unwrap();
+
+    // A third, still-headerless request must see the same active database
+    // the second request left behind.
+    let resp = client
+        .post(format!("http://localhost:{}/execute?format=json", port))
+        .header("Content-Type", "text/plain")
+        .body("SHOW v")
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["status"], "ok",
+        "USE use_persist_db should still be active for this headerless request"
+    );
+    assert_eq!(body["result"]["Tensor"]["data"][0], 7.0);
+
+    // And `v` must genuinely be in `use_persist_db`, not `default`.
+    let resp = client
+        .post(format!("http://localhost:{}/execute?format=json", port))
+        .header("X-Linal-Database", "default")
+        .header("Content-Type", "text/plain")
+        .body("SHOW v")
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["status"], "error",
+        "`v` must not exist in `default` -- it belongs in use_persist_db"
+    );
+}

@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.74] - 2026-07-23
+
+### Fixed — `USE <database>` over `/execute` had no lasting effect (server-only bug)
+
+Found building checkpoint 5 of the Python/R interop plan (a real
+end-to-end example replaying `examples/hdf5_digit_classification.lnl`
+through a client) — the replayed script's own `USE
+hdf5_digit_classification` statement appeared to succeed
+(`"Switched to database 'hdf5_digit_classification'"`), but every dataset
+it then created ended up in `default` instead. Traced with runtime
+instrumentation (code-reading alone didn't explain it) to
+`execute_command`'s (`src/server/mod.rs`) "restore previous database to
+ensure per-request isolation" logic: it called
+`db.use_database(&prev_db_name)` **unconditionally** after every command,
+regardless of whether the request itself had asked to switch databases
+via `X-Linal-Database`. For any headerless request — including one whose
+own DSL statement *was* `USE <db>` — this silently reverted the switch
+before the response even went out. Every subsequent headerless request,
+no matter how many, kept seeing the old active database. The identical
+`USE` command works correctly via the embedded CLI/REPL, which never
+goes through this restore logic at all — this was purely an HTTP-layer
+bug, and the entire session-level `USE` workflow over `/execute` has
+likely been a no-op since the multi-tenancy header feature was first
+added.
+
+Fixed: the restore now only runs for a request that itself supplied
+`X-Linal-Database` (i.e. asked to temporarily *borrow* a different active
+database for that one request) — a plain headerless request's own
+effects, including an explicit `USE`, now persist exactly like the CLI.
+
+Added `test_server_use_database_persists_without_header`
+(`tests/server_usability_test.rs`) — the existing
+`test_server_multitenancy` never caught this because it always sends the
+header on every single request; the new test specifically exercises
+"switch once via a plain `USE`, then rely on that being remembered
+across several headerless requests," which is exactly the pattern a real
+interactive session (or a Python/R client that issues `USE` without
+setting `database=`) actually uses. 172 lib tests + the full integration
+suite pass (including all 4 server usability tests), clippy clean
+(lib/bins).
+
+---
+
 ## [0.1.73] - 2026-07-23
 
 ### Fixed — `/delivery` never worked against a real `SAVE DATASET`, and `schema.json` mis-typed fallback-encoded columns
