@@ -209,13 +209,66 @@ working state.
     19.1GiB); full rebuild from a clean `target/` reconfirmed both the
     full Rust suite and the full Python suite green.
 
-- [ ] **3. R client core (`/execute`)**
+- [x] **3. R client core (`/execute`)** — **Done 2026-07-23**
   - Mirrors checkpoint 1: `linal_connect(url, database = NULL)`,
     `linal_execute(conn, dsl)` unwrapping the same tagged `Value` JSON via
-    `jsonlite`, condition-based error handling (an R error condition
-    carrying the server's real message, not a bare `httr2` HTTP error).
-  - `testthat` unit tests mirroring the Python fixture set; integration
-    test against the same `linal serve` subprocess pattern.
+    `jsonlite` (new `R/wire.R`), `linal_query(conn, dsl)` returning a
+    `data.frame`. Condition-based error handling: a `linal_error`
+    S3/condition class (`R/errors.R`) carrying the server's real message,
+    raised via `stop()`, catchable via `tryCatch(..., linal_error = ...)`.
+  - Environment setup required first: R wasn't installed on this
+    machine. Installed via Homebrew (`r` formula) plus `httr2`/
+    `jsonlite`/`arrow`/`testthat`/`pkgload`/`roxygen2` from CRAN — a
+    real, visible machine-level change, done only after confirming with
+    the user rather than assuming it was fine to install a new language
+    toolchain unprompted.
+  - **Real tests, both the normal dev-mode way and the strict CRAN-style
+    way**: `pkgload::load_all()` + `testthat::test_dir()` against a real
+    `linal serve` subprocess (`tests/testthat/helper-server.R`, mirrors
+    the Python `conftest.py` fixture — one server for the whole test run,
+    memoized, torn down via `withr::defer(..., teardown_env())` since
+    testthat has no built-in session fixture) — 40/40 tests pass (25 wire
+    unit tests + 15 integration tests). Then went further and ran a real
+    `R CMD build` + `R CMD check`, which found two genuine issues
+    `load_all()`-only testing couldn't have caught:
+    1. `DESCRIPTION`'s `Authors@R` had no email — `R CMD INSTALL` refuses
+       to install without one. Fixed using the same `develop@gorigami.xyz`
+       contact this repo's own `LICENSE`/`README.md` already use.
+    2. **A real path-resolution bug**: `find_linal_binary()`'s original
+       fixed relative-path climb (`../../../..` from the test file) only
+       works when tests run from the real source tree
+       (`pkgload::load_all()` + `test_dir()`); `R CMD check` copies the
+       package into its own sandboxed `<pkg>.Rcheck/` directory with
+       different nesting, so the same fixed climb resolved to the wrong
+       directory entirely and the integration tests hard-failed. Fixed
+       properly: new `find_repo_root()` walks upward from the test file
+       looking for `Cargo.toml` (robust to nesting depth) instead of
+       assuming a fixed depth, and `find_linal_binary()` now calls
+       `testthat::skip()` rather than `stop()` when the repo root or
+       binary genuinely can't be found — correct behavior for a package
+       whose integration tests depend on a sibling Rust checkout that
+       won't exist on CRAN or in generic CI, not just a check-sandbox
+       workaround. Also fixed the parallel gap in the Python client
+       (`clients/python/tests/conftest.py`'s `_find_linal_binary()`) for
+       consistency: `pytest.skip()` instead of `raise RuntimeError`.
+    Also cleared a `NOTE` (`arrow` declared in `Imports` but unused —
+    correct for checkpoint 3's scope, since `/delivery` support with real
+    `arrow::` calls is checkpoint 4; moved to `Suggests` for now, will
+    move back to `Imports` when checkpoint 4 lands) and confirmed the
+    remaining `WARNING` (non-standard license string) is the
+    already-known, already-documented pre-CRAN-submission item from
+    checkpoint 0, not a new issue. Final `R CMD check` result: 40/40
+    tests pass inside the real check sandbox, 1 WARNING (the known
+    license one), 0 ERRORs, 0 NOTEs.
+  - `free_port()` needed a non-obvious implementation: R's
+    `socketConnection(port = 0, server = TRUE)` (the direct analogue of
+    the Python fixture's bind-to-0-then-read-back-the-port trick) blocks
+    indefinitely in `open()` waiting for a client to connect that never
+    comes — confirmed by hand (it hung for real, had to be killed).
+    `serverSocket()` doesn't block but also doesn't expose the
+    OS-assigned port. Landed on: pick a random high port, confirm it's
+    free by successfully binding `serverSocket()` to it (closing
+    immediately), retry on collision.
 
 - [ ] **4. R client dataset export (`/delivery`)**
   - Mirrors checkpoint 2: `linal_dataset(conn, name)`, reading

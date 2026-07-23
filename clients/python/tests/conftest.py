@@ -21,7 +21,13 @@ def _find_linal_binary() -> Path:
         candidate = REPO_ROOT / "target" / profile / "linal"
         if candidate.exists():
             return candidate
-    raise RuntimeError(
+    # skip, not fail: a missing binary means the sibling Rust project
+    # hasn't been built in this environment (e.g. a fresh clone, or a
+    # generic CI job not scoped to run `cargo build` first) -- an
+    # environment gap, not a real test failure. Matches the equivalent
+    # fix applied to the R client's helper-server.R after `R CMD check`
+    # surfaced the same class of issue there.
+    pytest.skip(
         f"No `linal` binary found under {REPO_ROOT}/target/{{debug,release}}/. "
         "Run `cargo build --bin linal` in the repo root first."
     )

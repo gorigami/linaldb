@@ -2,25 +2,25 @@ Package: linaldb
 Type: Package
 Title: R Client for LINALDB
 Version: 0.1.0
-Authors@R: person("gorigami", role = c("aut", "cre"))
+Authors@R: person("gorigami", email = "develop@gorigami.xyz", role = c("aut", "cre"))
 Description: R client for LINALDB, a SQL-inspired analytical engine
     treating vectors, matrices, and tensors as first-class citizens.
     Talks to a running 'linal serve' instance over its HTTP API
     (POST /execute for ad-hoc DSL, /delivery/* for real Parquet dataset
-    export). Scaffolding only as of this version -- see
-    PYTHON_R_INTEROP_PLAN.md (checkpoints 3-4) in the parent repository
-    for the real client implementation and clients/CONTRACT.md for the
-    wire contract this package implements against.
+    export). See PYTHON_R_INTEROP_PLAN.md in the parent repository for
+    what's implemented vs. still planned, and clients/CONTRACT.md for
+    the wire contract this package implements against.
 License: LinalDB Community License v1.0 (see ../../LICENSE; not a
     standard SPDX/CRAN-recognized license string yet -- fine for
     scaffolding, revisit before any real CRAN submission)
 Encoding: UTF-8
-LazyData: true
-RoxygenNote: 7.3.1
 Imports:
     httr2,
-    jsonlite,
-    arrow
+    jsonlite
 Suggests:
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    processx,
+    withr,
+    arrow
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0

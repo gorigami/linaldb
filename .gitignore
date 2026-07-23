@@ -17,4 +17,5 @@ clients/python/.venv/
 clients/r/.Rhistory
 clients/r/.RData
 clients/r/*.Rproj.user/
-clients/r/man/*.Rd
+clients/r/*.Rcheck/
+clients/r/*.tar.gz
