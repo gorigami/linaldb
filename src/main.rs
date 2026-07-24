@@ -82,6 +82,62 @@ enum Commands {
         #[arg(long, default_value = "display")]
         format: String,
     },
+    /// Manage background jobs on a running server
+    Jobs {
+        #[command(subcommand)]
+        action: JobsAction,
+        /// Server URL
+        #[arg(long, default_value = "http://localhost:8080")]
+        url: String,
+    },
+    /// Manage scheduled (recurring) tasks on a running server
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+        /// Server URL
+        #[arg(long, default_value = "http://localhost:8080")]
+        url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobsAction {
+    /// List all jobs
+    List,
+    /// Submit a DSL command as a background job
+    Submit {
+        /// The DSL command to run
+        command: String,
+        /// Database name to target
+        #[arg(long, short)]
+        db: Option<String>,
+    },
+    /// Get a job's status
+    Get { id: String },
+    /// Cancel a pending job
+    Cancel { id: String },
+    /// Get a completed job's result
+    Result { id: String },
+}
+
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// List all scheduled tasks
+    List,
+    /// Create a new recurring task
+    Create {
+        /// Human-readable task name
+        name: String,
+        /// The DSL command to run on each interval
+        command: String,
+        /// Interval between runs, in seconds
+        interval_secs: u64,
+        /// Database name to target
+        #[arg(long, short)]
+        db: Option<String>,
+    },
+    /// Delete a scheduled task
+    Delete { id: String },
 }
 
 #[derive(Subcommand)]
@@ -181,7 +237,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match action {
                 ServerAction::Start => {
                     let db_arc = Arc::new(RwLock::new(db));
+                    write_pid_file(port);
                     start_server(db_arc, port).await;
+                    remove_pid_file(port);
                 }
                 ServerAction::Status => {
                     handle_server_status(port).await?;
@@ -193,7 +251,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Serve { port }) => {
             let db_arc = Arc::new(RwLock::new(db));
+            write_pid_file(port);
             start_server(db_arc, port).await;
+            remove_pid_file(port);
         }
         Some(Commands::Init) => {
             handle_init()?;
@@ -214,6 +274,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Exec { command, format }) => {
             handle_exec(&mut db, command, format == "toon")?;
+        }
+        Some(Commands::Jobs { action, url }) => {
+            handle_jobs(action, url).await?;
+        }
+        Some(Commands::Schedule { action, url }) => {
+            handle_schedule(action, url).await?;
         }
         Some(Commands::Repl { format }) => {
             run_repl(db, format == "toon")?;
@@ -502,11 +568,151 @@ async fn handle_server_status(port: u16) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-async fn handle_server_stop(_port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
-        "{} Graceful stop via CLI not yet fully implemented for all platforms.",
-        "!".yellow()
-    );
-    println!("Please use Ctrl+C or kill the process directly.");
+fn pid_file_path(port: u16) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("linal_server_{}.pid", port))
+}
+
+fn write_pid_file(port: u16) {
+    let path = pid_file_path(port);
+    let _ = fs::write(path, std::process::id().to_string());
+}
+
+fn remove_pid_file(port: u16) {
+    let _ = fs::remove_file(pid_file_path(port));
+}
+
+async fn handle_server_stop(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let path = pid_file_path(port);
+    let pid: u32 = match fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+    {
+        Some(pid) => pid,
+        None => {
+            println!(
+                "{} No PID file found for port {} (server may not be running, or was started outside this CLI).",
+                "!".yellow(),
+                port
+            );
+            return Ok(());
+        }
+    };
+
+    #[cfg(unix)]
+    let kill_result = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    #[cfg(windows)]
+    let kill_result = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status();
+
+    match kill_result {
+        Ok(status) if status.success() => {
+            println!(
+                "{} Sent stop signal to server (pid {}) on port {}.",
+                "✓".green(),
+                pid,
+                port
+            );
+            let _ = fs::remove_file(&path);
+        }
+        _ => {
+            println!(
+                "{} Could not signal process {} (it may already be stopped). Cleaning up stale PID file.",
+                "!".yellow(),
+                pid
+            );
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+async fn handle_jobs(action: JobsAction, url: String) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    match action {
+        JobsAction::List => {
+            let resp = client.get(format!("{}/jobs", url)).send().await?;
+            print_json_response(resp).await?;
+        }
+        JobsAction::Submit { command, db } => {
+            let mut req = client.post(format!("{}/jobs", url)).body(command);
+            if let Some(db_name) = db {
+                req = req.header("X-Linal-Database", db_name);
+            }
+            let resp = req.send().await?;
+            print_json_response(resp).await?;
+        }
+        JobsAction::Get { id } => {
+            let resp = client.get(format!("{}/jobs/{}", url, id)).send().await?;
+            print_json_response(resp).await?;
+        }
+        JobsAction::Cancel { id } => {
+            let resp = client.delete(format!("{}/jobs/{}", url, id)).send().await?;
+            print_json_response(resp).await?;
+        }
+        JobsAction::Result { id } => {
+            let resp = client
+                .get(format!("{}/jobs/{}/result", url, id))
+                .send()
+                .await?;
+            print_json_response(resp).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_schedule(
+    action: ScheduleAction,
+    url: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    match action {
+        ScheduleAction::List => {
+            let resp = client.get(format!("{}/schedule", url)).send().await?;
+            print_json_response(resp).await?;
+        }
+        ScheduleAction::Create {
+            name,
+            command,
+            interval_secs,
+            db,
+        } => {
+            let body = serde_json::json!({
+                "name": name,
+                "command": command,
+                "interval_secs": interval_secs,
+                "target_db": db,
+            });
+            let resp = client
+                .post(format!("{}/schedule", url))
+                .json(&body)
+                .send()
+                .await?;
+            print_json_response(resp).await?;
+        }
+        ScheduleAction::Delete { id } => {
+            let resp = client
+                .delete(format!("{}/schedule/{}", url, id))
+                .send()
+                .await?;
+            print_json_response(resp).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn print_json_response(resp: reqwest::Response) -> Result<(), Box<dyn std::error::Error>> {
+    let status = resp.status();
+    let body = resp.text().await?;
+    let pretty = serde_json::from_str::<serde_json::Value>(&body)
+        .map(|v| serde_json::to_string_pretty(&v).unwrap_or(body.clone()))
+        .unwrap_or(body);
+    if status.is_success() {
+        println!("{}", pretty);
+    } else {
+        eprintln!("{} ({}): {}", "Error".red(), status, pretty.red());
+    }
     Ok(())
 }

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "linaldb"
+version = "0.1.0"
+description = "Python client for LINALDB, a SQL-inspired analytical engine for vectors, matrices, and tensors"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "LinalDB Community License v1.0" }
+authors = [{ name = "gorigami" }]
+dependencies = [
+    "requests>=2.28",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+dev = ["pytest>=7.0", "pandas>=1.5"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["linaldb"]

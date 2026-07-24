@@ -9,6 +9,178 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.74] - 2026-07-23
+
+### Fixed — `USE <database>` over `/execute` had no lasting effect (server-only bug)
+
+Found building checkpoint 5 of the Python/R interop plan (a real
+end-to-end example replaying `examples/hdf5_digit_classification.lnl`
+through a client) — the replayed script's own `USE
+hdf5_digit_classification` statement appeared to succeed
+(`"Switched to database 'hdf5_digit_classification'"`), but every dataset
+it then created ended up in `default` instead. Traced with runtime
+instrumentation (code-reading alone didn't explain it) to
+`execute_command`'s (`src/server/mod.rs`) "restore previous database to
+ensure per-request isolation" logic: it called
+`db.use_database(&prev_db_name)` **unconditionally** after every command,
+regardless of whether the request itself had asked to switch databases
+via `X-Linal-Database`. For any headerless request — including one whose
+own DSL statement *was* `USE <db>` — this silently reverted the switch
+before the response even went out. Every subsequent headerless request,
+no matter how many, kept seeing the old active database. The identical
+`USE` command works correctly via the embedded CLI/REPL, which never
+goes through this restore logic at all — this was purely an HTTP-layer
+bug, and the entire session-level `USE` workflow over `/execute` has
+likely been a no-op since the multi-tenancy header feature was first
+added.
+
+Fixed: the restore now only runs for a request that itself supplied
+`X-Linal-Database` (i.e. asked to temporarily *borrow* a different active
+database for that one request) — a plain headerless request's own
+effects, including an explicit `USE`, now persist exactly like the CLI.
+
+Added `test_server_use_database_persists_without_header`
+(`tests/server_usability_test.rs`) — the existing
+`test_server_multitenancy` never caught this because it always sends the
+header on every single request; the new test specifically exercises
+"switch once via a plain `USE`, then rely on that being remembered
+across several headerless requests," which is exactly the pattern a real
+interactive session (or a Python/R client that issues `USE` without
+setting `database=`) actually uses. 172 lib tests + the full integration
+suite pass (including all 4 server usability tests), clippy clean
+(lib/bins).
+
+---
+
+## [0.1.73] - 2026-07-23
+
+### Fixed — `/delivery` never worked against a real `SAVE DATASET`, and `schema.json` mis-typed fallback-encoded columns
+
+Found building checkpoint 2 of the Python client (`clients/python/`,
+`Dataset.to_arrow()`/`.to_pandas()`) and driving it against a real server
+instead of trusting the endpoint worked because it existed and had tests.
+Two bugs, both real, both previously undiscovered:
+
+1. **`/delivery/*` 404'd for every dataset ever saved through the
+   standard `SAVE DATASET` path, in every database including the default
+   one.** `dsl::persistence`'s `resolve_persistence_path`/
+   `instance_base_dir` always write a dataset package to
+   `{data_dir}/{database}/datasets/{name}/...` (the active database name
+   is a path segment — `SAVE DATASET`'s own success message literally
+   says `Saved dataset 'x' (v1) to './data/default'`), but
+   `src/server/dataset_server.rs`'s handlers read
+   `{data_dir}/datasets/{name}/...`, missing that segment entirely. The
+   existing `dataset_delivery_test.rs` never caught this because it
+   constructed its fixture directory by hand via `ParquetStorage::
+   save_dataset` directly, matching whatever the handler currently
+   expected, rather than going through the real DSL `SAVE DATASET` path —
+   a unit test validating a layer in isolation missed a real disagreement
+   between it and its neighbor, the same class of gap as several prior
+   rounds in this project's history. Fixed: every `/delivery` handler now
+   resolves `{data_dir}/{database}/datasets/{name}/...`, reading the
+   database name from the same `X-Linal-Database` header `/execute`
+   already honors (default `"default"`). Added
+   `test_dataset_delivery_matches_real_save_dataset_path` — drives a real
+   `TensorDb` through actual `DATASET`/`INSERT`/`SAVE DATASET` statements
+   and confirms `/delivery` can then reach it, closing the exact gap that
+   let the original bug ship.
+2. **`schema.json` reported a Vector/Matrix column that fell back to the
+   legacy JSON-string Parquet encoding (v0.1.72, real `NULL` present) as
+   plain `"String"`**, since `DatasetSchema::from(Arc<ArrowSchema>)` is
+   derived purely from the *physical* Arrow type actually written —
+   correct for the physical type, but not what a client needs to know the
+   column's *logical* type, which was the entire reason `clients/
+   CONTRACT.md` called `schema.json` "authoritative" for column typing.
+   Fixed the same way `core::connectors::SHAPE_METADATA_KEY` already
+   solves an analogous problem: `dataset_to_record_batch` now attaches a
+   new `linal.logical_value_type` Arrow field metadata entry
+   (`"Vector:3"`/`"Matrix:2,2"`) whenever it falls back to `Utf8`,  read
+   back by both `DatasetSchema::from` and `arrow_schema_to_tuple_schema`
+   via new `logical_vector_or_matrix_type` (checks the metadata first,
+   falls back to the existing physical-type inference otherwise).
+
+Both fixes verified against the real Python client end-to-end (native
+FixedSizeList column, legacy-fallback column with an actual `NULL`, and
+a Matrix column), not just against Rust's own test suite. `cargo clean`
+run after this session's heavy build/test cycle (freed 19.1GiB); full
+rebuild + full test suite (172 lib + all integration suites) reconfirmed
+green from a clean `target/`.
+
+---
+
+## [0.1.72] - 2026-07-23
+
+### Fixed — Vector/Matrix columns now write as real Arrow columns in Parquet
+
+Found while designing the Python/R interop work: `dataset_to_record_batch`
+(`src/core/storage.rs`) mapped every `Vector`/`Matrix` column to Arrow
+`Utf8` and stored each cell as a JSON-encoded string (e.g. the literal text
+`{"Vector":[1.0,2.0,3.0]}`) — the fallback path silently used for the
+engine's own headline feature. Any external Parquet reader (pandas,
+polars, pyarrow, R's `arrow` package) got a string column requiring
+manual per-cell `json.loads()`/unwrapping to recover the numeric data,
+for exactly the columns meant to be first-class.
+
+Fixed: `Vector`/`Matrix` columns with no `NULL`s and a uniform width now
+write as native Arrow `FixedSizeList<Float32>` /
+`FixedSizeList<FixedSizeList<Float32>>` columns — genuine numeric arrays,
+verified end-to-end with a real pyarrow read (`pd.read_parquet` gives back
+proper `[1.0, 2.0, 3.0]` lists, not strings). `schema.json`
+(`DatasetSchema::from(Arc<ArrowSchema>)`) and the legacy `.meta.json`
+sidecar schema (`arrow_schema_to_tuple_schema`) both correctly round-trip
+the new type via a shared `vector_or_matrix_type` helper, so `LOAD DATASET`
+reconstructs `Value::Vector`/`Value::Matrix` rows (not stringified JSON)
+from the native encoding.
+
+**A column with any actual `NULL` value still falls back to the legacy
+JSON-string encoding** — found by verifying against pyarrow specifically
+(not just this engine's own round-trip, which is arrow-rs on both ends and
+didn't catch it): a `FixedSizeList` Parquet column with a null slot reads
+back fine through arrow-rs's own reader but pyarrow raises `ArrowInvalid:
+Expected all lists to be of size=N but index M had size=0`. Root-caused to
+how Parquet's definition/repetition levels encode a null fixed-size slot;
+rather than chase a cross-library Parquet encoding bug, scoped this fix to
+the common case (fully-populated vector/matrix columns, e.g. dense
+embeddings) and kept the previously-existing, already-correct JSON
+fallback for the rarer any-`NULL` case. Read-side
+(`arrow_array_to_values`) dispatches on the actual Arrow column type it
+finds, not a hardcoded assumption, so both encodings — and Parquet files
+written by pre-v0.1.72 versions of this engine — load correctly.
+
+No DSL-visible change; this is a storage-layer/Parquet-interop fix.
+
+---
+
+## [0.1.71] - 2026-07-22
+
+### Added / Fixed — CLI/server alignment audit
+
+Prompted by planning Python/R interop: the server exposes `/jobs` and
+`/schedule` (async background execution, recurring tasks) with no CLI
+equivalent, and `linal server stop` was a stub that told the user to
+Ctrl+C or `kill` the process manually.
+
+- **`linal server stop` now actually stops the server.** `linal serve` /
+  `linal server start` write a PID file (`linal_server_{port}.pid` in the
+  OS temp dir) on startup and remove it on graceful shutdown. `stop` reads
+  that file and sends a real `SIGTERM` (`kill -TERM`, or `taskkill /F` on
+  Windows) — which the server already handled correctly via its existing
+  `shutdown_signal()` Ctrl-C/SIGTERM listener, just never had a caller.
+  Handles the missing/stale-PID-file case (already stopped, or started
+  outside this CLI) without erroring.
+- **New `linal jobs` subcommand** (`list`/`submit`/`get`/`cancel`/`result`)
+  and **`linal schedule` subcommand** (`list`/`create`/`delete`), both
+  talking to a running server over HTTP (`--url`, default
+  `http://localhost:8080`) — mirrors the existing `linal query --url`
+  remote pattern. Previously these two server features were curl-only.
+
+No engine/DSL changes in this pass — this was a CLI/server surface gap,
+not a bug in `execute_line`'s dispatch (REPL/`run`/`exec`/`query`/`/execute`
+all already share one dispatch point, so DSL features stay in sync across
+every entry point).
+
+---
+
 ## [0.1.70] - 2026-07-22
 
 ### Added — showcase integration, closing out `SIGNAL_PROCESSING_PLAN.md`

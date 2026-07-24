@@ -364,17 +364,44 @@ HTTP server implementation built with **Axum**:
   - `GET /jobs/:id`: Poll for status (Pending, Running, Completed, Failed).
   - `GET /jobs/:id/result`: Retrieve structured `DslOutput`.
   - `DELETE /jobs/:id`: Cancel a **Pending** job. Running or Completed jobs return `400 Bad Request`.
+  - CLI coverage (v0.1.71): `linal jobs --url <server> {list|submit|get|cancel|result}` — before this these endpoints were curl-only.
 - **Background Scheduler** (`scheduler.rs`): Cron-like execution of DSL commands registered at runtime.
   - `POST /schedule`: Register a named task (`name`, `command`, `interval_secs`, optional `target_db`).
   - `GET /schedule`: List active scheduled tasks.
   - `DELETE /schedule/:id`: Remove a scheduled task.
-- **Dataset Delivery** (`dataset_server.rs`): a separate `DatasetServer` router, mounted at `/delivery` in `server/mod.rs`, that serves a saved dataset package's files read-only over HTTP — `GET /delivery/datasets/:name/manifest.json`, `.../schema.json`, `.../stats.json`, `.../data.parquet` — the same four files `storage.rs`'s `save_dataset_package` writes to disk (see Storage Layer). This is what `DELIVER <dataset>` (DSL_REFERENCE.md §9) checks the readiness of.
+  - CLI coverage (v0.1.71): `linal schedule --url <server> {list|create|delete}`.
+- **Dataset Delivery** (`dataset_server.rs`): a separate `DatasetServer` router, mounted at `/delivery` in `server/mod.rs`, that serves a saved dataset package's files read-only over HTTP — `GET /delivery/datasets/:name/manifest.json`, `.../schema.json`, `.../stats.json`, `.../data.parquet` — the same four files `storage.rs`'s `save_dataset_package` writes to disk (see Storage Layer). This is what `DELIVER <dataset>` (DSL_REFERENCE.md §9) checks the readiness of. Resolves the per-database subdirectory (`{data_dir}/{database}/datasets/:name/...`) via the same `X-Linal-Database` header `/execute` honors, default `"default"` — **fixed in v0.1.73**: every handler here previously read `{data_dir}/datasets/:name/...`, missing that segment, so `/delivery` 404'd for every dataset saved through the real `SAVE DATASET` path (found building the Python client, `clients/python/linaldb/dataset.py`).
 - **Database Management API**: `GET /databases`, `POST /databases/:name`, `DELETE /databases/:name`.
-- **Multi-tenant Isolation**: Isolated database contexts via `X-Linal-Database` header. After each request the server restores the previously active database, so concurrent requests with different headers cannot affect each other's context.
-- **Graceful Shutdown**: Native support for `SIGINT` and `SIGTERM` to ensure in-flight requests complete before termination.
+- **Multi-tenant Isolation**: Isolated database contexts via `X-Linal-Database` header. After a request that carried the header, the server restores the previously active database, so concurrent requests targeting different databases via the header cannot affect each other's context. **A headerless request's own active-database changes now persist** (fixed in v0.1.74): a `USE <db>` statement sent to `/execute` with no `X-Linal-Database` header used to report success but have its effect silently reverted by this same restore logic — which ran unconditionally regardless of whether the request had asked to switch databases at all — so the session-level `USE` workflow was a no-op over HTTP (every subsequent headerless request, no matter how many, kept seeing the old active database), even though the identical command works correctly via the embedded CLI/REPL. The restore now only fires for a request that itself supplied the header.
+- **Graceful Shutdown**: Native support for `SIGINT` and `SIGTERM` to ensure in-flight requests complete before termination. `linal serve` / `linal server start` write a PID file (`linal_server_{port}.pid` in the OS temp dir) on startup, removed on clean shutdown; `linal server --port <p> stop` (v0.1.71) reads it and sends a real `SIGTERM`/`taskkill` to trigger this same graceful path — previously this CLI command was a stub telling the user to `Ctrl+C` or `kill` manually.
 - **OpenAPI/Swagger documentation**: Interactive API explorer at `/swagger-ui`. Note: only `/execute` and `/health` are currently included in the generated schema; all other routes are functional but undocumented in the spec.
 
-### 6. Utils Module (`src/utils/`)
+### 6. Client Bindings (`clients/`)
+
+Not part of the Rust crate — thin, no-compiled-extension HTTP clients in
+`clients/python/` (pip package `linaldb`) and `clients/r/` (R package
+`linaldb`), consuming exactly the two HTTP surfaces described above:
+`/execute` for ad-hoc DSL and `/delivery` for saved-dataset Parquet
+export. Both were built together against one shared wire-contract
+document, [`clients/CONTRACT.md`](../clients/CONTRACT.md) — written by
+inspecting real server responses (`curl`, and later each client's own
+integration tests against a real `linal serve` subprocess) rather than
+assumed from this document or the DSL reference alone, which caught
+several real discrepancies during development (see
+`PYTHON_R_INTEROP_PLAN.md`'s checkpoint notes, still in the repo root
+until all its checkpoints land, for the specifics — including three real
+server-side bugs this effort found and fixed: the two `/delivery`
+path-resolution issues noted above, and a severe one where `USE
+<database>` sent to `/execute` without the header had no lasting effect
+at all, also noted above).
+
+Both clients are Tier A only (HTTP + Parquet, no compiled extension) by
+deliberate design choice — a deeper Tier B (in-process `pyo3`/`extendr`
+bindings with Arrow C Data Interface zero-copy handoff, no server
+process required) was scoped out as a distinct, later effort; see the
+plan file's design decisions for the reasoning.
+
+### 7. Utils Module (`src/utils/`)
 
 Utility functions:
 

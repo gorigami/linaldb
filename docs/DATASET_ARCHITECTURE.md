@@ -70,7 +70,35 @@ LINALDB uses a hybrid approach to balance performance and flexibility:
 1. **Relational/Heavy Path** (`dataset_legacy.rs`):
     - Optimized for **row-level operations** (INSERT/UPDATE).
     - Used for standard SQL `DATASET` creation and `SELECT` query results.
-    - Primary format for **Persistence** (Parquet).
+    - Primary format for **Persistence** (Parquet). `Vector`/`Matrix` columns
+      write as native Arrow `FixedSizeList` types (v0.1.72,
+      `core::storage::dataset_to_record_batch`) when the column has no
+      `NULL`s and a uniform width — real numeric columns readable by
+      pandas/polars/pyarrow/R `arrow`, not JSON strings. A column with any
+      actual `NULL` falls back to the pre-v0.1.72 per-cell JSON-string
+      encoding: writing a nullable `FixedSizeList` round-trips fine through
+      this engine's own arrow-rs reader but pyarrow rejects it
+      (`ArrowInvalid: Expected all lists to be of size=N ...`) — an
+      external-reader-verified limitation, not a theoretical one. Read-side
+      (`arrow_array_to_values`) transparently supports both encodings, so
+      older Parquet packages keep loading. `schema.json` (the
+      `/delivery`-exposed package metadata, see Server Module in
+      `ARCHITECTURE.md`) correctly reports the *logical* type even for a
+      fallback-encoded column (v0.1.73) via a `linal.logical_value_type`
+      Arrow field-metadata entry, mirroring the existing
+      `core::connectors::SHAPE_METADATA_KEY` pattern — without it,
+      `schema.json` would report a fallback column as plain `"String"`,
+      since it's otherwise derived purely from the physical (post-fallback)
+      Arrow type. **This Parquet format is a real external interop
+      surface, not just an internal storage detail**: it's exactly what
+      `/delivery` serves to the Python (`clients/python/`) and R
+      (`clients/r/`) clients' `to_arrow()`/`to_pandas()`/
+      `linal_dataset_read()` — every fix noted above was found and
+      verified by driving those clients against a real server, not just
+      by round-tripping through this engine's own reader. See
+      `clients/CONTRACT.md` §2 for the exact contract a consumer of this
+      format needs to know (including which encoding a given column
+      landed in).
 2. **Semantic/Light Path** (`core/dataset/`):
     - Optimized for **Zero-Copy Views** and **Tensor Algebra**.
     - Allows linking independent tensors as virtual columns (`ATTACH`).

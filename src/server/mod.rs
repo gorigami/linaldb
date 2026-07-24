@@ -258,6 +258,21 @@ async fn execute_command(
                 execute_line_shared(&db, &command_clone, 1)
             } else {
                 let mut db = db_arc.write().unwrap();
+                // Only a request that itself asked to *borrow* a different
+                // active database via X-Linal-Database (`target_db.is_some()`)
+                // gets that borrow reverted afterward, so concurrent requests
+                // targeting different databases via the header can't clobber
+                // each other's active-db state. A request with no header
+                // (target_db=None) executes whatever command it was sent
+                // as-is — including a `USE <db>` statement, whose entire
+                // point is to persist a session-level database switch, the
+                // same way it does for the embedded CLI/REPL (which never
+                // goes through this restore logic at all). Previously this
+                // restore ran unconditionally, so `USE <db>` sent to
+                // `/execute` reported success but was silently undone before
+                // the response even went out — every subsequent request,
+                // headerless or not, still saw the old active database.
+                let switched_db = target_db.is_some();
                 if let Some(db_name) = target_db {
                     db.use_database(&db_name)
                         .map_err(|e| crate::dsl::DslError::Engine { line: 0, source: e })?;
@@ -265,8 +280,9 @@ async fn execute_command(
 
                 let result = execute_line(&mut db, &command_clone, 1);
 
-                // Restore previous database to ensure per-request isolation
-                let _ = db.use_database(&prev_db_name);
+                if switched_db {
+                    let _ = db.use_database(&prev_db_name);
+                }
                 result
             }
         }),
