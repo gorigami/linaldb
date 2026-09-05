@@ -16,6 +16,7 @@ pub struct Dataset {
     pub metadata: DatasetMetadata,
     pub indices: HashMap<String, Box<dyn Index>>,
     pub lazy_expressions: HashMap<String, Expr>,
+    pub partitions: Vec<PartitionStats>,  // ← per-chunk zone maps, for range-predicate pruning
 }
 ```
 
@@ -26,6 +27,18 @@ pub struct Dataset {
 - **Operations**: filter, map, select, join, etc.
 - **Memory**: Copies data for transformations
 - **Status**: **Active** - this is what the engine uses
+
+**`partitions`**: read-only, derived metadata over `rows` — never a change to row storage or
+order. `rows` is chunked into contiguous `BATCH_SIZE` (1024)-row `PartitionStats { start, end,
+column_stats }` entries, each a per-chunk min/max/null-count zone map (reusing `ColumnStats`).
+`Dataset::add_row` maintains this incrementally (merging just the new row into the dataset-wide
+summary and the current/a fresh partition) instead of the full-rescan `update_stats` every other
+mutating method calls — an insert used to be O(n) (rescanning every row on every single add,
+making a bulk load O(n²) overall) purely to compute stats nothing read; it's now O(#columns), and
+the query planner (`query/planner.rs`'s `try_prune_partitions`) actually consumes it to skip
+partitions that provably can't satisfy a `WHERE`/`FILTER` range predicate. Like `indices`, it's
+`#[serde(skip)]` — cheap to rebuild, and only ever meaningful alongside the exact rows it was
+built from.
 
 ### 2. `dataset/mod.rs` - **Integrated View Layer**
 
