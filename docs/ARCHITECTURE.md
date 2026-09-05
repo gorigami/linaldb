@@ -23,7 +23,7 @@ LINAL is an in-memory analytical engine designed for linear algebra operations, 
 
 - **Tensor computation** (vectors, matrices, higher-dimensional tensors)
 - **Structured datasets** (SQL-like tables with heterogeneous types)
-- **Query optimization** (index-aware execution, predicate pushdown)
+- **Query optimization** (index-aware execution, predicate pushdown, zone-map partition pruning)
 - **Persistence** (Parquet for datasets, JSON for tensors)
 
 The engine is built in Rust with a modular architecture that separates concerns into distinct layers.
@@ -155,13 +155,15 @@ The core module contains fundamental data structures and abstractions:
 
 #### `index/`
 
-- **HashIndex**: Exact match lookups (equality predicates)
-- **VectorIndex**: Similarity search (cosine, Euclidean distance)
+- **`Index` trait**: `add`/`lookup`/`search` as before, plus (added alongside the clustering/persistence work below) `build(&mut self)` — called once after a batch of `add()`s (full backfill on `CREATE INDEX`, or rebuild on `LOAD DATASET`) so an index can compute batch-derived structure; default no-op, so `HashIndex` needed no changes — and `search_threshold(query, threshold, strict)` — answers a boolean predicate (`WHERE COSINE_SIM(...) > t`) exactly, unlike `search`'s top-k ranking; default falls back to "rank everything via `search`, then filter" (the original behavior), overridden where an index can safely skip more.
+- **HashIndex**: Exact match lookups (equality predicates). Unchanged.
+- **VectorIndex**: Similarity search (cosine). No longer a pure linear scan — `build()` runs a small k-means pass (spherical: cosine-similarity-based assignment) once a column has ~64+ vectors, grouping them into `~sqrt(n)` IVF-style clusters. `search` (top-k, e.g. `SEARCH`/`ORDER BY COSINE_SIM`) is approximate: it only scans the nearest few clusters. `search_threshold` (exact, backs `WHERE COSINE_SIM(...) > t` via `CosineFilterExec`) is still exact: each cluster carries a precomputed angular radius, so the spherical triangle inequality gives a provable upper bound on any member's similarity to the query — a cluster is only scanned if that bound says it could pass, never skipped speculatively. Vectors added after the last `build()` (e.g. rows inserted post-`CREATE INDEX`) sit in an unclustered tail that both search paths always scan in full, so correctness never depends on `build()` having run recently.
+- **`IndexDefinition`** (`column`, `index_type`): what `SAVE DATASET`/`LOAD DATASET` actually persist for indices — never the index contents themselves (`Dataset.indices` is `#[serde(skip)]`, since a `Box<dyn Index>`'s row-id contents are only meaningful paired with the exact rows it was built from). `LOAD DATASET` calls `create_index`/`create_vector_index` per persisted definition after the rows are back in place, which backfills (and, for a vector index, re-clusters) from that data — reproducing an equivalent index without ever serializing `Box<dyn Index>`. Before this, every index was silently lost on reload with no warning.
 
 #### `storage.rs`
 
 - **StorageEngine**: Trait for persistence abstraction
-- **ParquetStorage**: Parquet-based dataset persistence
+- **ParquetStorage**: Parquet-based dataset persistence. A dataset's on-disk package (`datasets/<name>/`) now also includes `indexes.json` — the serialized `Vec<IndexDefinition>` described above.
 - **JsonStorage**: JSON-based tensor persistence
 - **CsvStorage**: CSV-based import/export with schema inference (Legacy)
 
@@ -349,7 +351,8 @@ The query module implements query planning and optimization:
 
 - **QueryPlanner**: Converts logical plans to physical plans
 - **Optimizer**: Applies optimizations:
-  - Index selection
+  - Index selection (`try_optimize_filter`): `col = literal` → `IndexScanExec` (hash index); `COSINE_SIM(col, v) > t` → `CosineFilterExec` (vector index). These *replace* the scan+filter outright — each executor already applies the full predicate itself.
+  - **Partition pruning** (`try_prune_partitions`): `col <op> literal` (`<`/`<=`/`>`/`>=`, either operand order) or `col BETWEEN low AND high`, against a `Dataset` with more than one partition's worth of per-column zone-map stats (`Dataset.partitions` — min/max/null-count per contiguous `BATCH_SIZE`=1024-row chunk, maintained incrementally by `Dataset::add_row`/rebuilt by every dataset-transforming method). Wraps the scan in a `PartitionPrunedScanExec` covering only the partitions whose range can't be ruled out. Unlike index selection above, this *doesn't* replace the filter — it only narrows what `FilterExec` has to scan, since partition stats only prove a partition *might* match, never that every row in it does. Needs no index at all; only engages once a dataset is large enough to have 2+ partitions.
   - Predicate pushdown
   - Projection pruning
 

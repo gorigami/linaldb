@@ -131,6 +131,47 @@ impl ParquetStorage {
         format!("{}/datasets/{}.meta.json", self.base_path, name)
     }
 
+    fn dataset_indexes_path(&self, name: &str) -> String {
+        format!("{}/datasets/{}/indexes.json", self.base_path, name)
+    }
+
+    /// Persist which columns have indices (and of what type) so `LOAD
+    /// DATASET` can rebuild them. Overwrites unconditionally (including with
+    /// an empty list) so the file always reflects the dataset's current
+    /// indices rather than leaving a stale one behind after indices are
+    /// dropped.
+    pub fn save_index_definitions(
+        &self,
+        name: &str,
+        definitions: &[crate::core::index::IndexDefinition],
+    ) -> Result<(), StorageError> {
+        self.ensure_directories(Some(name))?;
+        let path = self.dataset_indexes_path(name);
+        let json = serde_json::to_string_pretty(definitions).map_err(|e| {
+            StorageError::Serialization(format!("Failed to serialize index definitions: {}", e))
+        })?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load previously persisted index definitions for a dataset. Returns an
+    /// empty list (not an error) if none were ever saved, since datasets
+    /// written before this feature existed simply have no `indexes.json`.
+    pub fn load_index_definitions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::core::index::IndexDefinition>, StorageError> {
+        let path = self.dataset_indexes_path(name);
+        if !Path::new(&path).exists() {
+            return Ok(Vec::new());
+        }
+        let json = fs::read_to_string(path)?;
+        let definitions = serde_json::from_str(&json).map_err(|e| {
+            StorageError::Serialization(format!("Failed to deserialize index definitions: {}", e))
+        })?;
+        Ok(definitions)
+    }
+
     fn legacy_persistent_metadata_path(&self, name: &str) -> String {
         format!("{}/datasets/{}.metadata.json", self.base_path, name)
     }

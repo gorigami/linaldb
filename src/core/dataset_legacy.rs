@@ -23,6 +23,71 @@ pub struct ColumnStats {
     pub max: Option<Value>,
 }
 
+impl ColumnStats {
+    fn empty(value_type: ValueType) -> Self {
+        Self {
+            value_type,
+            null_count: 0,
+            min: None,
+            max: None,
+        }
+    }
+
+    /// Incorporate one value into these stats.
+    fn merge_value(&mut self, value: &Value) {
+        if value.is_null() {
+            self.null_count += 1;
+            return;
+        }
+
+        match &self.min {
+            Some(current_min) => {
+                if value.compare(current_min) == Some(std::cmp::Ordering::Less) {
+                    self.min = Some(value.clone());
+                }
+            }
+            None => self.min = Some(value.clone()),
+        }
+
+        match &self.max {
+            Some(current_max) => {
+                if value.compare(current_max) == Some(std::cmp::Ordering::Greater) {
+                    self.max = Some(value.clone());
+                }
+            }
+            None => self.max = Some(value.clone()),
+        }
+    }
+
+    /// Compute stats for one field across a slice of rows -- used both for
+    /// the whole-dataset summary and for a single partition's zone map.
+    fn compute(field: &super::tuple::Field, rows: &[Tuple]) -> Self {
+        let mut stats = Self::empty(field.value_type.clone());
+        for row in rows {
+            if let Some(value) = row.get(&field.name) {
+                stats.merge_value(value);
+            }
+        }
+        stats
+    }
+}
+
+/// A zone map over a contiguous slice of `Dataset.rows` ([start, end)):
+/// per-column min/max/null-count for just that slice. Lets the query
+/// planner prove a whole partition can't satisfy a range predicate (e.g.
+/// `WHERE age > 90` against a partition whose `age` column maxes out at 40)
+/// and skip it without reading its rows -- see `try_prune_partitions` in
+/// `query/planner.rs`. Partition boundaries are the same `BATCH_SIZE`-sized
+/// chunks `filter_batched`/`map_batched`/`select_batched` already use; this
+/// is read-only metadata over the existing row vector, never a change to
+/// row storage or order.
+#[derive(Debug, Clone)]
+pub struct PartitionStats {
+    pub start: usize,
+    pub end: usize,
+    pub column_stats: HashMap<String, ColumnStats>,
+}
+
 /// Metadata about a dataset
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetMetadata {
@@ -55,48 +120,11 @@ impl DatasetMetadata {
     pub fn update_stats(&mut self, schema: &Schema, rows: &[Tuple]) {
         self.row_count = rows.len();
         self.updated_at = Utc::now();
-        self.column_stats.clear();
-
-        for field in &schema.fields {
-            let mut stats = ColumnStats {
-                value_type: field.value_type.clone(),
-                null_count: 0,
-                min: None,
-                max: None,
-            };
-
-            for row in rows {
-                if let Some(value) = row.get(&field.name) {
-                    if value.is_null() {
-                        stats.null_count += 1;
-                    } else {
-                        // Update min
-                        if let Some(ref current_min) = stats.min {
-                            if let Some(ord) = value.compare(current_min) {
-                                if ord == std::cmp::Ordering::Less {
-                                    stats.min = Some(value.clone());
-                                }
-                            }
-                        } else {
-                            stats.min = Some(value.clone());
-                        }
-
-                        // Update max
-                        if let Some(ref current_max) = stats.max {
-                            if let Some(ord) = value.compare(current_max) {
-                                if ord == std::cmp::Ordering::Greater {
-                                    stats.max = Some(value.clone());
-                                }
-                            }
-                        } else {
-                            stats.max = Some(value.clone());
-                        }
-                    }
-                }
-            }
-
-            self.column_stats.insert(field.name.clone(), stats);
-        }
+        self.column_stats = schema
+            .fields
+            .iter()
+            .map(|field| (field.name.clone(), ColumnStats::compute(field, rows)))
+            .collect();
     }
 }
 
@@ -114,6 +142,13 @@ pub struct Dataset {
     pub indices: HashMap<String, Box<dyn Index>>,
     #[serde(skip)]
     pub lazy_expressions: HashMap<String, Expr>, // column_name -> expression for lazy evaluation
+    /// Per-partition zone maps for range-predicate pruning. Derived,
+    /// read-only metadata over `rows` -- see `PartitionStats`. Not
+    /// persisted (`#[serde(skip)]`), same rationale as `indices`: cheap to
+    /// recompute, and only ever meaningful alongside the exact rows it was
+    /// built from.
+    #[serde(skip)]
+    pub partitions: Vec<PartitionStats>,
 }
 
 impl Dataset {
@@ -129,6 +164,7 @@ impl Dataset {
             metadata,
             indices: HashMap::new(),
             lazy_expressions: HashMap::new(),
+            partitions: Vec::new(),
         }
     }
 
@@ -150,14 +186,49 @@ impl Dataset {
         let mut metadata = DatasetMetadata::new(name, (*schema).clone());
         metadata.update_stats(&schema, &rows);
 
-        Ok(Self {
+        let mut dataset = Self {
             id,
             schema,
             rows,
             metadata,
             indices: HashMap::new(),
             lazy_expressions: HashMap::new(),
-        })
+            partitions: Vec::new(),
+        };
+        dataset.rebuild_partitions();
+        Ok(dataset)
+    }
+
+    /// Recompute `metadata` (row count + column stats) and `partitions`
+    /// (per-partition zone maps) from the current `rows`. Called by every
+    /// dataset-rebuilding transformation (`filter`, `select`, `sort_by`,
+    /// ...); `add_row` instead maintains both incrementally (see below) to
+    /// avoid rescanning every row on every single insert.
+    fn refresh_stats(&mut self) {
+        let schema = self.schema.clone();
+        self.metadata.update_stats(&schema, &self.rows);
+        self.rebuild_partitions();
+    }
+
+    fn rebuild_partitions(&mut self) {
+        self.partitions.clear();
+        let mut start = 0;
+        while start < self.rows.len() {
+            let end = (start + BATCH_SIZE).min(self.rows.len());
+            let chunk = &self.rows[start..end];
+            let column_stats = self
+                .schema
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), ColumnStats::compute(field, chunk)))
+                .collect();
+            self.partitions.push(PartitionStats {
+                start,
+                end,
+                column_stats,
+            });
+            start = end;
+        }
     }
 
     /// Retrieve specific rows by their IDs (indices in the rows vector)
@@ -187,8 +258,56 @@ impl Dataset {
             }
         }
 
+        // Incremental stats maintenance: merge just this one row into the
+        // dataset-wide summary and into the current (or a fresh) last
+        // partition, instead of the O(n) `update_stats`/`rebuild_partitions`
+        // full rescans -- those would make every single-row insert cost
+        // O(n), turning a bulk load into O(n^2) overall.
+        self.metadata.row_count += 1;
+        self.metadata.updated_at = Utc::now();
+        for field in &self.schema.fields {
+            if let Some(value) = row.get(&field.name) {
+                self.metadata
+                    .column_stats
+                    .entry(field.name.clone())
+                    .or_insert_with(|| ColumnStats::empty(field.value_type.clone()))
+                    .merge_value(value);
+            }
+        }
+
+        let starts_new_partition = match self.partitions.last() {
+            Some(p) => p.end - p.start >= BATCH_SIZE,
+            None => true,
+        };
+        if starts_new_partition {
+            let mut column_stats = HashMap::new();
+            for field in &self.schema.fields {
+                let mut stats = ColumnStats::empty(field.value_type.clone());
+                if let Some(value) = row.get(&field.name) {
+                    stats.merge_value(value);
+                }
+                column_stats.insert(field.name.clone(), stats);
+            }
+            self.partitions.push(PartitionStats {
+                start: row_id,
+                end: row_id + 1,
+                column_stats,
+            });
+        } else {
+            let partition = self.partitions.last_mut().expect("checked above");
+            partition.end = row_id + 1;
+            for field in &self.schema.fields {
+                if let Some(value) = row.get(&field.name) {
+                    partition
+                        .column_stats
+                        .entry(field.name.clone())
+                        .or_insert_with(|| ColumnStats::empty(field.value_type.clone()))
+                        .merge_value(value);
+                }
+            }
+        }
+
         self.rows.push(row);
-        self.metadata.update_stats(&self.schema, &self.rows);
         Ok(())
     }
 
@@ -216,11 +335,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(), // Indices are not preserved on filter for now
             lazy_expressions: self.lazy_expressions.clone(), // Preserve lazy expressions
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&self.schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         new_dataset
     }
 
@@ -267,11 +385,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: new_lazy_expressions,
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&new_schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         Ok(new_dataset)
     }
 
@@ -286,11 +403,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: self.lazy_expressions.clone(),
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&self.schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         new_dataset
     }
 
@@ -305,11 +421,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: self.lazy_expressions.clone(),
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&self.schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         new_dataset
     }
 
@@ -334,14 +449,21 @@ impl Dataset {
             }
         });
 
-        Ok(Self {
+        let mut new_dataset = Self {
             id: self.id,
             schema: self.schema.clone(),
             rows: sorted_rows,
+            // Whole-dataset min/max/null-count are unaffected by row order,
+            // so metadata can be reused as-is -- but per-partition zone maps
+            // group rows by *position*, which sorting changes, so those
+            // must still be rebuilt.
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: self.lazy_expressions.clone(),
-        })
+            partitions: Vec::new(),
+        };
+        new_dataset.rebuild_partitions();
+        Ok(new_dataset)
     }
 
     /// Map over rows to transform them
@@ -358,11 +480,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: self.lazy_expressions.clone(),
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&self.schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         new_dataset
     }
 
@@ -414,6 +535,9 @@ impl Dataset {
                 index.add(i, val)?;
             }
         }
+        // Let the index compute any batch-derived structure (e.g. k-means
+        // clusters for a vector index) now that the full backfill is in.
+        index.build()?;
 
         self.indices.insert(column_name, index);
         Ok(())
@@ -422,6 +546,18 @@ impl Dataset {
     /// Get index for a column
     pub fn get_index(&self, column_name: &str) -> Option<&dyn Index> {
         self.indices.get(column_name).map(|b| b.as_ref())
+    }
+
+    /// Snapshot which columns are indexed and with what index type, for
+    /// persisting alongside the dataset (see `IndexDefinition`).
+    pub fn index_definitions(&self) -> Vec<crate::core::index::IndexDefinition> {
+        self.indices
+            .iter()
+            .map(|(column, index)| crate::core::index::IndexDefinition {
+                column: column.clone(),
+                index_type: index.index_type(),
+            })
+            .collect()
     }
 
     fn schema_has_field(&self, name: &str) -> bool {
@@ -473,6 +609,7 @@ impl Dataset {
         self.schema = new_schema;
         self.rows = new_rows;
         self.metadata.update_stats(&self.schema, &self.rows);
+        self.rebuild_partitions();
 
         Ok(())
     }
@@ -551,6 +688,7 @@ impl Dataset {
         // Update dataset
         self.schema = new_schema;
         self.metadata.update_stats(&self.schema, &self.rows);
+        self.rebuild_partitions();
 
         Ok(())
     }
@@ -639,6 +777,7 @@ impl Dataset {
         }
 
         self.metadata.update_stats(&self.schema, &self.rows);
+        self.rebuild_partitions();
         Ok(())
     }
 
@@ -681,11 +820,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: self.lazy_expressions.clone(),
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&self.schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         new_dataset
     }
 
@@ -715,11 +853,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: self.lazy_expressions.clone(),
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&self.schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         new_dataset
     }
 
@@ -789,11 +926,10 @@ impl Dataset {
             metadata: self.metadata.clone(),
             indices: HashMap::new(),
             lazy_expressions: new_lazy_expressions,
+            partitions: Vec::new(),
         };
 
-        new_dataset
-            .metadata
-            .update_stats(&new_schema, &new_dataset.rows);
+        new_dataset.refresh_stats();
         Ok(new_dataset)
     }
 }

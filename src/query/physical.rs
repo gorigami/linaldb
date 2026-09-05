@@ -54,6 +54,42 @@ impl PhysicalPlan for SeqScanExec {
     }
 }
 
+/// Like `SeqScanExec`, but only reads the given `row_ranges` (start..end
+/// index ranges into `Dataset.rows`) instead of every row. Produced by
+/// `Planner::try_prune_partitions` when a range predicate's column has
+/// per-partition zone-map stats (`Dataset.partitions`) that prove some
+/// partitions can't contain a match. This only narrows which rows the
+/// wrapping `FilterExec` has to evaluate -- it never decides the query's
+/// answer, so correctness never depends on the pruning being exact (unlike
+/// `IndexScanExec`, which replaces the filter outright).
+#[derive(Debug)]
+pub struct PartitionPrunedScanExec {
+    pub dataset_name: String,
+    pub schema: Arc<Schema>,
+    pub row_ranges: Vec<(usize, usize)>,
+}
+
+impl PhysicalPlan for PartitionPrunedScanExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        let dataset = db.get_dataset(&self.dataset_name)?;
+        let mut rows = Vec::new();
+        for &(start, end) in &self.row_ranges {
+            let end = end.min(dataset.rows.len());
+            if start >= end {
+                continue;
+            }
+            for row in &dataset.rows[start..end] {
+                rows.push(evaluate_lazy_columns_in_row(dataset, row)?);
+            }
+        }
+        Ok(rows)
+    }
+}
+
 /// Filter Executor
 pub struct FilterExec {
     pub input: Box<dyn PhysicalPlan>,
@@ -667,7 +703,6 @@ impl PhysicalPlan for CosineFilterExec {
             )));
         }
 
-        let k = dataset.rows.len().max(1);
         let n = self.query.len();
         let id = TensorId::new();
         let meta = TensorMetadata::new(id, None);
@@ -675,21 +710,16 @@ impl PhysicalPlan for CosineFilterExec {
             crate::core::tensor::Tensor::new(id, Shape::new(vec![n]), self.query.clone(), meta)
                 .map_err(EngineError::InvalidOp)?;
 
+        // `search_threshold` (not `search`) because this is a boolean
+        // predicate, not a top-k ranking: it must return every row that
+        // qualifies, not just however many an arbitrary `k` would keep. On a
+        // clustered `VectorIndex` this also lets whole clusters be skipped
+        // via a provable similarity bound, rather than scoring every row.
         let results = index
-            .search(&query_tensor, k)
+            .search_threshold(&query_tensor, self.threshold, self.strict)
             .map_err(EngineError::InvalidOp)?;
 
-        let row_ids: Vec<usize> = results
-            .into_iter()
-            .filter(|(_, score)| {
-                if self.strict {
-                    *score > self.threshold
-                } else {
-                    *score >= self.threshold
-                }
-            })
-            .map(|(id, _)| id)
-            .collect();
+        let row_ids: Vec<usize> = results.into_iter().map(|(id, _)| id).collect();
 
         let mut evaluated_rows = Vec::new();
         for row in dataset.get_rows_by_ids(&row_ids) {

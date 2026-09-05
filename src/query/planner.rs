@@ -3,8 +3,8 @@ use crate::engine::{EngineError, TensorDb};
 use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
     AggregateExec, CosineFilterExec, DistinctExec, FilterExec, HashJoinExec, IndexScanExec,
-    LimitExec, PhysicalPlan, ProjectionExec, SeqScanExec, SimilarityJoinExec, SortExec, UnionExec,
-    VectorSearchExec,
+    LimitExec, PartitionPrunedScanExec, PhysicalPlan, ProjectionExec, SeqScanExec,
+    SimilarityJoinExec, SortExec, UnionExec, VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -30,9 +30,9 @@ impl<'a> Planner<'a> {
                 schema: schema.clone(),
             })),
             LogicalPlan::Filter { input, predicate } => {
-                let input_plan = self.create_physical_plan(input)?;
-
-                // OPTIMIZATION: Check if we can use an Index
+                // OPTIMIZATION: Check if we can use an Index (replaces the
+                // scan+filter outright -- these executors already apply the
+                // full predicate themselves).
                 if let LogicalPlan::Scan {
                     dataset_name,
                     schema,
@@ -44,6 +44,22 @@ impl<'a> Planner<'a> {
                         return Ok(index_plan);
                     }
                 }
+
+                // OPTIMIZATION: partition pruning. Unlike the index case
+                // above, this only narrows which rows the scan below this
+                // Filter produces -- the real predicate still has to run
+                // afterward, since partition stats only prove a partition
+                // *might* contain matches, never that every row in it does.
+                let input_plan = match input.as_ref() {
+                    LogicalPlan::Scan {
+                        dataset_name,
+                        schema,
+                    } => match self.try_prune_partitions(dataset_name, schema, predicate) {
+                        Some(pruned) => pruned,
+                        None => self.create_physical_plan(input)?,
+                    },
+                    _ => self.create_physical_plan(input)?,
+                };
 
                 // Default: Filter Scan
                 // We need to convert logical Expr to a physical predicate closure
@@ -294,6 +310,143 @@ impl<'a> Planner<'a> {
         }
         None
     }
+
+    /// Recognizes `col <op> literal` (`<`, `<=`, `>`, `>=`, either operand
+    /// order) shapes and, if the dataset has more than one partition's worth
+    /// of per-column zone-map stats (`Dataset.partitions`, maintained by
+    /// `Dataset::rebuild_partitions`/`add_row`), wraps the scan in a
+    /// `PartitionPrunedScanExec` covering only the partitions whose
+    /// `[min, max]` can't be ruled out. Returns `None` (falls back to a
+    /// plain `SeqScanExec`) when there's nothing to prune, so the caller
+    /// never has to reason about whether pruning "worked" -- the wrapping
+    /// `FilterExec` still applies the real predicate either way.
+    fn try_prune_partitions(
+        &self,
+        dataset_name: &str,
+        schema: &Schema,
+        predicate: &Expr,
+    ) -> Option<Box<dyn PhysicalPlan>> {
+        let (col_name, constraints) = extract_range_constraints(predicate)?;
+
+        let dataset = self.db.get_dataset(dataset_name).ok()?;
+        if dataset.partitions.len() < 2 {
+            return None; // nothing to prune (or not worth a specialized exec)
+        }
+
+        let surviving: Vec<(usize, usize)> = dataset
+            .partitions
+            .iter()
+            .filter(|p| {
+                p.column_stats
+                    .get(&col_name)
+                    .map(|stats| match (&stats.min, &stats.max) {
+                        (Some(min), Some(max)) => constraints.iter().all(|(op, literal)| {
+                            partition_range_could_match(op, min, max, literal)
+                        }),
+                        // No non-null values seen in this partition for the
+                        // column (e.g. all null) -- can't prove it's
+                        // skippable, so keep it.
+                        _ => true,
+                    })
+                    .unwrap_or(true) // no stats for this column -- keep, can't prove skippable
+            })
+            .map(|p| (p.start, p.end))
+            .collect();
+
+        if surviving.len() == dataset.partitions.len() {
+            return None; // nothing prunable -- let the normal SeqScanExec path run
+        }
+
+        Some(Box::new(PartitionPrunedScanExec {
+            dataset_name: dataset_name.to_string(),
+            schema: Arc::new(schema.clone()),
+            row_ranges: surviving,
+        }))
+    }
+}
+
+/// Extracts a single column name plus one or more `(op, literal)` range
+/// constraints on it from a predicate shape this pruning pass understands:
+/// a plain comparison (`col <op> literal`, either operand order) or
+/// `col BETWEEN low AND high` (treated as the conjunction `col >= low AND
+/// col <= high`, both of which must hold for a partition to survive). Each
+/// `op` is always expressed relative to the column -- already flipped if
+/// the literal was on the left of a `BinaryExpr`.
+fn extract_range_constraints(
+    predicate: &Expr,
+) -> Option<(String, Vec<(String, crate::core::value::Value)>)> {
+    match predicate {
+        Expr::BinaryExpr { left, op, right } if matches!(op.as_str(), "<" | "<=" | ">" | ">=") => {
+            match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(c), Expr::Literal(v)) => {
+                    Some((c.clone(), vec![(op.clone(), v.clone())]))
+                }
+                (Expr::Literal(v), Expr::Column(c)) => Some((
+                    c.clone(),
+                    vec![(flip_comparison(op).to_string(), v.clone())],
+                )),
+                _ => None,
+            }
+        }
+        Expr::Between { expr, low, high } => {
+            let Expr::Column(c) = expr.as_ref() else {
+                return None;
+            };
+            let Expr::Literal(low_v) = low.as_ref() else {
+                return None;
+            };
+            let Expr::Literal(high_v) = high.as_ref() else {
+                return None;
+            };
+            Some((
+                c.clone(),
+                vec![
+                    (">=".to_string(), low_v.clone()),
+                    ("<=".to_string(), high_v.clone()),
+                ],
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Flips a comparison operator to restate `literal <op> col` as `col <op'>
+/// literal`.
+fn flip_comparison(op: &str) -> &str {
+    match op {
+        "<" => ">",
+        "<=" => ">=",
+        ">" => "<",
+        ">=" => "<=",
+        other => other,
+    }
+}
+
+/// Could any value in a partition's `[min, max]` column range possibly
+/// satisfy `col <op> literal`? Conservative: an incomparable pair (`None`
+/// from `Value::compare`, e.g. mismatched types) is treated as "could
+/// match" so this only ever prunes when it can prove a partition can't
+/// contain a match.
+fn partition_range_could_match(
+    op: &str,
+    min: &crate::core::value::Value,
+    max: &crate::core::value::Value,
+    literal: &crate::core::value::Value,
+) -> bool {
+    use std::cmp::Ordering;
+    match op {
+        "<" => !matches!(
+            min.compare(literal),
+            Some(Ordering::Greater) | Some(Ordering::Equal)
+        ),
+        "<=" => min.compare(literal) != Some(Ordering::Greater),
+        ">" => !matches!(
+            max.compare(literal),
+            Some(Ordering::Less) | Some(Ordering::Equal)
+        ),
+        ">=" => max.compare(literal) != Some(Ordering::Less),
+        _ => true,
+    }
 }
 
 /// Public entry point for evaluating a logical predicate against a row.
@@ -419,5 +572,185 @@ fn eval_value(expr: &Expr, row: &crate::core::tuple::Tuple) -> Option<crate::cor
         | Expr::VecLiteral(_)
         | Expr::VectorFn { .. } => Some(evaluate_expression(expr, row)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod partition_pruning_tests {
+    use super::*;
+    use crate::core::tuple::{Field, Tuple};
+    use crate::core::value::{Value, ValueType};
+    use crate::engine::TensorDb;
+
+    fn int(v: i64) -> Value {
+        Value::Int(v)
+    }
+
+    #[test]
+    fn range_could_match_is_correct_at_boundaries() {
+        use std::cmp::Ordering;
+        // min=10, max=20
+        let (min, max) = (int(10), int(20));
+
+        // "<" possible iff min < literal
+        assert!(partition_range_could_match("<", &min, &max, &int(11))); // min(10) < 11
+        assert!(!partition_range_could_match("<", &min, &max, &int(10))); // min(10) !< 10
+
+        // "<=" possible iff min <= literal
+        assert!(partition_range_could_match("<=", &min, &max, &int(10)));
+        assert!(!partition_range_could_match("<=", &min, &max, &int(9)));
+
+        // ">" possible iff max > literal
+        assert!(partition_range_could_match(">", &min, &max, &int(19))); // max(20) > 19
+        assert!(!partition_range_could_match(">", &min, &max, &int(20))); // max(20) !> 20
+
+        // ">=" possible iff max >= literal
+        assert!(partition_range_could_match(">=", &min, &max, &int(20)));
+        assert!(!partition_range_could_match(">=", &min, &max, &int(21)));
+
+        // Incomparable values (mismatched types) must never be used to prune.
+        let mismatched = Value::String("x".to_string());
+        assert_eq!(min.compare(&mismatched), None);
+        assert!(partition_range_could_match("<", &min, &max, &mismatched));
+        assert!(partition_range_could_match(">", &min, &max, &mismatched));
+
+        let _ = Ordering::Less; // silence unused import if the above shrinks later
+    }
+
+    #[test]
+    fn flip_comparison_swaps_direction() {
+        assert_eq!(flip_comparison("<"), ">");
+        assert_eq!(flip_comparison("<="), ">=");
+        assert_eq!(flip_comparison(">"), "<");
+        assert_eq!(flip_comparison(">="), "<=");
+    }
+
+    #[test]
+    fn extract_range_constraints_handles_both_operand_orders_and_between() {
+        let col_lit = Expr::BinaryExpr {
+            left: Box::new(Expr::Column("age".to_string())),
+            op: ">".to_string(),
+            right: Box::new(Expr::Literal(int(30))),
+        };
+        let (col, constraints) = extract_range_constraints(&col_lit).unwrap();
+        assert_eq!(col, "age");
+        assert_eq!(constraints, vec![(">".to_string(), int(30))]);
+
+        // Literal on the left: `30 < age` means `age > 30`.
+        let lit_col = Expr::BinaryExpr {
+            left: Box::new(Expr::Literal(int(30))),
+            op: "<".to_string(),
+            right: Box::new(Expr::Column("age".to_string())),
+        };
+        let (col, constraints) = extract_range_constraints(&lit_col).unwrap();
+        assert_eq!(col, "age");
+        assert_eq!(constraints, vec![(">".to_string(), int(30))]);
+
+        let between = Expr::Between {
+            expr: Box::new(Expr::Column("age".to_string())),
+            low: Box::new(Expr::Literal(int(10))),
+            high: Box::new(Expr::Literal(int(20))),
+        };
+        let (col, constraints) = extract_range_constraints(&between).unwrap();
+        assert_eq!(col, "age");
+        assert_eq!(
+            constraints,
+            vec![(">=".to_string(), int(10)), ("<=".to_string(), int(20))]
+        );
+
+        // Equality isn't a range predicate this pass handles.
+        let eq = Expr::BinaryExpr {
+            left: Box::new(Expr::Column("age".to_string())),
+            op: "=".to_string(),
+            right: Box::new(Expr::Literal(int(30))),
+        };
+        assert!(extract_range_constraints(&eq).is_none());
+    }
+
+    /// Builds a dataset with `row_count` rows (`id` ascending from 0),
+    /// spanning several `BATCH_SIZE`-sized partitions, for pruning tests.
+    fn dataset_with_ascending_ids(db: &mut TensorDb, name: &str, row_count: i64) {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", ValueType::Int)]));
+        db.create_dataset(name.to_string(), schema.clone()).unwrap();
+        for i in 0..row_count {
+            db.insert_row(name, Tuple::new(schema.clone(), vec![int(i)]).unwrap())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn try_prune_partitions_skips_partitions_that_cannot_match() {
+        let mut db = TensorDb::new();
+        // 2500 rows -> partitions [0,1024), [1024,2048), [2048,2500) (BATCH_SIZE=1024).
+        dataset_with_ascending_ids(&mut db, "t", 2500);
+        assert_eq!(db.get_dataset("t").unwrap().partitions.len(), 3);
+
+        let planner = Planner::new(&db);
+        let schema = (*db.get_dataset("t").unwrap().schema).clone();
+
+        // Only the last partition (max=2499) can contain id > 2400; the
+        // first two (max 1023 and 2047) are provably out of range.
+        let predicate = Expr::BinaryExpr {
+            left: Box::new(Expr::Column("id".to_string())),
+            op: ">".to_string(),
+            right: Box::new(Expr::Literal(int(2400))),
+        };
+        let plan = planner
+            .try_prune_partitions("t", &schema, &predicate)
+            .expect("expected pruning to activate");
+
+        let rows = plan.execute(&db).unwrap();
+        // The pruned scan itself returns every row in the surviving
+        // partition(s) (2048..2500 = 452 rows) -- it narrows candidates,
+        // it doesn't apply the predicate. If pruning hadn't fired, this
+        // would be 2500 (every row in the dataset).
+        assert_eq!(rows.len(), 452);
+    }
+
+    #[test]
+    fn try_prune_partitions_returns_none_when_every_partition_could_match() {
+        let mut db = TensorDb::new();
+        dataset_with_ascending_ids(&mut db, "t", 2500);
+
+        let planner = Planner::new(&db);
+        let schema = (*db.get_dataset("t").unwrap().schema).clone();
+
+        // Every partition's range [0,1023]/[1024,2047]/[2048,2499] satisfies
+        // id > -1, so nothing is prunable.
+        let predicate = Expr::BinaryExpr {
+            left: Box::new(Expr::Column("id".to_string())),
+            op: ">".to_string(),
+            right: Box::new(Expr::Literal(int(-1))),
+        };
+        assert!(planner
+            .try_prune_partitions("t", &schema, &predicate)
+            .is_none());
+    }
+
+    #[test]
+    fn end_to_end_query_result_is_exact_regardless_of_pruning() {
+        let mut db = TensorDb::new();
+        dataset_with_ascending_ids(&mut db, "t", 2500);
+
+        let logical = LogicalPlan::Filter {
+            input: Box::new(LogicalPlan::Scan {
+                dataset_name: "t".to_string(),
+                schema: db.get_dataset("t").unwrap().schema.clone(),
+            }),
+            predicate: Expr::BinaryExpr {
+                left: Box::new(Expr::Column("id".to_string())),
+                op: ">".to_string(),
+                right: Box::new(Expr::Literal(int(2400))),
+            },
+        };
+
+        let planner = Planner::new(&db);
+        let plan = planner.create_physical_plan(&logical).unwrap();
+        let rows = plan.execute(&db).unwrap();
+
+        // ids 2401..=2499 -> 99 rows. This must hold whether or not
+        // partition pruning fired: pruning only narrows what the wrapping
+        // FilterExec has to look at, it never changes the answer.
+        assert_eq!(rows.len(), 99);
     }
 }

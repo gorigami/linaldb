@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — indices were silently lost across `SAVE DATASET`/`LOAD DATASET`
+
+Found auditing the engine's index/partition/clustering behavior at medium-to-large dataset
+sizes. `Dataset.indices` (`HashMap<String, Box<dyn Index>>`) is `#[serde(skip)]` — a `Box<dyn
+Index>`'s row-id contents are only meaningful paired with the exact rows it was built from, so
+it was never a candidate for direct serialization — but nothing filled the gap: `LOAD DATASET`
+never recreated indices at all. A `CREATE INDEX`/`CREATE VECTOR INDEX` would work correctly for
+the rest of the process, then vanish with no warning the moment the dataset was reloaded (from a
+fresh process, or after `LOAD DATASET` in the same one).
+
+Fixed by persisting *definitions*, not contents: a new `IndexDefinition { column, index_type }`
+(`src/core/index/mod.rs`) is written to `indexes.json` alongside a dataset's other package files
+on `SAVE DATASET`, and `LOAD DATASET` replays `CREATE INDEX`/`CREATE VECTOR INDEX` for each
+persisted definition after the rows are back in place — which backfills (and, for a vector
+index, re-clusters — see below) from that data, so the index never needs to be serialized
+directly. Restoration is best-effort (a column that no longer exists or matches is skipped, not
+a load failure), and `LOAD DATASET`'s output message now reports which indices were restored.
+
+Added `test_index_definitions_survive_save_and_load` (`tests/dataset_index_feature_test.rs`) —
+saves a dataset with both a hash and a vector index, reloads it into a *fresh* `TensorDb`
+(simulating a process restart), and confirms both indices exist and the hash index returns
+correct row ids for the reloaded data (not stale ids from before the reload).
+
+### Added — IVF clustering for vector indices, and a real `WHERE COSINE_SIM(...) > t` scan bug fix
+
+`VectorIndex` (`src/core/index/vector.rs`) was an explicit MVP brute-force linear scan (its own
+doc comment said "HNSW later" — never followed up). Worse, the "index-accelerated" threshold
+path wasn't actually accelerated: `CosineFilterExec` (`src/query/physical.rs`) asked the index to
+rank **every row** (`k = dataset.rows.len()`) before filtering by threshold, so `WHERE
+COSINE_SIM(col, v) > t` cost the same O(n) scan with or without a vector index.
+
+`VectorIndex` now runs a small k-means pass (spherical: cosine-similarity-based assignment and
+centroid quality) once a column has ~64+ vectors, grouping them into `~sqrt(n)` IVF-style
+clusters — transparent, no new DSL syntax. Two new `Index` trait methods support this without
+touching `HashIndex` at all (both have safe no-op/fallback defaults): `build(&mut self)`, called
+once after a batch of `add()`s (full backfill on `CREATE INDEX`, or rebuild on `LOAD DATASET`) to
+compute the clustering; and `search_threshold(query, threshold, strict)`, which answers a
+boolean predicate exactly (unlike `search`'s approximate top-k) by using each cluster's
+precomputed angular radius to derive a *provable* upper bound (via the spherical triangle
+inequality) on any member's similarity to the query — a cluster is scanned only if that bound
+says it could pass, never skipped speculatively, so this never drops a qualifying row. Vectors
+added after the last `build()` sit in an unclustered tail both search paths always scan in full,
+so correctness never depends on `build()` having run recently. `CosineFilterExec` now calls
+`search_threshold` instead of ranking everything.
+
+Added 5 unit tests in `core::index::vector` (clustering actually engages past the size
+threshold and not below it, `search_threshold` returns the exact true-cluster membership on
+300 well-separated synthetic vectors, `search`'s top-k correctly finds the right cluster, and
+vectors added after `build()` are still found via the unclustered tail) plus an end-to-end DSL
+test (`tests/dataset_index_feature_test.rs`) running a real `WHERE COSINE_SIM(...) > 0.99` query
+against a 240-row clustered index and confirming the exact expected row count.
+
+### Added — automatic zone-map partition pruning for range predicates
+
+`DatasetMetadata::update_stats` already computed per-column min/max/null-count on **every**
+`add_row` call (rescanning the *entire* dataset each time — O(n) per insert, making a bulk load
+O(n²) overall) — and nothing in `query/planner.rs`/`query/physical.rs` ever read the result. Pure
+waste.
+
+`Dataset` now also maintains `partitions: Vec<PartitionStats>` — the same min/max/null-count
+stats, but per contiguous `BATCH_SIZE` (1024)-row chunk (the same chunking `filter_batched`/
+`map_batched`/`select_batched` already used) instead of once for the whole dataset.  `add_row`
+merges just the new row into the current (or a fresh) last partition and into the dataset-wide
+summary — O(#columns), not O(n) — fixing the quadratic bulk-insert cost as a side effect of
+making the stats useful. The planner's new `try_prune_partitions` recognizes `col <op> literal`
+(`<`/`<=`/`>`/`>=`, either operand order) and `col BETWEEN low AND high` and wraps the scan in a
+`PartitionPrunedScanExec` that skips whole partitions whose range provably can't satisfy the
+predicate — needs no index at all, and only engages once a dataset has grown past one partition.
+This is strictly a scan optimization: unlike index selection, it never replaces the real
+`FilterExec` that still runs afterward, so correctness never depends on the pruning being exact.
+
+Added 6 tests in `query::planner` (the range/`BETWEEN` boundary logic in isolation, and a
+2,500-row end-to-end case proving pruning actually fires — 452 rows scanned via the pruned plan
+instead of 2,500 — while the final filtered query result stays exactly correct at 99 rows either
+way).
+
+Full suite: 619/619 passing (607 baseline + 12 new tests across the three fixes above), no
+regressions.
+
 ---
 
 ## [0.1.74] - 2026-07-23

@@ -93,6 +93,18 @@ fn save_dataset_core(
             msg: format!("Failed to save dataset: {}", e),
         })?;
 
+    // Indices (`CREATE INDEX`/`CREATE VECTOR INDEX`) live only on the
+    // in-memory `Dataset` (`indices` is `#[serde(skip)]`) since their
+    // row-id contents only make sense paired with the exact row vector they
+    // were built from. Persist just the (column, type) definitions here;
+    // LOAD DATASET rebuilds each index from the freshly loaded rows.
+    storage
+        .save_index_definitions(&disk_name, &dataset.index_definitions())
+        .map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to save index definitions: {}", e),
+        })?;
+
     let mut metadata = if storage.metadata_exists(&disk_name) {
         let mut meta = storage
             .load_dataset_metadata(&disk_name)
@@ -255,9 +267,38 @@ fn load_dataset_core(
             })?;
     }
 
+    // Rebuild any indices that were present when this dataset was last
+    // SAVEd. `db.create_index`/`create_vector_index` backfill from the rows
+    // just inserted above, so this reconstructs the same index contents
+    // without ever having to serialize `Box<dyn Index>` itself. Best-effort:
+    // a column that no longer exists or no longer matches the indexed type
+    // (e.g. the schema changed on disk) is skipped rather than failing the
+    // whole load.
+    let index_defs = storage
+        .load_index_definitions(&disk_name)
+        .unwrap_or_default();
+    let mut restored_indexes = Vec::new();
+    for def in &index_defs {
+        let result = match def.index_type {
+            crate::core::index::IndexType::Hash => db.create_index(dataset_name, &def.column),
+            crate::core::index::IndexType::Vector => {
+                db.create_vector_index(dataset_name, &def.column)
+            }
+        };
+        if result.is_ok() {
+            restored_indexes.push(def.column.clone());
+        }
+    }
+
+    let index_note = if restored_indexes.is_empty() {
+        String::new()
+    } else {
+        format!(", indices restored on: {}", restored_indexes.join(", "))
+    };
+
     Ok(DslOutput::Message(format!(
-        "Loaded dataset '{}' from '{}' ({} rows)",
-        dataset_name, storage_path, row_count
+        "Loaded dataset '{}' from '{}' ({} rows{})",
+        dataset_name, storage_path, row_count, index_note
     )))
 }
 

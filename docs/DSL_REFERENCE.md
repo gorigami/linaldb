@@ -294,6 +294,8 @@ SELECT * FROM items LIMIT 10 OFFSET 20
 - `<expr> BETWEEN <low> AND <high>`: inclusive range check, equivalent to `<expr> >= <low> AND <expr> <= <high>`.
 - `<expr> IS NULL` / `<expr> IS NOT NULL`: null checks.
 
+**Automatic partition pruning**: a `WHERE`/`FILTER` predicate of the form `col <op> literal` (`<`, `<=`, `>`, `>=`, either operand order) or `col BETWEEN low AND high`, against a column with no index at all, is still optimized automatically once the dataset is large enough to span more than one internal 1024-row partition. Each partition tracks its own column min/max; a partition whose range can't satisfy the predicate is skipped without reading its rows. This needs no `CREATE INDEX` and no special syntax — it's purely a scan optimization, so the query's result is identical with or without it. Datasets under ~1024 rows never engage it (nothing to prune yet).
+
 ### Subqueries in FROM
 
 A `SELECT`'s `FROM` clause can be another `SELECT`, wrapped in parentheses
@@ -574,6 +576,8 @@ CREATE VECTOR INDEX ON docs(embedding)
 - `CREATE INDEX [<name>] ON <dataset>(<column>)`: Build a standard lookup index on a scalar column.
 - `CREATE VECTOR INDEX [<name>] ON <dataset>(<column>)`: Build an index-accelerated structure over a `Vector` column, enabling `SEARCH` and index-aware `COSINE_SIM` filtering in `WHERE` clauses.
 - List existing indexes with `SHOW INDEXES [<dataset>]` (§9).
+- **Persistence**: `SAVE DATASET` writes which columns are indexed (and with what index type) alongside the data; `LOAD DATASET` rebuilds each one from the reloaded rows automatically. Before this, a `CREATE INDEX` only lived for the current process — reloading a saved dataset silently lost every index with no warning. `LOAD DATASET`'s output message now reports which indexes were restored (e.g. `"... indices restored on: category, embedding"`).
+- **Vector index clustering**: `CREATE VECTOR INDEX` automatically clusters the column's vectors (IVF-style, k-means with a cosine-similarity metric) once the column has at least ~64 rows — no extra syntax, this is transparent. Below that size, or before enough rows exist, it falls back to the original brute-force scan. `SEARCH`/`SELECT ... ORDER BY COSINE_SIM(...)` (approximate top-k) only probe the nearest few clusters; `WHERE COSINE_SIM(...) > threshold` (an exact predicate, not a ranking) instead uses a provable per-cluster similarity bound to skip clusters that provably can't contain a match, so it never drops a qualifying row.
 
 ### SEARCH (Vector Similarity)
 
