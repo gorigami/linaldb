@@ -91,8 +91,14 @@ fn test_index_definitions_survive_save_and_load() {
     let has_vec_idx = indices
         .iter()
         .any(|(ds, col, type_)| ds == "items" && col == "embedding" && type_ == "VECTOR");
-    assert!(has_cat_idx, "Hash index was not restored after LOAD DATASET");
-    assert!(has_vec_idx, "Vector index was not restored after LOAD DATASET");
+    assert!(
+        has_cat_idx,
+        "Hash index was not restored after LOAD DATASET"
+    );
+    assert!(
+        has_vec_idx,
+        "Vector index was not restored after LOAD DATASET"
+    );
 
     // The restored hash index must actually work, not just exist: it should
     // reflect the reloaded rows' row ids, not stale ones from the old
@@ -132,7 +138,10 @@ fn cosine_threshold_query_is_exact_on_a_clustered_vector_index() {
             script.push_str(&format!(
                 "INSERT INTO big_vecs VALUES ({}, [{}])\n",
                 row_id,
-                v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
+                v.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }

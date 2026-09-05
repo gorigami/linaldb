@@ -381,9 +381,10 @@ fn extract_range_constraints(
                 (Expr::Column(c), Expr::Literal(v)) => {
                     Some((c.clone(), vec![(op.clone(), v.clone())]))
                 }
-                (Expr::Literal(v), Expr::Column(c)) => {
-                    Some((c.clone(), vec![(flip_comparison(op).to_string(), v.clone())]))
-                }
+                (Expr::Literal(v), Expr::Column(c)) => Some((
+                    c.clone(),
+                    vec![(flip_comparison(op).to_string(), v.clone())],
+                )),
                 _ => None,
             }
         }
@@ -434,9 +435,15 @@ fn partition_range_could_match(
 ) -> bool {
     use std::cmp::Ordering;
     match op {
-        "<" => !matches!(min.compare(literal), Some(Ordering::Greater) | Some(Ordering::Equal)),
+        "<" => !matches!(
+            min.compare(literal),
+            Some(Ordering::Greater) | Some(Ordering::Equal)
+        ),
         "<=" => min.compare(literal) != Some(Ordering::Greater),
-        ">" => !matches!(max.compare(literal), Some(Ordering::Less) | Some(Ordering::Equal)),
+        ">" => !matches!(
+            max.compare(literal),
+            Some(Ordering::Less) | Some(Ordering::Equal)
+        ),
         ">=" => max.compare(literal) != Some(Ordering::Less),
         _ => true,
     }

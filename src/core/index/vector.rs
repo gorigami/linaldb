@@ -135,7 +135,10 @@ impl VectorIndex {
                 if counts[c_idx] == 0 {
                     continue; // keep previous centroid if the cluster went empty
                 }
-                let mean: Vec<f32> = sums[c_idx].iter().map(|s| s / counts[c_idx] as f32).collect();
+                let mean: Vec<f32> = sums[c_idx]
+                    .iter()
+                    .map(|s| s / counts[c_idx] as f32)
+                    .collect();
                 let id = crate::core::tensor::TensorId::new();
                 let meta = crate::core::tensor::TensorMetadata::new(id, None);
                 centroids[c_idx] =
@@ -217,7 +220,8 @@ impl Index for VectorIndex {
     fn search(&self, query: &Tensor, k: usize) -> Result<Vec<(usize, f32)>, String> {
         // Unclustered tail is always a candidate: it holds every vector
         // added since the last build(), which we have no cluster info for.
-        let mut candidate_indices: Vec<usize> = (self.clustered_count..self.vectors.len()).collect();
+        let mut candidate_indices: Vec<usize> =
+            (self.clustered_count..self.vectors.len()).collect();
 
         if self.clusters.is_empty() {
             candidate_indices = (0..self.vectors.len()).collect();
@@ -260,10 +264,17 @@ impl Index for VectorIndex {
         threshold: f32,
         strict: bool,
     ) -> Result<Vec<(usize, f32)>, String> {
-        let passes = |s: f32| if strict { s > threshold } else { s >= threshold };
+        let passes = |s: f32| {
+            if strict {
+                s > threshold
+            } else {
+                s >= threshold
+            }
+        };
 
         // Unclustered tail: no bound available, always scan.
-        let mut candidate_indices: Vec<usize> = (self.clustered_count..self.vectors.len()).collect();
+        let mut candidate_indices: Vec<usize> =
+            (self.clustered_count..self.vectors.len()).collect();
 
         if self.clusters.is_empty() {
             candidate_indices = (0..self.vectors.len()).collect();
@@ -419,7 +430,11 @@ mod tests {
                 "top-10 nearest neighbors of axis=3's centroid should all belong to its cluster, got row_id {}",
                 row_id
             );
-            assert!(*score > 0.99, "expected near-exact match, got score {}", score);
+            assert!(
+                *score > 0.99,
+                "expected near-exact match, got score {}",
+                score
+            );
         }
     }
 
@@ -433,7 +448,10 @@ mod tests {
         // seen by any of the 5 true clusters above (which only used axes
         // 0..5).
         let tail_axis = DIM - 1;
-        assert_eq!(tail_axis, NUM_TRUE_CLUSTERS, "tail axis must not overlap a true cluster axis");
+        assert_eq!(
+            tail_axis, NUM_TRUE_CLUSTERS,
+            "tail axis must not overlap a true cluster axis"
+        );
         let tail_start = NUM_TRUE_CLUSTERS * PER_CLUSTER;
         for j in 0..10 {
             index.add(tail_start + j, &point(tail_axis, j)).unwrap();
