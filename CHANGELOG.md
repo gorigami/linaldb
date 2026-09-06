@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.76] - 2026-09-06
+
+### Added — terminal UX polish for the REPL/CLI
+
+First-run friction was real: bare expressions, CLI verbs typed inside the REPL (`serve --port
+8080`, `linal --help`), and a plain `help` all produced the same generic "expected a statement
+keyword" parse error with no guidance, tables were hand-rolled comma-in-parens text, and a byte
+offset the parser already computed was discarded before it ever reached the terminal.
+
+- New `.help`/`HELP` meta-command plus a CLI-verb detector that redirects shell-command-shaped
+  input to a friendly hint instead of a raw parse error.
+- Real table rendering via `comfy-table` (aligned columns, colored header row) replacing the old
+  comma-in-parens row body; summary lines kept byte-for-byte identical for existing test
+  compatibility.
+- A caret (`^`) under the offending byte offset for parse errors, in both the REPL and `linal
+  run` — recovered from the existing `"(at byte N)"` text in the error message rather than
+  threading a new field through `DslError::Parse`, which is constructed as a general-purpose
+  error variant at ~50 call sites across the executor/persistence code, not just real syntax
+  errors.
+- A custom rustyline `Helper` (`src/repl_ui.rs`): leading-keyword and string-literal highlighting
+  while typing, Tab-completion of statement keywords and the active database's live dataset
+  names, history-based hints and matching-bracket validation (both delegated to rustyline's own
+  built-ins).
+- An `indicatif` spinner around statement execution (REPL and `run <file>`), for real feedback on
+  slow operations like large HDF5 imports.
+- A richer `linal --help` banner (`long_about` + worked examples).
+
+No DSL/engine-behavior change — pure CLI/REPL UX. 8 new unit tests for the pure logic (CLI-verb
+detection, byte-offset extraction, highlighting, completion); full existing suite unaffected.
+
 ## [0.1.75] - 2026-09-05
 
 ### Added — self-contained cross-platform release binaries
