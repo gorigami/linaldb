@@ -95,6 +95,7 @@ pub enum ScalarFnKind {
 pub enum CastTarget {
     Int,
     Float,
+    Double,
     Text,
     Bool,
     Vector(usize),
@@ -275,6 +276,9 @@ impl LogicalPlan {
                                 typ = match infer_expr_type_full(inner.as_ref(), &input_schema) {
                                     t @ (crate::core::value::ValueType::Vector(_)
                                     | crate::core::value::ValueType::Matrix(_, _)) => t,
+                                    crate::core::value::ValueType::Float64 => {
+                                        crate::core::value::ValueType::Float64
+                                    }
                                     _ => crate::core::value::ValueType::Float,
                                 };
                             }
@@ -325,6 +329,9 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                 (_, ValueType::Matrix(r, c)) => ValueType::Matrix(r, c),
                 (ValueType::Vector(d), _) => ValueType::Vector(d),
                 (_, ValueType::Vector(d)) => ValueType::Vector(d),
+                // Float64 always wins the promotion, even against a plain
+                // Float, mirroring the runtime arithmetic rule.
+                (ValueType::Float64, _) | (_, ValueType::Float64) => ValueType::Float64,
                 (ValueType::Float, _) | (_, ValueType::Float) => ValueType::Float,
                 (ValueType::Int, ValueType::Int) => ValueType::Int,
                 _ => ValueType::Int,
@@ -342,6 +349,7 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
         } => match func {
             AggregateFunction::Avg => match infer_expr_type_full(inner, schema) {
                 t @ (ValueType::Vector(_) | ValueType::Matrix(_, _)) => t,
+                ValueType::Float64 => ValueType::Float64,
                 _ => ValueType::Float,
             },
             AggregateFunction::Count => ValueType::Int,
@@ -396,6 +404,7 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
         Expr::Cast { to, .. } => match to {
             CastTarget::Int => ValueType::Int,
             CastTarget::Float => ValueType::Float,
+            CastTarget::Double => ValueType::Float64,
             CastTarget::Text | CastTarget::Bool => ValueType::String,
             CastTarget::Vector(n) => ValueType::Vector(*n),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),

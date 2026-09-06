@@ -207,6 +207,7 @@ pub fn execute_statement(
                 let vtype = col_type_to_value_type(&col_def.col_type);
                 let default_value = match col_def.default_val {
                     Some(FilterValue::Int(n)) => Value::Int(n),
+                    Some(FilterValue::Float(f)) if vtype == ValueType::Float64 => Value::Float64(f),
                     Some(FilterValue::Float(f)) => Value::Float(f as f32),
                     Some(FilterValue::Str(s)) => Value::String(s),
                     Some(FilterValue::Bool(b)) => Value::Bool(b),
@@ -214,6 +215,7 @@ pub fn execute_statement(
                     None => match &vtype {
                         ValueType::Int => Value::Int(0),
                         ValueType::Float => Value::Float(0.0),
+                        ValueType::Float64 => Value::Float64(0.0),
                         ValueType::String => Value::String(String::new()),
                         ValueType::Bool => Value::Bool(false),
                         ValueType::Vector(dim) => Value::Vector(vec![0.0; *dim]),
@@ -262,6 +264,7 @@ pub fn execute_statement(
                         .map(|f| match col_map.get(f.name.as_str()) {
                             Some(InsertValue::Scalar(n)) => match f.value_type {
                                 ValueType::Int => Value::Int(*n as i64),
+                                ValueType::Float64 => Value::Float64(*n),
                                 _ => Value::Float(*n as f32),
                             },
                             Some(InsertValue::Text(t)) => Value::String(t.clone()),
@@ -286,6 +289,7 @@ pub fn execute_statement(
                     .map(|(v, f)| match v {
                         InsertValue::Scalar(n) => match f.value_type {
                             ValueType::Int => Value::Int(n as i64),
+                            ValueType::Float64 => Value::Float64(n),
                             _ => Value::Float(n as f32),
                         },
                         InsertValue::Text(t) => Value::String(t),
@@ -578,6 +582,7 @@ pub(super) fn col_type_to_value_type(ct: &ColType) -> ValueType {
     match ct {
         ColType::Int => ValueType::Int,
         ColType::Float => ValueType::Float,
+        ColType::Double => ValueType::Float64,
         ColType::String => ValueType::String,
         ColType::Bool => ValueType::Bool,
         ColType::Vector(n) => ValueType::Vector(*n),

@@ -463,7 +463,8 @@ impl Parser {
                                 let type_name = self.eat_ident()?;
                                 match type_name.to_uppercase().as_str() {
                                     "INT" | "INTEGER" => CastTarget::Int,
-                                    "FLOAT" | "DOUBLE" => CastTarget::Float,
+                                    "FLOAT" | "FLOAT32" => CastTarget::Float,
+                                    "DOUBLE" | "FLOAT64" => CastTarget::Double,
                                     "TEXT" | "STRING" | "VARCHAR" => CastTarget::Text,
                                     "BOOL" | "BOOLEAN" => CastTarget::Bool,
                                     other => {

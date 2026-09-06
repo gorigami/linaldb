@@ -13,7 +13,8 @@ LINAL supports both standard relational types and multi-dimensional numeric stru
 ### Relational Types
 
 - `Int`: 64-bit signed integer.
-- `Float`: 32-bit floating point (standard for tensor values).
+- `Float` (aliases: `FLOAT32`): 32-bit floating point (standard for tensor values — `Vector`/`Matrix`/`Tensor` elements are always this precision).
+- `Double` (aliases: `FLOAT64`): 64-bit floating point. Use this for real-world large-magnitude scalar values (GPS/Unix timestamps, etc.) that exceed `Float`'s ~7 significant digits — a plain `Float` column silently rounds these. Arithmetic mixing a `Double` with a `Float`/`Int` always promotes the result to `Double`. Not available for `Vector`/`Matrix`/`Tensor` elements, which remain `Float`-only.
 - `String`: UTF-8 character sequence.
 - `Bool`: `true` or `false`.
 - `Null`: Represents a missing value. Use the `?` suffix in `DATASET` definitions for nullable columns (e.g., `score: Float?`).
@@ -431,7 +432,7 @@ SELECT id, FLATTEN(grid) AS flattened FROM t   -- equivalent, no shape needed
 
 - `CASE [operand] WHEN <cond> THEN <expr> [WHEN ... THEN ...] [ELSE <expr>] END` — with an operand, each `WHEN` value is compared for equality against it; without one, each `WHEN` is a standalone boolean condition.
 - `COALESCE(a, b, ...)` returns the first non-`NULL` argument (2+ args). `NULLIF(a, b)` (alias `IFNULL`) returns `NULL` if `a = b`, else `a`.
-- `CAST(expr AS <type>)` — scalar target types: `INT`/`INTEGER`, `FLOAT`/`DOUBLE`, `TEXT`/`STRING`/`VARCHAR`, `BOOL`/`BOOLEAN`.
+- `CAST(expr AS <type>)` — scalar target types: `INT`/`INTEGER`, `FLOAT`/`FLOAT32` (32-bit), `DOUBLE`/`FLOAT64` (64-bit, full precision), `TEXT`/`STRING`/`VARCHAR`, `BOOL`/`BOOLEAN`.
 - `CAST(expr AS VECTOR(n))` / `CAST(expr AS MATRIX(r, c))` — reshape/flatten a `Vector`/`Matrix` value to the given shape, row-major. The source and target must have the same total element count (`r * c == n` when converting between the two, or an exact length/shape match for same-kind casts); a mismatch returns `NULL` rather than resizing or erroring, consistent with other invalid `CAST` combinations. This is the way to reshape *to an arbitrary shape* inside a query — the standalone `RESHAPE` keyword (§3) only operates on tensor variables outside of `SELECT` (`RESHAPE(...)` inside a query does not parse).
 - `FLATTEN(expr)` also works inside `SELECT` (in addition to its standalone tensor-DSL form, §3) — flattens a `Matrix` row-major into a `Vector`, or is a no-op on an already-flat `Vector`. Equivalent to `CAST(expr AS VECTOR(total_element_count))` but without needing to know the count up front.
 

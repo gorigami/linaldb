@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — real 64-bit float support (`DOUBLE`/`FLOAT64`)
+
+Resolves the gap flagged (not fixed) at the end of the v0.1.60/v0.1.61 GW showcase round below:
+`Float` was `f32`-only everywhere, and `DOUBLE`/`FLOAT64` were accepted `CAST`/column-type
+keywords that silently aliased to the same `f32` storage — real-world large-magnitude values
+(GPS/Unix timestamps, etc.) lost precision, e.g. a real GPS time like `1126259462.4` displayed
+as `1126259500`.
+
+Added a genuine `Value::Float64(f64)` variant (and `ValueType::Float64`) alongside the existing
+`Value::Float(f32)` — a DSL user now explicitly chooses precision per column/cast: `FLOAT`/
+`FLOAT32` still mean `f32` (unchanged), `DOUBLE`/`FLOAT64` now mean real `f64` (previously silent
+f32 aliasing — a deliberate, documented behavior change). `Tensor`/`Vector`/`Matrix` stay
+`f32`-only by design; this is a scalar-only addition. Mixed-precision arithmetic
+(`Float op Float64`, `Int op Float64`) always promotes to `Float64`, never silently narrowing.
+Arrow/Parquet gained a real `Float64` write/read path (`src/core/storage.rs`) alongside the
+existing `Float32` one. CSV ingestion auto-infers `DOUBLE` for real double-precision columns via
+Arrow's own schema inference (the direct fix for the GPS-time case); HDF5/NumPy/Zarr connectors
+now detect and preserve genuinely double-precision source arrays instead of always narrowing to
+f32 (HDF5 needed an on-disk-dtype check up front rather than relying on a read error, since its
+C library does implicit numeric conversion and a narrowing `f32` read on real double data usually
+*succeeds* rather than erroring; NumPy previously had no f64 fallback at all, so a real f64
+`.npy`/`.npz` file hard-failed ingestion entirely — a bonus correctness fix here).
+
+Two real, previously-invisible bugs found and fixed while building this (both wildcard-masked —
+neither tripped a compile error from the new enum variant):
+- `Field::is_compatible` (`src/core/tuple.rs`) had no `(Float64, Float64)` arm, so a genuinely
+  matching `DOUBLE` column failed schema validation with a confusing "expected DOUBLE, got
+  DOUBLE" error.
+- A computed `SELECT` column decided its declared schema type **per row**, falling back to a
+  naive static guess only when that row's value was `NULL` (`apply_window_and_computed_exprs` in
+  `src/dsl/executor/query.rs`) — a column that's `NULL` for some rows (e.g. the first row of a
+  `LAG`-based computation) and a real value for others could get *different declared types across
+  rows of the same logical column*, later failing `Dataset::with_rows`'s structural schema-equality
+  check outright. Fixed by evaluating the whole column first and deciding one consistent type from
+  its first non-null value, mirroring the pattern the window-function path already used.
+
+`examples/gw_transient_analysis.lnl`'s `gps_time` arithmetic (§1) no longer needs precomputing in
+Rust f64 outside the DSL — it now computes at full `DOUBLE` precision directly. New tests in
+`tests/float64_precision_test.rs`.
+
 ### Fixed — indices were silently lost across `SAVE DATASET`/`LOAD DATASET`
 
 Found auditing the engine's index/partition/clustering behavior at medium-to-large dataset
@@ -609,6 +649,8 @@ separately in v0.1.61 once these were fixed.
   the DSL. A real fix would need a genuine `Float64`/`Double` value
   variant threaded through `Value`, `Tensor` storage, Arrow interop, and
   the kernels — a much larger change than fits this PR.
+  **Fixed** in `[Unreleased]` above (real `Value::Float64`/`DOUBLE` support) — see
+  "Added — real 64-bit float support" at the top of this file.
 - **`linal run <file>`'s multi-line statement joiner only tracks
   paren-balance** (`src/main.rs`) — a statement split across multiple
   bare lines with no unbalanced parens on any intermediate line (e.g.

@@ -2,7 +2,7 @@ use crate::core::connectors::{field_with_shape, resolve_shape_dims, Connector, C
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
-use arrow::array::{ArrayRef, Float32Array};
+use arrow::array::{ArrayRef, Float32Array, Float64Array};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use ndarray::ArrayD;
@@ -52,7 +52,11 @@ impl Connector for NumpyConnector {
             .iter()
             .map(|f| {
                 let dims = resolve_shape_dims(f, batch.num_rows());
-                ColumnSchema::new(f.name().clone(), ValueType::Float, Shape::new(dims))
+                let vt = match f.data_type() {
+                    DataType::Float64 => ValueType::Float64,
+                    _ => ValueType::Float,
+                };
+                ColumnSchema::new(f.name().clone(), vt, Shape::new(dims))
             })
             .collect();
 
@@ -76,8 +80,19 @@ impl NumpyConnector {
             }
         }
 
-        let arr: ArrayD<f32> = ndarray_npy::read_npy(path)
-            .map_err(|e| ConnectorError::Parse(format!("Failed to read NPY: {}", e)))?;
+        // The NPY header encodes the array's exact on-disk dtype, so unlike
+        // HDF5 (which does implicit numeric conversion), ndarray_npy's
+        // ArrayD<f32> read genuinely errors on a real float64 file rather
+        // than silently narrowing -- the error-triggered fallback is a
+        // reliable f64 signal here.
+        let arr: NumpyArray = match ndarray_npy::read_npy::<_, ArrayD<f32>>(path) {
+            Ok(v) => NumpyArray::F32(v),
+            Err(_) => {
+                let v: ArrayD<f64> = ndarray_npy::read_npy(path)
+                    .map_err(|e| ConnectorError::Parse(format!("Failed to read NPY: {}", e)))?;
+                NumpyArray::F64(v)
+            }
+        };
 
         let (batch, lineage) = self.array_to_batch("array", arr)?;
         Ok((batch, lineage))
@@ -113,20 +128,30 @@ impl NumpyConnector {
                 continue;
             }
 
-            // Using a temporary result to help type inference
-            let result: Result<ArrayD<f32>, _> = npz.by_name(&name);
-            let arr = match result {
-                Ok(arr) => arr,
-                Err(e) => {
-                    let msg = format!("NPZ array '{name}': not readable as an f32 array ({e})");
-                    if requested {
-                        return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+            // f32 first, f64 fallback on error -- reliable here since NPZ
+            // (like NPY) encodes the exact on-disk dtype and ndarray_npy
+            // doesn't silently convert.
+            let f32_result: Result<ArrayD<f32>, _> = npz.by_name(&name);
+            let arr: NumpyArray = match f32_result {
+                Ok(arr) => NumpyArray::F32(arr),
+                Err(_) => {
+                    let f64_result: Result<ArrayD<f64>, _> = npz.by_name(&name);
+                    match f64_result {
+                        Ok(arr) => NumpyArray::F64(arr),
+                        Err(e) => {
+                            let msg = format!(
+                                "NPZ array '{name}': not readable as an f32 or f64 array ({e})"
+                            );
+                            if requested {
+                                return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+                            }
+                            // Not explicitly requested: skip, but say so --
+                            // silently dropping a real array with no
+                            // indication at all is worse than a loud skip.
+                            warnings.push(format!("Skipped {msg}"));
+                            continue;
+                        }
                     }
-                    // Not explicitly requested: skip, but say so --
-                    // silently dropping a real array with no indication at
-                    // all is worse than a loud skip.
-                    warnings.push(format!("Skipped {msg}"));
-                    continue;
                 }
             };
 
@@ -154,10 +179,19 @@ impl NumpyConnector {
             }
 
             found.insert(name.clone());
-            let dims = arr.shape().to_vec();
-            out_fields.push(field_with_shape(&name, DataType::Float32, false, &dims));
-            let data: Vec<f32> = arr.iter().cloned().collect();
-            columns.push(Arc::new(Float32Array::from(data)));
+            let dims = arr.dims();
+            match arr {
+                NumpyArray::F32(arr) => {
+                    out_fields.push(field_with_shape(&name, DataType::Float32, false, &dims));
+                    let data: Vec<f32> = arr.iter().cloned().collect();
+                    columns.push(Arc::new(Float32Array::from(data)));
+                }
+                NumpyArray::F64(arr) => {
+                    out_fields.push(field_with_shape(&name, DataType::Float64, false, &dims));
+                    let data: Vec<f64> = arr.iter().cloned().collect();
+                    columns.push(Arc::new(Float64Array::from(data)));
+                }
+            }
         }
 
         if let Some(requested) = fields {
@@ -176,7 +210,7 @@ impl NumpyConnector {
 
         if out_fields.is_empty() {
             return Err(ConnectorError::Parse(
-                "No valid f32 arrays found in NPZ".to_string(),
+                "No valid f32/f64 arrays found in NPZ".to_string(),
             ));
         }
 
@@ -200,19 +234,24 @@ impl NumpyConnector {
     fn array_to_batch(
         &self,
         name: &str,
-        arr: ArrayD<f32>,
+        arr: NumpyArray,
     ) -> Result<(RecordBatch, DatasetLineage), ConnectorError> {
-        let dims = arr.shape().to_vec();
-        let data: Vec<f32> = arr.iter().cloned().collect();
+        let dims = arr.dims();
+        let (data_type, array): (DataType, ArrayRef) = match arr {
+            NumpyArray::F32(arr) => {
+                let data: Vec<f32> = arr.iter().cloned().collect();
+                (DataType::Float32, Arc::new(Float32Array::from(data)))
+            }
+            NumpyArray::F64(arr) => {
+                let data: Vec<f64> = arr.iter().cloned().collect();
+                (DataType::Float64, Arc::new(Float64Array::from(data)))
+            }
+        };
 
         let schema = Arc::new(Schema::new(vec![field_with_shape(
-            name,
-            DataType::Float32,
-            false,
-            &dims,
+            name, data_type, false, &dims,
         )]));
 
-        let array = Arc::new(Float32Array::from(data));
         let batch = RecordBatch::try_new(schema, vec![array])?;
 
         let mut lineage = DatasetLineage::new();
@@ -226,5 +265,29 @@ impl NumpyConnector {
         });
 
         Ok((batch, lineage))
+    }
+}
+
+/// A NumPy array read at either its declared precision (f64) or LINAL's
+/// default (f32) -- NPY/NPZ encode the exact on-disk dtype, so which variant
+/// is produced is determined by a real read attempt, not a heuristic.
+enum NumpyArray {
+    F32(ArrayD<f32>),
+    F64(ArrayD<f64>),
+}
+
+impl NumpyArray {
+    fn len(&self) -> usize {
+        match self {
+            NumpyArray::F32(a) => a.len(),
+            NumpyArray::F64(a) => a.len(),
+        }
+    }
+
+    fn dims(&self) -> Vec<usize> {
+        match self {
+            NumpyArray::F32(a) => a.shape().to_vec(),
+            NumpyArray::F64(a) => a.shape().to_vec(),
+        }
     }
 }

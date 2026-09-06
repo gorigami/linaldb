@@ -19,17 +19,20 @@
 # plainly rather than glossed over -- see the section 4 commentary.
 #
 # Known engine limits this script routes around rather than silently hitting:
-#  - `Float` is f32 only (no true 64-bit float exists anywhere in the engine,
-#    despite `DOUBLE`/`FLOAT64` being accepted CAST/column-type keywords) --
-#    a real GPS time (~1.1e9) already exceeds f32's ~7 significant digits, so
-#    `merger_offset_seconds` (gps_time - file_gps_start) is precomputed in
-#    tools/fixtures/gen_gw_data.rs with real f64 arithmetic, not computed here.
 #  - Every statement is kept on one line, per this directory's own
 #    documented convention (examples/README.md item 2): `linal run`'s
 #    multi-line statement joiner only tracks paren-balance.
 #  - `UNION ALL`'s own trailing `ORDER BY`/`LIMIT` is silently ignored
 #    (flagged in CHANGELOG.md, not fixed) -- section 5 wraps unions in a
 #    `FROM (...)` subquery instead, which applies them correctly.
+#
+# Previously routed-around, now fixed: `Float` used to be f32-only
+# everywhere, with `DOUBLE`/`FLOAT64` silently aliasing to it -- a real GPS
+# time (~1.1e9) exceeds f32's ~7 significant digits, so section 1's
+# `gps_time` arithmetic used to need precomputing in f64 outside the DSL
+# (tools/fixtures/gen_gw_data.rs). The engine now has real f64 scalar
+# support (`DOUBLE`/`FLOAT64` mean genuine f64), CSV ingestion auto-infers
+# it, and `gps_time - prev_gps` below computes at full precision directly.
 
 DROP DATABASE IF EXISTS gw_transient_analysis
 CREATE DATABASE gw_transient_analysis

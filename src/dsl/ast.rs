@@ -581,6 +581,8 @@ pub struct ColumnDef {
 pub enum ColType {
     Int,
     Float,
+    /// `DOUBLE`/`FLOAT64` — full double-precision column.
+    Double,
     String,
     Bool,
     /// `Vector(n)` — 1-D tensor of length n
@@ -706,6 +708,8 @@ pub enum ScalarFnKind {
 pub enum CastTarget {
     Int,
     Float,
+    /// `CAST(expr AS DOUBLE)` / `CAST(expr AS FLOAT64)` — full double precision.
+    Double,
     Text,
     Bool,
     /// `CAST(expr AS VECTOR(n))` — reshape/flatten to a Vector of length `n`.

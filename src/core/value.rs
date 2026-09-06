@@ -11,6 +11,10 @@ use std::fmt;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     Float(f32),
+    /// Full double-precision scalar. Distinct from `Float` so a DSL user can
+    /// explicitly opt into f64 (via a `DOUBLE` column or `CAST(... AS DOUBLE)`)
+    /// where f32's ~7 significant digits aren't enough (e.g. GPS timestamps).
+    Float64(f64),
     Int(i64),
     String(String),
     Bool(bool),
@@ -23,6 +27,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+            (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -63,6 +68,7 @@ impl std::hash::Hash for Value {
         std::mem::discriminant(self).hash(state);
         match self {
             Value::Float(v) => v.to_bits().hash(state),
+            Value::Float64(v) => v.to_bits().hash(state),
             Value::Int(v) => v.hash(state),
             Value::String(v) => v.hash(state),
             Value::Bool(v) => v.hash(state),
@@ -92,6 +98,7 @@ impl std::hash::Hash for Value {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ValueType {
     Float,
+    Float64,
     Int,
     String,
     Bool,
@@ -105,6 +112,7 @@ impl Value {
     pub fn value_type(&self) -> ValueType {
         match self {
             Value::Float(_) => ValueType::Float,
+            Value::Float64(_) => ValueType::Float64,
             Value::Int(_) => ValueType::Int,
             Value::String(_) => ValueType::String,
             Value::Bool(_) => ValueType::Bool,
@@ -131,7 +139,19 @@ impl Value {
     pub fn as_float(&self) -> Option<f32> {
         match self {
             Value::Float(f) => Some(*f),
+            Value::Float64(f) => Some(*f as f32),
             Value::Int(i) => Some(*i as f32),
+            _ => None,
+        }
+    }
+
+    /// Try to convert to f64, preserving full precision when the value is
+    /// already a `Float64`.
+    pub fn as_float64(&self) -> Option<f64> {
+        match self {
+            Value::Float64(f) => Some(*f),
+            Value::Float(f) => Some(*f as f64),
+            Value::Int(i) => Some(*i as f64),
             _ => None,
         }
     }
@@ -141,6 +161,7 @@ impl Value {
         match self {
             Value::Int(i) => Some(*i),
             Value::Float(f) => Some(*f as i64),
+            Value::Float64(f) => Some(*f as i64),
             _ => None,
         }
     }
@@ -175,6 +196,7 @@ impl Value {
 
         match (self, other) {
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
             (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
@@ -184,6 +206,11 @@ impl Value {
             // Cross-type numeric comparison
             (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f32)),
             (Value::Int(a), Value::Float(b)) => (*a as f32).partial_cmp(b),
+            // Any pairing touching Float64 compares at full f64 precision.
+            (Value::Float64(a), Value::Float(b)) => a.partial_cmp(&(*b as f64)),
+            (Value::Float(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
+            (Value::Float64(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+            (Value::Int(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
             _ => None, // Vectors and Matrices not comparable for sorting currently
         }
     }
@@ -192,6 +219,7 @@ impl Value {
     pub fn matches_type(&self, value_type: &ValueType) -> bool {
         match (self, value_type) {
             (Value::Float(_), ValueType::Float) => true,
+            (Value::Float64(_), ValueType::Float64) => true,
             (Value::Int(_), ValueType::Int) => true,
             (Value::String(_), ValueType::String) => true,
             (Value::Bool(_), ValueType::Bool) => true,
@@ -222,10 +250,22 @@ fn format_f32(v: f32) -> String {
     }
 }
 
+/// f64 counterpart of `format_f32`, kept as a separate function (not a
+/// generic) so `Value::Float`'s existing f32 rendering is never routed
+/// through a widened formatter and can't drift.
+fn format_f64(v: f64) -> String {
+    if v != 0.0 && (v.abs() < 1e-4 || v.abs() >= 1e15) {
+        format!("{:e}", v)
+    } else {
+        format!("{}", v)
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Float(v) => write!(f, "{}", format_f32(*v)),
+            Value::Float64(v) => write!(f, "{}", format_f64(*v)),
             Value::Int(v) => write!(f, "{}", v),
             Value::String(v) => write!(f, "\"{}\"", v),
             Value::Bool(v) => write!(f, "{}", v),
@@ -265,6 +305,7 @@ impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ValueType::Float => write!(f, "FLOAT"),
+            ValueType::Float64 => write!(f, "DOUBLE"),
             ValueType::Int => write!(f, "INT"),
             ValueType::String => write!(f, "STRING"),
             ValueType::Bool => write!(f, "BOOL"),
