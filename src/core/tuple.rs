@@ -43,6 +43,7 @@ impl Field {
 
         match (&self.value_type, value.value_type()) {
             (ValueType::Float, ValueType::Float) => true,
+            (ValueType::Float64, ValueType::Float64) => true,
             (ValueType::Int, ValueType::Int) => true,
             (ValueType::String, ValueType::String) => true,
             (ValueType::Bool, ValueType::Bool) => true,

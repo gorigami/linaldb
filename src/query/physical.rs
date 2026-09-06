@@ -422,6 +422,8 @@ impl PhysicalPlan for AggregateExec {
                                         let c = m[0].len();
                                         Value::Matrix(vec![vec![0.0; c]; r])
                                     }
+                                } else if let Value::Float64(_) = val {
+                                    Value::Float64(0.0)
                                 } else {
                                     Value::Float(0.0)
                                 };
@@ -466,6 +468,20 @@ impl PhysicalPlan for AggregateExec {
                                     accs[i] = Value::Float(new_val);
                                 }
                                 (Value::Float(ref mut sum), Value::Int(v)) => *sum += *v as f32,
+                                // Any pairing touching Float64 promotes the
+                                // accumulator to Float64, never demoting
+                                // back once seen.
+                                (Value::Float64(ref mut sum), Value::Float64(v)) => *sum += v,
+                                (Value::Float64(ref mut sum), Value::Int(v)) => *sum += *v as f64,
+                                (Value::Float64(ref mut sum), Value::Float(v)) => *sum += *v as f64,
+                                (Value::Int(sum), Value::Float64(v)) => {
+                                    let new_val = *sum as f64 + v;
+                                    accs[i] = Value::Float64(new_val);
+                                }
+                                (Value::Float(sum), Value::Float64(v)) => {
+                                    let new_val = *sum as f64 + v;
+                                    accs[i] = Value::Float64(new_val);
+                                }
                                 (Value::Vector(sum_vec), Value::Vector(v)) => {
                                     if sum_vec.len() != v.len() {
                                         return Err(EngineError::InvalidOp(format!(
@@ -508,6 +524,18 @@ impl PhysicalPlan for AggregateExec {
                                 Value::Float(ref mut sum) => match &val {
                                     Value::Int(v) => *sum += *v as f32,
                                     Value::Float(v) => *sum += v,
+                                    // Seeing a Float64 addend promotes the
+                                    // whole accumulator to Float64, never
+                                    // demoting back once promoted.
+                                    Value::Float64(v) => {
+                                        *sum_ref = Value::Float64(*sum as f64 + v);
+                                    }
+                                    _ => {}
+                                },
+                                Value::Float64(ref mut sum) => match &val {
+                                    Value::Int(v) => *sum += *v as f64,
+                                    Value::Float(v) => *sum += *v as f64,
+                                    Value::Float64(v) => *sum += v,
                                     _ => {}
                                 },
                                 Value::Int(ref mut sum) => {
@@ -518,6 +546,9 @@ impl PhysicalPlan for AggregateExec {
                                         }
                                         Value::Float(v) => {
                                             *sum_ref = Value::Float(*sum as f32 + v);
+                                        }
+                                        Value::Float64(v) => {
+                                            *sum_ref = Value::Float64(*sum as f64 + v);
                                         }
                                         _ => {}
                                     }
@@ -637,6 +668,7 @@ impl PhysicalPlan for AggregateExec {
                         if *count > 0 {
                             let avg = match sum {
                                 Value::Float(s) => Value::Float(*s / *count as f32),
+                                Value::Float64(s) => Value::Float64(*s / *count as f64),
                                 Value::Int(s) => Value::Float(*s as f32 / *count as f32),
                                 Value::Vector(v) => {
                                     Value::Vector(v.iter().map(|x| x / *count as f32).collect())
@@ -779,6 +811,24 @@ pub fn evaluate_expression(
                         Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
                     ), // "<="
                 });
+            }
+
+            // Any pairing touching Float64 promotes to Float64 (widening the
+            // other side at full f64 precision), checked before the
+            // f32/Int-only arms below so it always takes priority over them
+            // — mirrors the same policy in dsl/executor/query.rs's
+            // eval_row_expr and window_running_sum.
+            if matches!(left_val, Value::Float64(_)) || matches!(right_val, Value::Float64(_)) {
+                return match (left_val.as_float64(), right_val.as_float64()) {
+                    (Some(l), Some(r)) => match op.as_str() {
+                        "+" => Value::Float64(l + r),
+                        "-" => Value::Float64(l - r),
+                        "*" => Value::Float64(l * r),
+                        "/" => Value::Float64(l / r),
+                        _ => Value::Null,
+                    },
+                    _ => Value::Null,
+                };
             }
 
             match (left_val, right_val) {
@@ -1003,20 +1053,32 @@ pub fn evaluate_expression(
                 CastTarget::Int => match val {
                     Value::Int(n) => Value::Int(n),
                     Value::Float(f) => Value::Int(f as i64),
+                    Value::Float64(f) => Value::Int(f as i64),
                     Value::String(s) => s.parse::<i64>().map(Value::Int).unwrap_or(Value::Null),
                     Value::Bool(b) => Value::Int(if b { 1 } else { 0 }),
                     _ => Value::Null,
                 },
                 CastTarget::Float => match val {
                     Value::Float(f) => Value::Float(f),
+                    Value::Float64(f) => Value::Float(f as f32),
                     Value::Int(n) => Value::Float(n as f32),
                     Value::String(s) => s.parse::<f32>().map(Value::Float).unwrap_or(Value::Null),
+                    _ => Value::Null,
+                },
+                // CAST(... AS DOUBLE) — parses/widens at full f64 precision,
+                // the whole point of choosing this target over Float.
+                CastTarget::Double => match val {
+                    Value::Float64(f) => Value::Float64(f),
+                    Value::Float(f) => Value::Float64(f as f64),
+                    Value::Int(n) => Value::Float64(n as f64),
+                    Value::String(s) => s.parse::<f64>().map(Value::Float64).unwrap_or(Value::Null),
                     _ => Value::Null,
                 },
                 CastTarget::Text => Value::String(match val {
                     Value::String(s) => s,
                     Value::Int(n) => n.to_string(),
                     Value::Float(f) => f.to_string(),
+                    Value::Float64(f) => f.to_string(),
                     Value::Bool(b) => b.to_string(),
                     _ => return Value::Null,
                 }),

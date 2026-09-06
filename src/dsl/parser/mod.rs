@@ -870,7 +870,8 @@ impl Parser {
                 let t = self.eat_ident()?;
                 match t.to_uppercase().as_str() {
                     "INT" | "INTEGER" | "INT32" | "INT64" => Ok(ColType::Int),
-                    "FLOAT" | "FLOAT32" | "FLOAT64" | "DOUBLE" => Ok(ColType::Float),
+                    "FLOAT" | "FLOAT32" => Ok(ColType::Float),
+                    "DOUBLE" | "FLOAT64" => Ok(ColType::Double),
                     "STRING" | "TEXT" | "VARCHAR" => Ok(ColType::String),
                     "BOOL" | "BOOLEAN" => Ok(ColType::Bool),
                     "VECTOR" => {

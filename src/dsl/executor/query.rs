@@ -594,6 +594,9 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             match op {
                 InfixOp::Add | InfixOp::Subtract | InfixOp::Multiply | InfixOp::Divide => {
                     match (lt, rt) {
+                        // Float64 always wins the promotion, even against a
+                        // plain Float, mirroring the runtime arithmetic rule.
+                        (ValueType::Float64, _) | (_, ValueType::Float64) => ValueType::Float64,
                         (ValueType::Float, _) | (_, ValueType::Float) => ValueType::Float,
                         (ValueType::Int, ValueType::Int) => ValueType::Int,
                         _ => ValueType::Float,
@@ -610,6 +613,7 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
         Expr::Cast { to, .. } => match to {
             CastTarget::Int => ValueType::Int,
             CastTarget::Float => ValueType::Float,
+            CastTarget::Double => ValueType::Float64,
             CastTarget::Text => ValueType::String,
             CastTarget::Bool => ValueType::Bool,
             CastTarget::Vector(n) => ValueType::Vector(*n),
@@ -651,28 +655,45 @@ fn apply_window_and_computed_exprs(
                 computed_idx += 1;
                 let logical_expr = dsl_expr_to_logical_expr(expr);
                 let fallback_vtype = infer_expr_result_type(expr);
+
+                // Evaluate every row first so the whole column gets ONE
+                // consistent declared type, chosen from the first non-null
+                // actual value (falling back to the static guess only if
+                // every row is null) -- mirrors the window-function path
+                // below. Deciding this per-row instead (as a prior version
+                // did) let, e.g., a NULL-producing row keep the naive
+                // fallback type while other rows in the same column got
+                // their real type, silently building rows with different
+                // schemas for the same logical column and later failing
+                // Dataset::with_rows's structural schema-equality check.
+                let vals: Vec<Value> = rows
+                    .iter()
+                    .map(|row| evaluate_expression(&logical_expr, row))
+                    .collect();
+                let vtype = vals
+                    .iter()
+                    .find(|v| !matches!(v, Value::Null))
+                    .map(|v| v.value_type())
+                    .unwrap_or(fallback_vtype);
+
                 rows = rows
                     .into_iter()
-                    .map(|row| {
-                        let val = evaluate_expression(&logical_expr, &row);
-                        let actual_vtype = match val.value_type() {
-                            ValueType::Null => fallback_vtype.clone(),
-                            t => t,
-                        };
-                        let mut vals = row.values.clone();
-                        vals.push(val);
+                    .zip(vals)
+                    .map(|(row, val)| {
+                        let mut new_vals = row.values.clone();
+                        new_vals.push(val);
                         let ext_schema = std::sync::Arc::new(crate::core::tuple::Schema::new(
                             row.schema
                                 .fields
                                 .iter()
                                 .cloned()
                                 .chain(std::iter::once(
-                                    crate::core::tuple::Field::new(&temp_name, actual_vtype)
+                                    crate::core::tuple::Field::new(&temp_name, vtype.clone())
                                         .nullable(),
                                 ))
                                 .collect(),
                         ));
-                        Tuple::new(ext_schema, vals).unwrap_or(row)
+                        Tuple::new(ext_schema, new_vals).unwrap_or(row)
                     })
                     .collect();
             }
@@ -841,6 +862,7 @@ fn apply_window_func(
                     let count = vals.len().max(1) as f32;
                     match window_running_sum(&vals, line_no)? {
                         Value::Float(s) => Value::Float(s / count),
+                        Value::Float64(s) => Value::Float64(s / count as f64),
                         Value::Vector(v) => Value::Vector(v.iter().map(|x| x / count).collect()),
                         Value::Matrix(m) => Value::Matrix(
                             m.iter()
@@ -926,11 +948,19 @@ fn window_running_sum(vals: &[Value], line_no: usize) -> Result<Value, DslError>
         acc = Some(match (acc, v) {
             (None, Value::Int(n)) => Value::Float(n as f32),
             (None, Value::Float(f)) => Value::Float(f),
+            (None, Value::Float64(f)) => Value::Float64(f),
             (None, Value::Vector(vec)) => Value::Vector(vec),
             (None, Value::Matrix(m)) => Value::Matrix(m),
             (None, _) => Value::Float(0.0),
             (Some(Value::Float(s)), Value::Int(n)) => Value::Float(s + n as f32),
             (Some(Value::Float(s)), Value::Float(f)) => Value::Float(s + f),
+            // Once a Float64 has been seen (either as the running accumulator
+            // or the incoming value), the accumulator promotes to Float64 and
+            // never demotes back to f32.
+            (Some(Value::Float64(s)), Value::Float64(f)) => Value::Float64(s + f),
+            (Some(Value::Float64(s)), Value::Float(f)) => Value::Float64(s + f as f64),
+            (Some(Value::Float64(s)), Value::Int(n)) => Value::Float64(s + n as f64),
+            (Some(Value::Float(s)), Value::Float64(f)) => Value::Float64(s as f64 + f),
             (Some(Value::Vector(mut sum)), Value::Vector(v2)) => {
                 if sum.len() != v2.len() {
                     return Err(DslError::Parse {
@@ -1014,6 +1044,7 @@ pub(super) fn execute_add_computed_column(
         let vtype = match eval_row_expr(expr, &env) {
             Value::Int(_) => ValueType::Int,
             Value::Float(_) => ValueType::Float,
+            Value::Float64(_) => ValueType::Float64,
             Value::String(_) => ValueType::String,
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
@@ -1065,6 +1096,7 @@ pub(super) fn execute_add_computed_column(
         let vtype = match &computed[0] {
             Value::Int(_) => ValueType::Int,
             Value::Float(_) => ValueType::Float,
+            Value::Float64(_) => ValueType::Float64,
             Value::String(_) => ValueType::String,
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
@@ -1200,6 +1232,7 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
             let lto = match to {
                 CastTarget::Int => LCast::Int,
                 CastTarget::Float => LCast::Float,
+                CastTarget::Double => LCast::Double,
                 CastTarget::Text => LCast::Text,
                 CastTarget::Bool => LCast::Bool,
                 CastTarget::Vector(n) => LCast::Vector(*n),
@@ -1406,6 +1439,21 @@ fn eval_row_expr(expr: &Expr, env: &std::collections::HashMap<&str, &Value>) -> 
         Expr::Infix { op, lhs, rhs } => {
             let l = eval_row_expr(lhs, env);
             let r = eval_row_expr(rhs, env);
+            // Any pairing touching Float64 promotes to Float64 (widening the
+            // other side), checked before the plain-f32/Int arms below so it
+            // always takes priority over them.
+            if matches!(l, Value::Float64(_)) || matches!(r, Value::Float64(_)) {
+                let (Some(a), Some(b)) = (l.as_float64(), r.as_float64()) else {
+                    return Value::Null;
+                };
+                return match op {
+                    InfixOp::Add => Value::Float64(a + b),
+                    InfixOp::Subtract => Value::Float64(a - b),
+                    InfixOp::Multiply => Value::Float64(a * b),
+                    InfixOp::Divide => Value::Float64(a / b),
+                    _ => Value::Null,
+                };
+            }
             match (op, l, r) {
                 (InfixOp::Add, Value::Int(a), Value::Int(b)) => Value::Int(a + b),
                 (InfixOp::Add, Value::Float(a), Value::Float(b)) => Value::Float(a + b),

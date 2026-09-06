@@ -477,6 +477,7 @@ pub fn expr_to_string(expr: &Expr) -> String {
             let type_name = match to {
                 CastTarget::Int => "INT".to_string(),
                 CastTarget::Float => "FLOAT".to_string(),
+                CastTarget::Double => "DOUBLE".to_string(),
                 CastTarget::Text => "TEXT".to_string(),
                 CastTarget::Bool => "BOOL".to_string(),
                 CastTarget::Vector(n) => format!("VECTOR({})", n),

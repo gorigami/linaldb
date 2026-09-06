@@ -2,7 +2,7 @@ use crate::core::connectors::{field_with_shape, resolve_shape_dims, Connector, C
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
-use arrow::array::{ArrayRef, Float32Array};
+use arrow::array::{ArrayRef, Float32Array, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use std::path::Path;
@@ -120,7 +120,11 @@ impl Connector for ZarrConnector {
             .iter()
             .map(|f| {
                 let dims = resolve_shape_dims(f, batch.num_rows());
-                ColumnSchema::new(f.name().clone(), ValueType::Float, Shape::new(dims))
+                let vt = match f.data_type() {
+                    DataType::Float64 => ValueType::Float64,
+                    _ => ValueType::Float,
+                };
+                ColumnSchema::new(f.name().clone(), vt, Shape::new(dims))
             })
             .collect();
 
@@ -186,31 +190,36 @@ impl ZarrConnector {
         }
 
         let subset = array.subset_all();
-        // zarrs 0.19 uses retrieve_array_subset_elements for sync reading.
-        // A dtype this can't read as f32 skips just this array (with a
-        // warning) rather than aborting the whole store's read via `?` --
-        // unless it was explicitly requested, in which case it's a hard
-        // error instead.
-        let data: Vec<f32> = match array.retrieve_array_subset_elements::<f32>(&subset) {
-            Ok(d) => d,
-            Err(e) => {
-                let msg = format!("Zarr array '{name}': not readable as an f32 array ({e})");
-                if requested {
-                    return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+        // zarrs 0.19 uses retrieve_array_subset_elements for sync reading;
+        // it errors on an element-size mismatch (see its docs: "the size of
+        // T does not match the data type size") rather than silently
+        // converting, so f32-fails-then-f64-succeeds is a reliable signal
+        // of a genuinely double-precision array here (unlike HDF5's
+        // implicit-conversion C library).
+        let data: ZarrNumericColumn = match array.retrieve_array_subset_elements::<f32>(&subset) {
+            Ok(d) => ZarrNumericColumn::F32(d),
+            Err(_) => match array.retrieve_array_subset_elements::<f64>(&subset) {
+                Ok(d) => ZarrNumericColumn::F64(d),
+                Err(e) => {
+                    let msg =
+                        format!("Zarr array '{name}': not readable as an f32 or f64 array ({e})");
+                    if requested {
+                        return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+                    }
+                    acc.warnings.push(format!("Skipped {msg}"));
+                    return Ok(());
                 }
-                acc.warnings.push(format!("Skipped {msg}"));
-                return Ok(());
-            }
+            },
         };
 
+        let len = data.len();
         if acc.num_rows == 0 {
-            acc.num_rows = data.len();
-        } else if data.len() != acc.num_rows {
+            acc.num_rows = len;
+        } else if len != acc.num_rows {
             let msg = format!(
                 "Zarr array '{name}': has {} element(s), expected {} \
                  (doesn't match other arrays already ingested from this store)",
-                data.len(),
-                acc.num_rows
+                len, acc.num_rows
             );
             if requested {
                 // Explicitly requested alongside others that don't share
@@ -229,10 +238,35 @@ impl ZarrConnector {
 
         acc.found.insert(name.to_string());
         let dims: Vec<usize> = array.shape().iter().map(|&d| d as usize).collect();
-        acc.fields
-            .push(field_with_shape(name, DataType::Float32, false, &dims));
-        acc.columns.push(Arc::new(Float32Array::from(data)));
+        match data {
+            ZarrNumericColumn::F32(d) => {
+                acc.fields
+                    .push(field_with_shape(name, DataType::Float32, false, &dims));
+                acc.columns.push(Arc::new(Float32Array::from(d)));
+            }
+            ZarrNumericColumn::F64(d) => {
+                acc.fields
+                    .push(field_with_shape(name, DataType::Float64, false, &dims));
+                acc.columns.push(Arc::new(Float64Array::from(d)));
+            }
+        }
 
         Ok(())
+    }
+}
+
+/// A numeric Zarr array read at either its declared precision (f64) or
+/// LINAL's default (f32).
+enum ZarrNumericColumn {
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl ZarrNumericColumn {
+    fn len(&self) -> usize {
+        match self {
+            ZarrNumericColumn::F32(v) => v.len(),
+            ZarrNumericColumn::F64(v) => v.len(),
+        }
     }
 }

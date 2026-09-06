@@ -119,8 +119,8 @@ The core module contains fundamental data structures and abstractions:
 
 #### `value.rs`
 
-- **Value**: Enum representing all possible data-holding types: `Float(f32)`, `Int(i64)`, `String(String)`, `Bool(bool)`, `Vector(Vec<f32>)`, `Matrix(Vec<Vec<f32>>)`, `Null`. Notably: `Float` is **f32 only** — there is no 64-bit float variant anywhere, despite `DOUBLE`/`FLOAT64` being accepted `CAST`/column-type keywords in the DSL that silently alias to this same `f32` (a real, flagged-but-unfixed gap — see CHANGELOG v0.1.60 — large-magnitude real-world values like GPS/Unix timestamps lose precision).
-- **ValueType**: the corresponding type descriptor used in schemas — `Float`, `Int`, `String`, `Bool`, `Vector(usize)`, `Matrix(usize, usize)`, `Null` (dimension-only, no data)
+- **Value**: Enum representing all possible data-holding types: `Float(f32)`, `Float64(f64)`, `Int(i64)`, `String(String)`, `Bool(bool)`, `Vector(Vec<f32>)`, `Matrix(Vec<Vec<f32>>)`, `Null`. `Float64` (DSL keywords `DOUBLE`/`FLOAT64`) was added to fix a previously flagged gap — `Float` used to be the *only* floating-point representation anywhere in the engine, and large-magnitude real-world scalar values (GPS/Unix timestamps, etc.) silently lost precision. `Tensor`/`Vector`/`Matrix` remain `f32`-only by design — `Float64` is scalar-only. Mixed-precision arithmetic (`Float op Float64`, `Int op Float64`) always promotes to `Float64`.
+- **ValueType**: the corresponding type descriptor used in schemas — `Float`, `Float64`, `Int`, `String`, `Bool`, `Vector(usize)`, `Matrix(usize, usize)`, `Null` (dimension-only, no data)
 - **`Display` for `Value`** (v0.1.60): `Float`/`Vector`/`Matrix` switch to scientific notation (`{:e}`) for magnitudes below `1e-4` or at/above `1e15`, leaving normal-range values as plain decimal — real scientific magnitudes (e.g. LIGO strain ~1e-21, see `examples/gw_transient_analysis.lnl`) previously printed as 20+ digits of leading/trailing zeros.
 
 #### `tuple.rs`

@@ -2,9 +2,10 @@ use crate::core::connectors::{field_with_shape, resolve_shape_dims, Connector, C
 use crate::core::dataset::{ColumnSchema, DatasetLineage, DatasetSchema};
 use crate::core::tensor::Shape;
 use crate::core::value::ValueType;
-use arrow::array::{ArrayRef, Float32Array};
+use arrow::array::{ArrayRef, Float32Array, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use hdf5::types::{FloatSize, TypeDescriptor};
 use hdf5::{Dataset, File, Group};
 use std::path::Path;
 use std::sync::Arc;
@@ -116,7 +117,11 @@ impl Connector for Hdf5Connector {
             .iter()
             .map(|f| {
                 let dims = resolve_shape_dims(f, batch.num_rows());
-                ColumnSchema::new(f.name().clone(), ValueType::Float, Shape::new(dims))
+                let vt = match f.data_type() {
+                    DataType::Float64 => ValueType::Float64,
+                    _ => ValueType::Float,
+                };
+                ColumnSchema::new(f.name().clone(), vt, Shape::new(dims))
             })
             .collect();
 
@@ -172,38 +177,46 @@ impl Hdf5Connector {
         // Matrix/Tensor shape instead of assuming a flat Vector.
         let shape = ds.shape();
 
-        let data: Vec<f32> = match ds.read_raw::<f32>() {
-            Ok(v) => v,
-            Err(_) => {
-                // Try reading as f64 and casting
-                match ds.read_raw::<f64>() {
-                    Ok(v) => v.into_iter().map(|x| x as f32).collect(),
-                    Err(e) => {
-                        let msg = format!(
-                            "HDF5 dataset '{name}': not readable as a numeric \
-                             (float-convertible) array ({e})"
-                        );
-                        if requested {
-                            return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
-                        }
-                        // Not explicitly requested: skip, but say so --
-                        // silently dropping a real dataset with no
-                        // indication at all is worse than a loud skip.
-                        acc.warnings.push(format!("Skipped {msg}"));
-                        return Ok(());
-                    }
-                }
+        // HDF5's C library does implicit numeric type conversion on read,
+        // so `read_raw::<f32>()` on a genuinely double-precision dataset
+        // usually *succeeds* (silently narrowing) rather than erroring --
+        // the on-disk dtype has to be checked up front to actually preserve
+        // f64 precision; relying on a read error as the f64 signal would
+        // almost never fire for real double datasets.
+        let is_declared_f64 = ds
+            .dtype()
+            .ok()
+            .and_then(|dt| dt.to_descriptor().ok())
+            .is_some_and(|td| matches!(td, TypeDescriptor::Float(FloatSize::U8)));
+
+        let data = if is_declared_f64 {
+            match ds.read_raw::<f64>() {
+                Ok(v) => HdfNumericColumn::F64(v),
+                Err(e) => return self.skip_or_error(name, requested, acc, &e.to_string()),
+            }
+        } else {
+            match ds.read_raw::<f32>() {
+                Ok(v) => HdfNumericColumn::F32(v),
+                Err(_) => match ds.read_raw::<f64>() {
+                    // Dtype detection didn't flag this as f64 up front (or
+                    // the dataset's declared type just isn't f32-readable),
+                    // but an f64 read still worked -- keep full precision
+                    // rather than narrowing, same policy as the declared
+                    // case above.
+                    Ok(v) => HdfNumericColumn::F64(v),
+                    Err(e) => return self.skip_or_error(name, requested, acc, &e.to_string()),
+                },
             }
         };
 
+        let len = data.len();
         if acc.num_rows == 0 {
-            acc.num_rows = data.len();
-        } else if data.len() != acc.num_rows {
+            acc.num_rows = len;
+        } else if len != acc.num_rows {
             let msg = format!(
                 "HDF5 dataset '{name}': has {} element(s), expected {} \
                  (doesn't match other datasets already ingested from this file)",
-                data.len(),
-                acc.num_rows
+                len, acc.num_rows
             );
             if requested {
                 // The caller explicitly asked for this field alongside
@@ -223,10 +236,55 @@ impl Hdf5Connector {
         }
 
         acc.found.insert(name.to_string());
-        acc.fields
-            .push(field_with_shape(name, DataType::Float32, false, &shape));
-        acc.columns.push(Arc::new(Float32Array::from(data)));
+        match data {
+            HdfNumericColumn::F32(v) => {
+                acc.fields
+                    .push(field_with_shape(name, DataType::Float32, false, &shape));
+                acc.columns.push(Arc::new(Float32Array::from(v)));
+            }
+            HdfNumericColumn::F64(v) => {
+                acc.fields
+                    .push(field_with_shape(name, DataType::Float64, false, &shape));
+                acc.columns.push(Arc::new(Float64Array::from(v)));
+            }
+        }
 
         Ok(())
+    }
+
+    /// Shared "explicitly-requested field errors loudly, otherwise skip with
+    /// a warning" policy for a dataset that couldn't be read numerically at
+    /// all (used by both the declared-f64 and f32-then-f64-fallback paths).
+    fn skip_or_error(
+        &self,
+        name: &str,
+        requested: bool,
+        acc: &mut IngestAccumulator,
+        err: &str,
+    ) -> Result<(), ConnectorError> {
+        let msg = format!(
+            "HDF5 dataset '{name}': not readable as a numeric (float-convertible) array ({err})"
+        );
+        if requested {
+            return Err(ConnectorError::Parse(format!("FIELDS: {msg}")));
+        }
+        acc.warnings.push(format!("Skipped {msg}"));
+        Ok(())
+    }
+}
+
+/// A numeric HDF5 dataset read at either its declared precision (f64) or
+/// LINAL's default (f32).
+enum HdfNumericColumn {
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl HdfNumericColumn {
+    fn len(&self) -> usize {
+        match self {
+            HdfNumericColumn::F32(v) => v.len(),
+            HdfNumericColumn::F64(v) => v.len(),
+        }
     }
 }

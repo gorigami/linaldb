@@ -429,7 +429,8 @@ impl From<Arc<ArrowSchema>> for DatasetSchema {
                     Some(ValueType::Matrix(r, c)) => (ValueType::Matrix(r, c), vec![r, c]),
                     _ => match f.data_type() {
                         DataType::Int64 => (ValueType::Int, vec![]),
-                        DataType::Float32 | DataType::Float64 => (ValueType::Float, vec![]),
+                        DataType::Float32 => (ValueType::Float, vec![]),
+                        DataType::Float64 => (ValueType::Float64, vec![]),
                         DataType::Boolean => (ValueType::Bool, vec![]),
                         _ => (ValueType::String, vec![]),
                     },
@@ -529,7 +530,8 @@ fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
             let value_type =
                 logical_vector_or_matrix_type(f).unwrap_or_else(|| match f.data_type() {
                     DataType::Int64 | DataType::Int32 => ValueType::Int,
-                    DataType::Float32 | DataType::Float64 => ValueType::Float,
+                    DataType::Float32 => ValueType::Float,
+                    DataType::Float64 => ValueType::Float64,
                     DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
                     DataType::Boolean => ValueType::Bool,
                     _ => ValueType::String,
@@ -632,6 +634,36 @@ fn arrow_array_to_values(
             } else {
                 Err(StorageError::Serialization(
                     "Expected Float32Array or Float64Array for Float type".to_string(),
+                ))
+            }
+        }
+        ValueType::Float64 => {
+            if let Some(double_array) = array.as_any().downcast_ref::<Float64Array>() {
+                Ok((0..num_rows)
+                    .map(|i| {
+                        if double_array.is_null(i) {
+                            Value::Null
+                        } else {
+                            Value::Float64(double_array.value(i))
+                        }
+                    })
+                    .collect())
+            } else if let Some(float_array) = array.as_any().downcast_ref::<Float32Array>() {
+                // Tolerant upcast: a column declared Double but physically
+                // stored as Float32 still loads without erroring, symmetric
+                // with ValueType::Float's tolerant Float64 downcast above.
+                Ok((0..num_rows)
+                    .map(|i| {
+                        if float_array.is_null(i) {
+                            Value::Null
+                        } else {
+                            Value::Float64(float_array.value(i) as f64)
+                        }
+                    })
+                    .collect())
+            } else {
+                Err(StorageError::Serialization(
+                    "Expected Float32Array or Float64Array for Double type".to_string(),
                 ))
             }
         }
@@ -911,6 +943,19 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
                     })
                     .collect();
                 (DataType::Float32, Arc::new(Float32Array::from(values)))
+            }
+            ValueType::Float64 => {
+                let values: Vec<Option<f64>> = column_data
+                    .iter()
+                    .map(|v| match v {
+                        Value::Float64(f) => Some(*f),
+                        Value::Float(f) => Some(*f as f64),
+                        Value::Int(i) => Some(*i as f64),
+                        Value::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                (DataType::Float64, Arc::new(Float64Array::from(values)))
             }
             ValueType::String => {
                 let values: Vec<Option<&str>> = column_data

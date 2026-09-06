@@ -30,6 +30,7 @@ impl HashIndex {
         match value {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => f.to_string(), // MVP: simple float string rep (beware precision)
+            Value::Float64(f) => f.to_string(),
             Value::String(s) => s.clone(),
             Value::Bool(b) => b.to_string(),
             Value::Vector(v) => format!("{:?}", v),
