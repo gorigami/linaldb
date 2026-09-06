@@ -3,16 +3,36 @@ use colored::*;
 use linal::dsl::{execute_line, DslOutput};
 use linal::engine::TensorDb;
 use linal::server::start_server;
+use repl_ui::LinalHelper;
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::history::DefaultHistory;
+use rustyline::Editor;
+use std::cell::RefCell;
 use std::fs;
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use toon_format::encode_default;
+
+mod repl_ui;
 
 #[derive(Parser)]
 #[command(name = "LINAL")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "LINAL: Linear Algebra Analytical Engine", long_about = None)]
+#[command(
+    about = "LINAL: SQL-inspired analytical engine with vectors, matrices, and tensors as first-class citizens.",
+    long_about = "LINAL bridges relational data engineering and scientific computing: a SQL-like \
+DSL where vectors, matrices, and tensors are native types, backed by an embeddable in-memory \
+engine or a multi-tenant HTTP server.\n\nRun `linal` with no arguments to start the interactive \
+REPL (type HELP inside it for DSL syntax), or use one of the subcommands below for scripted use.",
+    after_help = "EXAMPLES:\n    \
+linal                            Start the interactive REPL\n    \
+linal run script.lnl             Run a .lnl script\n    \
+linal exec \"SHOW ALL DATASETS\"   Run one DSL statement\n    \
+linal serve --port 8080          Start the HTTP server\n    \
+linal query \"SELECT 1\" --url http://localhost:8080\n\
+                                 Run a DSL statement against a remote server\n\n\
+Full DSL syntax: docs/DSL_REFERENCE.md"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -203,7 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if paren_balance == 0 {
-                    match execute_line(&mut db, &current_cmd, start_line) {
+                    match repl_ui::with_spinner(|| execute_line(&mut db, &current_cmd, start_line))
+                    {
                         Ok(output) => {
                             if !matches!(output, DslOutput::None) {
                                 if use_toon {
@@ -216,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Err(e) => {
-                            eprintln!("Error on line {}: {}", start_line, e);
+                            repl_ui::print_error_with_caret(&current_cmd, &e);
                             std::process::exit(1);
                         }
                     }
@@ -340,7 +361,9 @@ fn handle_load(
 }
 
 fn run_repl(mut db: TensorDb, use_toon: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut rl = DefaultEditor::new()?;
+    let datasets = Rc::new(RefCell::new(Vec::new()));
+    let mut rl: Editor<LinalHelper, DefaultHistory> = Editor::new()?;
+    rl.set_helper(Some(LinalHelper::new(datasets.clone())));
     let history_path = ".linal_history";
 
     if rl.load_history(history_path).is_err() {
@@ -353,13 +376,14 @@ fn run_repl(mut db: TensorDb, use_toon: bool) -> Result<(), Box<dyn std::error::
     } else {
         println!("Output format: {}", "Display (human-readable)".yellow());
     }
-    println!("Type 'EXIT' or use Ctrl-D to quit.");
+    println!("Type 'EXIT' to quit, 'HELP' for a quick reference, or use Ctrl-D to quit.");
 
     let mut current_cmd = String::new();
     let mut paren_balance = 0;
 
     loop {
         let active_db = db.active_db();
+        *datasets.borrow_mut() = db.active_instance().list_dataset_names();
         let prompt = if paren_balance == 0 {
             format!("{} >_>  ", active_db.blue())
         } else {
@@ -388,6 +412,18 @@ fn run_repl(mut db: TensorDb, use_toon: bool) -> Result<(), Box<dyn std::error::
                     continue;
                 }
 
+                if trimmed.eq_ignore_ascii_case("HELP") || trimmed == ".help" {
+                    repl_ui::print_help();
+                    continue;
+                }
+
+                if current_cmd.is_empty() {
+                    if let Some(hint) = repl_ui::cli_verb_hint(trimmed) {
+                        eprintln!("{}: {}", "Hint".yellow(), hint);
+                        continue;
+                    }
+                }
+
                 rl.add_history_entry(trimmed)?;
 
                 if !current_cmd.is_empty() {
@@ -404,7 +440,7 @@ fn run_repl(mut db: TensorDb, use_toon: bool) -> Result<(), Box<dyn std::error::
                 }
 
                 if paren_balance == 0 {
-                    match execute_line(&mut db, &current_cmd, 1) {
+                    match repl_ui::with_spinner(|| execute_line(&mut db, &current_cmd, 1)) {
                         Ok(output) => {
                             if !matches!(output, DslOutput::None) {
                                 if use_toon {
@@ -417,7 +453,7 @@ fn run_repl(mut db: TensorDb, use_toon: bool) -> Result<(), Box<dyn std::error::
                             }
                         }
                         Err(e) => {
-                            eprintln!("{}: {}", "Error".red(), e);
+                            repl_ui::print_error_with_caret(&current_cmd, &e);
                         }
                     }
                     current_cmd.clear();
