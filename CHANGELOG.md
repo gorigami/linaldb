@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.75] - 2026-09-05
+
 ### Added — self-contained cross-platform release binaries
 
 `hdf5` swapped for the actively maintained `hdf5-metno` fork (same `hdf5::`
