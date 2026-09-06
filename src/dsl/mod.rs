@@ -65,19 +65,28 @@ impl fmt::Display for DslOutput {
                     ds.len(),
                     ds.schema.len()
                 )?;
-                for field in &ds.schema.fields {
-                    writeln!(f, "  - {}: {}", field.name, field.value_type)?;
-                }
                 const MAX_ROWS: usize = 20;
                 if !ds.rows.is_empty() {
-                    writeln!(f, "  ---")?;
-                }
-                for row in ds.rows.iter().take(MAX_ROWS) {
-                    let cells: Vec<String> = row.values.iter().map(format_table_cell).collect();
-                    writeln!(f, "  ({})", cells.join(", "))?;
-                }
-                if ds.rows.len() > MAX_ROWS {
-                    writeln!(f, "  ... ({} more rows)", ds.rows.len() - MAX_ROWS)?;
+                    let mut table = comfy_table::Table::new();
+                    table
+                        .load_preset(comfy_table::presets::UTF8_FULL_CONDENSED)
+                        .set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
+                    table.set_header(ds.schema.fields.iter().map(|field| {
+                        comfy_table::Cell::new(format!("{} ({})", field.name, field.value_type))
+                            .fg(comfy_table::Color::Blue)
+                            .add_attribute(comfy_table::Attribute::Bold)
+                    }));
+                    for row in ds.rows.iter().take(MAX_ROWS) {
+                        table.add_row(row.values.iter().map(format_table_cell));
+                    }
+                    writeln!(f, "{table}")?;
+                    if ds.rows.len() > MAX_ROWS {
+                        writeln!(f, "... ({} more rows)", ds.rows.len() - MAX_ROWS)?;
+                    }
+                } else {
+                    for field in &ds.schema.fields {
+                        writeln!(f, "  - {}: {}", field.name, field.value_type)?;
+                    }
                 }
                 Ok(())
             }
