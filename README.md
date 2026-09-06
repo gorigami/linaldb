@@ -40,6 +40,12 @@ cd linaldb && cargo build --release
 ./target/release/linal serve --port 8080
 ```
 
+Prefer not to build from source? Grab a prebuilt binary (macOS Apple Silicon,
+Linux x86_64, Windows x86_64) from the
+[Releases page](https://github.com/gorigami/linaldb/releases) — no Rust
+toolchain, no system HDF5/OpenSSL required, it's a single self-contained
+executable.
+
 ---
 
 ## Core Capabilities

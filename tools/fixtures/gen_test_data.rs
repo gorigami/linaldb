@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create HDF5
     let file = File::create("test_data.h5")?;
     let ds = file.new_dataset::<f32>().shape((2, 2)).create("dataset1")?;
-    ds.write(&data)?;
+    ds.write(data.view())?;
     println!("Created test_data.h5");
 
     Ok(())
