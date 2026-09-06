@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.75] - 2026-09-05
+
+### Added — self-contained cross-platform release binaries
+
+`hdf5` swapped for the actively maintained `hdf5-metno` fork (same `hdf5::`
+API, no source changes needed) and built with its `static`/`zlib` features,
+statically linking a vendored HDF5 instead of requiring the system's
+`libhdf5`. `reqwest` switched from `native-tls` to `rustls-tls`, removing
+the last runtime dependency on system OpenSSL. `ndarray` bumped to `0.17`
+(and `ndarray-npy` to `0.10.0`) to match the version `hdf5-metno`/`zarrs`
+now pull in, avoiding a duplicate-`ndarray` dependency graph. New
+`.github/workflows/release.yml` builds a native binary on each of
+`macos-14` (aarch64), `ubuntu-latest` (x86_64 glibc), and `windows-latest`
+(x86_64 MSVC) for every `v*` tag, runs the real smoke test
+(`examples/smoke_test.lnl`) against each freshly built binary before
+packaging, and publishes all three archives to a GitHub Release. No
+DSL-visible or engine-behavior change.
+
 ### Added — real 64-bit float support (`DOUBLE`/`FLOAT64`)
 
 Resolves the gap flagged (not fixed) at the end of the v0.1.60/v0.1.61 GW showcase round below:
