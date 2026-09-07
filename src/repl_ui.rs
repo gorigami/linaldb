@@ -11,6 +11,7 @@ use rustyline::validate::MatchingBracketValidator;
 use rustyline::{Context, Helper, Hinter, Validator};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::io::IsTerminal;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -199,6 +200,147 @@ pub fn cli_verb_hint(input: &str) -> Option<String> {
         ));
     }
     None
+}
+
+/// Usage tips shown one at a time on REPL startup (`pick_tip`) -- each one
+/// documents a feature that already ships today, no aspirational claims.
+const REPL_TIPS: &[&str] = &[
+    "Tip: press Tab to autocomplete DSL keywords and dataset names.",
+    "Tip: an open '(' lets a statement span multiple lines -- the prompt shows '..' until it balances.",
+    "Tip: '.use <db>' switches the active database without restarting the REPL.",
+    "Tip: type HELP any time for the full command and keyword reference.",
+    "Tip: press the Up arrow or Ctrl-R to search your command history.",
+];
+
+/// Deterministically picks one of `REPL_TIPS` from `seed` (typically a mix
+/// of the process id and history length, computed by the caller so this
+/// function stays pure and easy to test) -- no `rand` dependency needed for
+/// this much variety.
+pub fn pick_tip(seed: u64) -> &'static str {
+    REPL_TIPS[(seed as usize) % REPL_TIPS.len()]
+}
+
+/// Right-pads to `width` *visible* characters. Callers must pass the plain
+/// (no ANSI escape codes) text here for width math -- never a colored
+/// string, whose escape-code bytes would otherwise be counted as part of
+/// the visible width and produce misaligned padding.
+fn right_pad_spaces(plain_visible_text: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(plain_visible_text.chars().count()))
+}
+
+/// Renders `rows` (each a `(plain, display)` pair -- `plain` has no ANSI
+/// codes and is what width/padding math runs on, `display` is what's
+/// actually printed, e.g. `plain` wrapped in `.green()`) as a
+/// rounded-corner box. Width is content-driven (the widest `plain` row),
+/// not real-terminal-width-aware -- detecting actual terminal columns
+/// would need a new dependency, and every row here is either a fixed
+/// string or a short value like a database name, so this is an accepted
+/// trade-off, not an oversight.
+fn render_box(rows: &[(String, String)]) -> String {
+    let content_width = rows
+        .iter()
+        .map(|(plain, _)| plain.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let horizontal = "─".repeat(content_width + 2);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{}{}{}\n",
+        "╭".blue(),
+        horizontal.blue(),
+        "╮".blue()
+    ));
+    for (plain, display) in rows {
+        let pad = right_pad_spaces(plain, content_width);
+        out.push_str(&format!(
+            "{} {}{} {}\n",
+            "│".blue(),
+            display,
+            pad,
+            "│".blue()
+        ));
+    }
+    out.push_str(&format!(
+        "{}{}{}",
+        "╰".blue(),
+        horizontal.blue(),
+        "╯".blue()
+    ));
+    out
+}
+
+/// A short block of literally copy-pasteable, directly runnable DSL lines
+/// -- distinct from `print_help()`'s abstract syntax-pattern examples
+/// (which use placeholders like `dataset`/`col: Type`). Spans both halves
+/// of "SQL meets Linear Algebra" rather than just one side. Every line
+/// verified against `docs/DSL_REFERENCE.md` as real, valid syntax.
+pub fn print_quick_start() {
+    println!("{}", "Quick start:".bold());
+    for example in [
+        "VECTOR v = [1.0, 2.0, 3.0]",
+        "DATASET t COLUMNS (id: Int, score: Float)",
+        "INSERT INTO t VALUES (1, 0.9)",
+        "SELECT * FROM t",
+    ] {
+        println!("  {}", example.cyan());
+    }
+}
+
+/// Prints the REPL's one-time startup banner. `tip_seed` picks which
+/// `REPL_TIPS` entry shows (see `pick_tip`). Falls back to flat, unframed
+/// text when stdout isn't a TTY (e.g. `echo "EXIT" | linal repl`) -- the
+/// box-drawing chars and onboarding flourishes (quick start, tip) have no
+/// value to a piped/captured session, so they're dropped there rather than
+/// just left uncolored. `linal run`/`exec`/`serve` never call this at all,
+/// so they're unaffected regardless of TTY state.
+pub fn print_welcome_banner(version: &str, active_db: &str, use_toon: bool, tip_seed: u64) {
+    let format_label = if use_toon {
+        "TOON (machine-readable)"
+    } else {
+        "Display (human-readable)"
+    };
+
+    if !std::io::stdout().is_terminal() {
+        println!(
+            "{}",
+            format!("LINAL v{version} -- SQL meets Linear Algebra")
+                .bold()
+                .blue()
+        );
+        println!("Database: {active_db}   Format: {format_label}");
+        println!("Type EXIT to quit, HELP for a quick reference, or Ctrl-D to quit.");
+        return;
+    }
+
+    let title = format!("LINAL v{version}");
+    let db_line = format!("Database: {active_db}");
+    let format_line = format!("Format: {format_label}");
+    let rows = [
+        (title.clone(), title.bold().blue().to_string()),
+        (
+            "SQL meets Linear Algebra.".to_string(),
+            "SQL meets Linear Algebra.".dimmed().to_string(),
+        ),
+        (
+            "Vectors, matrices, and tensors as first-class citizens.".to_string(),
+            "Vectors, matrices, and tensors as first-class citizens."
+                .dimmed()
+                .to_string(),
+        ),
+        (db_line.clone(), format!("Database: {}", active_db.green())),
+        (
+            format_line.clone(),
+            format!("Format: {}", format_label.yellow()),
+        ),
+    ];
+
+    println!("{}", render_box(&rows));
+    println!();
+    print_quick_start();
+    println!();
+    println!("{}", pick_tip(tip_seed).dimmed());
+    println!("Type EXIT to quit, HELP for the full reference, or Ctrl-D to quit.");
 }
 
 /// Prints a short, grouped reference of real REPL meta-commands and
@@ -478,6 +620,54 @@ mod tests {
         let (start, candidates) = helper.complete("SEL", 3, &ctx).unwrap();
         assert_eq!(start, 0);
         assert!(candidates.iter().any(|c| c.replacement == "SELECT"));
+    }
+
+    #[test]
+    fn right_pad_spaces_pads_to_requested_width() {
+        assert_eq!(right_pad_spaces("abc", 10).len(), 7);
+        assert_eq!(right_pad_spaces("abcdefghij", 10).len(), 0);
+        assert_eq!(right_pad_spaces("way too long already", 5).len(), 0);
+    }
+
+    #[test]
+    fn right_pad_spaces_ignores_ansi_bytes_in_display_text() {
+        // Regression test for the exact gotcha `render_box` must avoid:
+        // padding must be computed from the *plain* text length, never
+        // from a colored string's byte/char count.
+        colored::control::set_override(true);
+        let colored_text = "abc".red().bold().to_string();
+        assert!(colored_text.chars().count() > 3); // proves ANSI bytes are present
+        assert_eq!(right_pad_spaces("abc", 10).len(), 7);
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn render_box_pads_all_rows_to_the_widest_plain_content() {
+        colored::control::set_override(false);
+        let rows = vec![
+            ("short".to_string(), "short".to_string()),
+            ("a longer line".to_string(), "a longer line".to_string()),
+        ];
+        let box_str = render_box(&rows);
+        let content_lines: Vec<&str> = box_str.lines().filter(|l| l.starts_with('│')).collect();
+        assert_eq!(content_lines.len(), 2);
+        let widths: Vec<usize> = content_lines.iter().map(|l| l.chars().count()).collect();
+        assert_eq!(widths[0], widths[1]);
+    }
+
+    #[test]
+    fn pick_tip_is_deterministic_and_in_bounds() {
+        assert_eq!(pick_tip(0), pick_tip(REPL_TIPS.len() as u64));
+        for seed in 0..20u64 {
+            assert!(REPL_TIPS.contains(&pick_tip(seed)));
+        }
+    }
+
+    #[test]
+    fn pick_tip_varies_across_seeds() {
+        let a = pick_tip(0);
+        let b = pick_tip(1);
+        assert_ne!(a, b);
     }
 
     #[test]
