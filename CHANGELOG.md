@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — native Python/R embedded bindings
+
+Alongside the existing `clients/python`/`clients/r` HTTP thin clients, `clients/python-embedded`
+and `clients/r-embedded` link the engine directly into a Python or R process via a PyO3/extendr
+native extension — no `linal serve`, no HTTP, no JSON. Feasible because `execute_line`/`TensorDb`
+(`src/dsl/mod.rs`, `src/engine/db.rs`) are fully synchronous with no tokio/async anywhere in
+`core`/`engine`/`dsl`/`query` — the same embedding model the CLI/REPL already use.
+
+- `clients/python-embedded`: PyO3 crate (`linaldb_embedded._native`) + a pure-Python ergonomics
+  layer (`linaldb_embedded`), packaged via `maturin`. `Db.execute()` returns plain Python values
+  (`ExecuteResult`/`TensorResult`/`str`/`None`), `Db.dataset(name).to_pandas()`/`.to_arrow()` reads
+  a saved dataset's Parquet package straight off disk instead of over `/delivery`.
+- `clients/r-embedded`: extendr crate (`linalr`) + an R package (`linaldb.embedded`) with
+  `linal_embedded_db()`/`linal_embedded_execute()`/`linal_embedded_query()`/
+  `linal_embedded_dataset_read()`, mirroring `clients/r`'s HTTP API shape.
+- Both bindings are standalone Cargo projects (a `path` dependency on the root `linal` crate, not
+  workspace members) — zero changes to the root `Cargo.toml`/`Cargo.lock` or the protected CI
+  gates.
+- Showcase: the real UCI handwritten-digits classification workflow (`examples/hdf5_digit_classification.lnl`)
+  ported to embedded mode for both languages — no server subprocess at all — plus a runnable
+  Jupyter notebook for the Python side
+  (`clients/python-embedded/examples/digit_classification_embedded.ipynb`).
+- New `clients/EMBEDDED_CONTRACT.md` documents the result-shape contract both bindings implement
+  against, cross-linked from `clients/CONTRACT.md`.
+
 ## [0.1.76] - 2026-09-06
 
 ### Added — terminal UX polish for the REPL/CLI

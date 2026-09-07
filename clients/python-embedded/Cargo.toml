@@ -1,0 +1,13 @@
+[package]
+name = "linal-python"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 native bindings for LINALDB — embeds the same synchronous TensorDb/execute_line the CLI/REPL uses directly in a Python process, no server required."
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+linal = { path = "../.." }
+pyo3 = { version = "0.23", features = ["extension-module"] }

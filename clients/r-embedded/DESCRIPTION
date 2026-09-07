@@ -1,0 +1,27 @@
+Package: linaldb.embedded
+Type: Package
+Title: Embedded/Native R Binding for LINALDB
+Version: 0.1.0
+Authors@R: person("gorigami", email = "develop@gorigami.xyz", role = c("aut", "cre"))
+Description: In-process embedded engine for LINALDB, a SQL-inspired
+    analytical engine treating vectors, matrices, and tensors as
+    first-class citizens. Wraps the engine's Rust 'TensorDb' directly via
+    'extendr' -- no HTTP server involved (contrast with the
+    'linaldb' package under clients/r, a thin HTTP client for a running
+    'linal serve' instance). See ../EMBEDDED_CONTRACT.md for the Rust/R
+    result-shape contract this package implements against.
+License: LinalDB Community License v1.0 (see ../../LICENSE; not a
+    standard SPDX/CRAN-recognized license string yet -- fine for
+    scaffolding, revisit before any real CRAN submission)
+Encoding: UTF-8
+Imports:
+    arrow,
+    jsonlite
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0
+Config/rextendr/version: 0.5.0
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.65.0, xz
+Depends: 
+    R (>= 4.2)

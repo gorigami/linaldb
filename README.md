@@ -145,10 +145,13 @@ linal server --port 8080 stop
 
 ### 6. Python & R Clients
 
-Thin HTTP clients for both languages — no compiled extension, talk to a
-running `linal serve` over `/execute` (ad-hoc DSL) and `/delivery` (real
-Parquet dataset export). See [`clients/CONTRACT.md`](clients/CONTRACT.md)
-for the wire contract both implement against.
+Two ways to reach LINALDB from Python or R — pick based on whether you
+want a server in the loop.
+
+**HTTP (thin client, talk to a running `linal serve`)** — no compiled
+extension, `/execute` (ad-hoc DSL) and `/delivery` (real Parquet dataset
+export). See [`clients/CONTRACT.md`](clients/CONTRACT.md) for the wire
+contract both implement against.
 
 ```python
 # pip install -e clients/python (not yet published to PyPI)
@@ -168,11 +171,38 @@ df <- linal_query(conn, "SELECT id, embedding FROM docs WHERE score > 0.8")
 df <- linal_dataset_read(linal_dataset(conn, "my_dataset"))
 ```
 
+**Embedded (native extension, no server)** — a PyO3/extendr extension
+links `TensorDb`/`execute_line` directly into your process, "use it like
+SQLite." Saved datasets are read straight off disk instead of over
+`/delivery`. See [`clients/EMBEDDED_CONTRACT.md`](clients/EMBEDDED_CONTRACT.md)
+for the result shapes.
+
+```python
+# maturin develop (from clients/python-embedded; not yet published to PyPI)
+import linaldb_embedded as linaldb
+
+db = linaldb.Db()  # persists to ./data, exactly like the CLI
+df = db.query("SELECT id, embedding FROM docs WHERE score > 0.8")
+df = db.dataset("my_dataset").to_pandas()
+```
+
+```r
+# R CMD INSTALL clients/r-embedded (not yet published to CRAN)
+library(linaldb.embedded)
+
+db <- linal_embedded_db()
+df <- linal_embedded_query(db, "SELECT id, embedding FROM docs WHERE score > 0.8")
+df <- linal_embedded_dataset_read(db, "my_dataset")
+```
+
 Full docs and a real end-to-end example (real UCI handwritten-digits
-data, classified via `/execute`, cross-checked against the same data
-independently recomputed from `/delivery`) for each:
-[`clients/python/README.md`](clients/python/README.md) /
-[`clients/r/README.md`](clients/r/README.md).
+data, classified in-process, cross-checked against the same data
+independently recomputed from the on-disk dataset export) for each —
+HTTP: [`clients/python/README.md`](clients/python/README.md) /
+[`clients/r/README.md`](clients/r/README.md); embedded:
+[`clients/python-embedded/README.md`](clients/python-embedded/README.md)
+(includes a runnable Jupyter notebook) /
+[`clients/r-embedded/README.md`](clients/r-embedded/README.md).
 
 ---
 
