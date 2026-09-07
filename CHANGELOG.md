@@ -32,6 +32,23 @@ native extension — no `linal serve`, no HTTP, no JSON. Feasible because `execu
 - New `clients/EMBEDDED_CONTRACT.md` documents the result-shape contract both bindings implement
   against, cross-linked from `clients/CONTRACT.md`.
 
+### Added — redesigned REPL welcome banner
+
+The REPL's startup banner hardcoded "LINAL REPL v0.1", which had drifted from the real crate
+version, and gave no orientation beyond output format and how to quit.
+
+- `run_repl()` now prints a framed welcome box (`repl_ui::print_welcome_banner`) with the real
+  version (`env!("CARGO_PKG_VERSION")`), the project's own tagline ("SQL meets Linear Algebra"),
+  and live session context (active database, output format).
+- A one-time "Quick start" block (`repl_ui::print_quick_start`) shows real, directly-runnable DSL
+  lines spanning both the vector/matrix and SQL sides of the engine — distinct from HELP's
+  abstract syntax-pattern reference.
+- A single rotating usage tip (`repl_ui::pick_tip`), seeded from the process id and history-file
+  size — no new dependency.
+- Falls back to flat, unframed text when stdout isn't a TTY (`std::io::IsTerminal`), so piped/
+  captured REPL sessions skip the box-drawing noise. `linal run`/`linal exec`/`linal serve` are
+  unaffected — none of them call `run_repl()`.
+
 ## [0.1.76] - 2026-09-06
 
 ### Added — terminal UX polish for the REPL/CLI

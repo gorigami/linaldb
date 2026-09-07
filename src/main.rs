@@ -5,7 +5,7 @@ use linal::engine::TensorDb;
 use linal::server::start_server;
 use repl_ui::LinalHelper;
 use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
+use rustyline::history::{DefaultHistory, History};
 use rustyline::Editor;
 use std::cell::RefCell;
 use std::fs;
@@ -370,13 +370,13 @@ fn run_repl(mut db: TensorDb, use_toon: bool) -> Result<(), Box<dyn std::error::
         // No history yet
     }
 
-    println!("{}", "LINAL REPL v0.1".bold().blue());
-    if use_toon {
-        println!("Output format: {}", "TOON (machine-readable)".yellow());
-    } else {
-        println!("Output format: {}", "Display (human-readable)".yellow());
-    }
-    println!("Type 'EXIT' to quit, 'HELP' for a quick reference, or use Ctrl-D to quit.");
+    let tip_seed = std::process::id() as u64 + rl.history().len() as u64;
+    repl_ui::print_welcome_banner(
+        env!("CARGO_PKG_VERSION"),
+        db.active_db(),
+        use_toon,
+        tip_seed,
+    );
 
     let mut current_cmd = String::new();
     let mut paren_balance = 0;
