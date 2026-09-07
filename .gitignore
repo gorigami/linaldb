@@ -4,6 +4,9 @@
 /data
 .linal_history
 
+# Local Claude Code guidance -- not shared via the repo, kept per-developer
+CLAUDE.md
+
 # Python client (clients/python)
 __pycache__/
 *.pyc
