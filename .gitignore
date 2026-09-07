@@ -19,3 +19,17 @@ clients/r/.RData
 clients/r/*.Rproj.user/
 clients/r/*.Rcheck/
 clients/r/*.tar.gz
+
+# Python native/embedded bindings (clients/python-embedded)
+clients/python-embedded/dist/
+clients/python-embedded/build/
+clients/python-embedded/.venv/
+clients/python-embedded/python/linaldb_embedded/*.so
+clients/python-embedded/python/linaldb_embedded/*.pyd
+
+# R native/embedded bindings (clients/r-embedded)
+clients/r-embedded/.Rhistory
+clients/r-embedded/.RData
+clients/r-embedded/*.Rproj.user/
+clients/r-embedded/*.Rcheck/
+clients/r-embedded/*.tar.gz

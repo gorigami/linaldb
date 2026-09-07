@@ -1,0 +1,4 @@
+[build]
+# Reuse the repo-root target dir so building this crate doesn't redo a full
+# HDF5/arrow/tokio/zarrs vendor build the root `linal` crate already did.
+target-dir = "../../target"

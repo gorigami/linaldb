@@ -191,6 +191,7 @@ single-key object.
   for the Tier A clients this round. A client may add thin wrappers later
   without needing a new major version of this contract.
 - Tier B (in-process `pyo3`/`extendr` bindings) — a different, lower-level
-  contract (direct Rust struct access / Arrow C Data Interface), not this
-  HTTP+Parquet one. See `PYTHON_R_INTEROP_PLAN.md`'s design decisions for
-  why that's a separate, later effort.
+  contract (direct Rust struct access, no HTTP/JSON at all), not this
+  HTTP+Parquet one. Now implemented — see
+  [`EMBEDDED_CONTRACT.md`](EMBEDDED_CONTRACT.md) for the result shapes
+  `clients/python-embedded` and `clients/r-embedded` implement against.
