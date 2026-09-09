@@ -1,4 +1,4 @@
 library(testthat)
-library(linaldb)
+library(linaldb.server)
 
-test_check("linaldb")
+test_check("linaldb.server")
