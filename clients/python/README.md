@@ -1,4 +1,4 @@
-# linaldb (Python client)
+# linaldb-server (Python client)
 
 Python client for [LINALDB](../../README.md) — a SQL-inspired analytical
 engine treating vectors, matrices, and tensors as first-class citizens.
@@ -20,7 +20,7 @@ fixed `USE <database>` sent to `/execute` to actually persist, and fixed
 ## Usage
 
 ```python
-import linaldb
+import linaldb_server as linaldb
 
 client = linaldb.connect("http://localhost:8080")
 df = client.query("SELECT id, embedding FROM docs WHERE score > 0.8")
