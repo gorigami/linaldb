@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the `linaldb` R client will be documented here.
+All notable changes to the `linaldb.server` R client will be documented here.
 See the parent repository's `CHANGELOG.md` for the engine's own
 changelog and `PYTHON_R_INTEROP_PLAN.md` (repo root, until all its
 checkpoints land) for the full build history.

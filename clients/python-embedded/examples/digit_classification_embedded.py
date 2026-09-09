@@ -3,7 +3,7 @@
 `clients/python/examples/digit_classification.py`: replays the real UCI
 handwritten-digits classification workflow from
 `../../../examples/hdf5_digit_classification.lnl` through an in-process
-`linaldb_embedded.Db()` -- no `linal serve` subprocess, no HTTP at all --
+`linaldb.Db()` -- no `linal serve` subprocess, no HTTP at all --
 then independently recomputes the classification in plain Python/numpy
 from the same dataset, read directly off disk via `Db.dataset(...)`, and
 confirms the numbers match exactly. Same rigor as the HTTP client's
@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-import linaldb_embedded as linaldb  # noqa: E402
+import linaldb  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LNL_SCRIPT = REPO_ROOT / "examples" / "hdf5_digit_classification.lnl"

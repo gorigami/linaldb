@@ -155,7 +155,7 @@ contract both implement against.
 
 ```python
 # pip install -e clients/python (not yet published to PyPI)
-import linaldb
+import linaldb_server as linaldb
 
 client = linaldb.connect("http://localhost:8080")
 df = client.query("SELECT id, embedding FROM docs WHERE score > 0.8")
@@ -164,7 +164,7 @@ df = client.dataset("my_dataset").to_pandas()
 
 ```r
 # devtools::install(file.path("clients", "r")) (not yet published to CRAN)
-library(linaldb)
+library(linaldb.server)
 
 conn <- linal_connect("http://localhost:8080")
 df <- linal_query(conn, "SELECT id, embedding FROM docs WHERE score > 0.8")
@@ -179,7 +179,7 @@ for the result shapes.
 
 ```python
 # maturin develop (from clients/python-embedded; not yet published to PyPI)
-import linaldb_embedded as linaldb
+import linaldb
 
 db = linaldb.Db()  # persists to ./data, exactly like the CLI
 df = db.query("SELECT id, embedding FROM docs WHERE score > 0.8")
