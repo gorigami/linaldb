@@ -151,15 +151,17 @@ impl Db {
     /// directory a `SAVE DATASET <name>` write lands in
     /// (`src/core/storage.rs`), single source of truth for the R-side
     /// `linal_embedded_dataset_*` readers so the path logic isn't
-    /// duplicated in Rust and R.
+    /// duplicated in Rust and R. Built via a real path join (not string
+    /// concatenation) so the returned string uses native separators on
+    /// every platform, matching R's own `file.path()` on the caller side.
     fn dataset_dir(&self, name: &str) -> String {
         let db = self.inner.borrow();
-        format!(
-            "{}/{}/datasets/{}",
-            db.config.storage.data_dir.display(),
-            db.active_db(),
-            name
-        )
+        PathBuf::from(&db.config.storage.data_dir)
+            .join(db.active_db())
+            .join("datasets")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
