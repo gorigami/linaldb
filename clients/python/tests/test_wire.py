@@ -1,7 +1,7 @@
 import pytest
 
-from linaldb.errors import LinalError
-from linaldb.wire import TableResult, TensorResult, unwrap_result, unwrap_value
+from linaldb_server.errors import LinalError
+from linaldb_server.wire import TableResult, TensorResult, unwrap_result, unwrap_value
 
 
 def test_unwrap_value_scalars():

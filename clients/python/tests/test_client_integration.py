@@ -6,8 +6,8 @@ engine, which fixture-based unit tests (test_wire.py) can't.
 
 import pytest
 
-import linaldb
-from linaldb import LinalError
+import linaldb_server as linaldb
+from linaldb_server import LinalError
 
 
 def test_execute_message_result(linal_server, unique_name):

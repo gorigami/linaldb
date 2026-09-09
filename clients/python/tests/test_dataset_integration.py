@@ -8,7 +8,7 @@ the other.
 
 import pytest
 
-import linaldb
+import linaldb_server as linaldb
 
 
 def test_to_arrow_native_vector_column_no_nulls(linal_server, unique_name):

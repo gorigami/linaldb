@@ -8,7 +8,7 @@ extension (`._native`) — no server, no network, same synchronous
 result shapes this module implements, and `clients/CONTRACT.md` for how
 that compares to the HTTP client's wire contract.
 
-    import linaldb_embedded as linaldb
+    import linaldb
 
     db = linaldb.Db()  # in-memory-backed, persists to ./data like the CLI
     db.execute("CREATE DATASET t COLUMNS (id: Int)")
@@ -18,7 +18,7 @@ that compares to the HTTP client's wire contract.
 This module is kept thin on the Rust side (`src/lib.rs` here only
 converts `DslOutput`/`Value` into plain Python primitives) — everything
 ergonomic (pandas/pyarrow conversion, the `Dataset` file-export handle)
-lives in this pure-Python layer, mirroring how `clients/python/linaldb`
+lives in this pure-Python layer, mirroring how `clients/python/linaldb_server`
 splits `wire.py` (raw unwrap) from `client.py` (ergonomics).
 """
 
@@ -47,7 +47,7 @@ class ExecuteResult:
     one list per row, in column order). Produced for a DSL `Table`/
     `TensorTable` result; other result kinds (`Message`, `None`) are
     returned directly as `str`/`None` from `Db.execute()`, matching the
-    HTTP client's `Client.execute()` shape (`clients/python/linaldb/client.py`).
+    HTTP client's `Client.execute()` shape (`clients/python/linaldb_server/client.py`).
     """
 
     def __init__(self, columns: list[str], rows: list[list]):
@@ -75,7 +75,7 @@ class TensorResult:
     common case for a freshly computed result); a non-trivial
     stride/offset view may not reshape correctly -- check `.strides`/
     `.offset` first if unsure. Mirrors
-    `clients/python/linaldb/wire.py`'s `TensorResult`.
+    `clients/python/linaldb_server/wire.py`'s `TensorResult`.
     """
 
     def __init__(self, shape: list[int], data: list[float], strides=None, offset: int = 0):
@@ -102,7 +102,7 @@ class Dataset:
     `.schema()`/`.stats()`/`.manifest()`/`.to_arrow()`/`.to_pandas()`.
 
     This is the embedded-mode counterpart of
-    `clients/python/linaldb/dataset.py`'s `Dataset` (which fetches the
+    `clients/python/linaldb_server/dataset.py`'s `Dataset` (which fetches the
     same files over `/delivery`); here they're just read straight off
     disk, since the engine and this code share a filesystem.
     """
@@ -152,7 +152,7 @@ class Dataset:
         except ImportError as e:
             raise ImportError(
                 "Dataset.to_pandas() requires the `pandas` extra: "
-                'pip install "linaldb-embedded[pandas]"'
+                'pip install "linaldb[pandas]"'
             ) from e
         return self.to_arrow().to_pandas()
 

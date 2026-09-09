@@ -5,9 +5,9 @@
 //! into plain Python primitives (`None`/`str`/`dict{columns,rows}`) and
 //! maps `DslError` to a Python exception. Ergonomics (pandas/pyarrow
 //! conversion, a `Dataset` handle, a friendlier `ExecuteResult` type) live
-//! in the pure-Python `python/linaldb_embedded/__init__.py` layer, mirroring
-//! how `clients/python/linaldb/wire.py` (raw unwrap) is kept separate from
-//! `clients/python/linaldb/client.py` (ergonomics).
+//! in the pure-Python `python/linaldb/__init__.py` layer, mirroring
+//! how `clients/python/linaldb_server/wire.py` (raw unwrap) is kept separate from
+//! `clients/python/linaldb_server/client.py` (ergonomics).
 
 use linal::core::config::EngineConfig;
 use linal::core::value::Value;

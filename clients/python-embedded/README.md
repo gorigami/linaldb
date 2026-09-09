@@ -1,4 +1,4 @@
-# linaldb-embedded (Python native bindings)
+# linaldb (Python native bindings)
 
 Embedded native Python bindings for [LINALDB](../../README.md) — a PyO3
 extension linking the same synchronous engine the CLI/REPL runs
@@ -12,7 +12,7 @@ exact result shapes this module implements.
 ## Usage
 
 ```python
-import linaldb_embedded as linaldb
+import linaldb
 
 db = linaldb.Db()  # persists to ./data by default, exactly like the CLI
 db.execute("CREATE DATASET t COLUMNS (id: Int, score: Float)")
