@@ -16,6 +16,7 @@ use linal::engine::TensorDb;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use std::path::Path;
 
 pyo3::create_exception!(_native, LinalError, PyException);
 
@@ -159,9 +160,21 @@ impl Db {
     /// `{data_dir}/{active_db}/datasets/{name}/` — containing
     /// `data.parquet`/`schema.json`/`stats.json`/`manifest.json`, the
     /// same layout `/delivery` serves over HTTP (`src/server/dataset_server.rs`).
-    /// The Python `Dataset` class reads these files directly.
+    /// The Python `Dataset` class reads these files directly. Built via a
+    /// real path join (not string concatenation) so the returned string
+    /// uses native separators on every platform -- the engine's own
+    /// internal storage paths (`src/core/storage.rs`) are forward-slash
+    /// strings that Windows file APIs accept just fine, but this method's
+    /// whole purpose is handing callers a string they can compare/build on
+    /// themselves (e.g. against a `pathlib.Path`), where that discrepancy
+    /// actually matters.
     fn dataset_dir(&self, name: &str) -> String {
-        format!("{}/{}/datasets/{}", self.data_dir(), self.active_db(), name)
+        Path::new(&self.data_dir())
+            .join(self.active_db())
+            .join("datasets")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
