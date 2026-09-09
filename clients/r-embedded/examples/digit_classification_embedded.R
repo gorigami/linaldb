@@ -15,7 +15,7 @@
 
 this_dir <- dirname(sub("--file=", "", grep("--file=", commandArgs(trailingOnly = FALSE), value = TRUE)))
 if (length(this_dir) == 0 || this_dir == "") this_dir <- getwd()
-library(linaldb.embedded)
+library(linaldb)
 
 repo_root <- normalizePath(file.path(this_dir, "..", "..", ".."))
 lnl_script <- file.path(repo_root, "examples", "hdf5_digit_classification.lnl")

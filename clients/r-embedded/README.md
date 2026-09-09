@@ -1,11 +1,11 @@
-# linaldb.embedded (R embedded/native binding)
+# linaldb (R embedded/native binding)
 
 Embedded/native R binding for [LINALDB](../../README.md) — a SQL-inspired
 analytical engine treating vectors, matrices, and tensors as first-class
 citizens. Wraps the engine's Rust `TensorDb` directly via
 [`extendr`](https://extendr.github.io/) — **no HTTP, no `linal serve`
 process**. Contrast with [`clients/r`](../r/README.md) (package
-`linaldb`), a thin HTTP client for a running server — that's still the
+`linaldb.server`), a thin HTTP client for a running server — that's still the
 right choice for talking to a remote/shared instance; this package is for
 the "embedded like SQLite" use case, in-process, same address space as
 your R session.
@@ -22,7 +22,7 @@ this hasn't gone through a real `R CMD check` pass yet either.
 ## Usage
 
 ```r
-library(linaldb.embedded)
+library(linaldb)
 
 db <- linal_embedded_db()  # in-memory engine; data_dir defaults to "./data"
 linal_embedded_execute(db, "DATASET docs COLUMNS (id: Int, embedding: Vector(3))")
@@ -91,6 +91,6 @@ build and verify this package.)
 Run tests against the installed package:
 
 ```r
-library(linaldb.embedded)
+library(linaldb)
 testthat::test_dir("clients/r-embedded/tests/testthat")
 ```

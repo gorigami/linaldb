@@ -2,7 +2,7 @@
 # nolint start
 
 #' @usage NULL
-#' @useDynLib linaldb.embedded, .registration = TRUE
+#' @useDynLib linaldb, .registration = TRUE
 NULL
 
 #' Embedded LINALDB engine -- wraps `TensorDb` directly, in-process, no

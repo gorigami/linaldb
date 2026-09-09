@@ -3,7 +3,7 @@
 Real end-to-end example scripts, the embedded/native counterpart of
 [`../../r/examples/`](../../r/examples/README.md) — a real dataset (the
 UCI handwritten-digits fixture already checked into `examples/data/`, no
-synthetic data), replayed in-process through `linaldb.embedded` (no
+synthetic data), replayed in-process through `linaldb` (no
 `linal serve`, no HTTP), with results cross-checked against an
 independent recomputation from the raw persisted vectors.
 

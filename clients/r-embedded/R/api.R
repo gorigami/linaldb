@@ -1,7 +1,7 @@
 #' Open an embedded LINALDB engine
 #'
 #' Wraps a Rust `TensorDb` directly, in-process -- no `linal serve`
-#' involved (contrast with `linaldb::linal_connect()`, the HTTP client
+#' involved (contrast with `linaldb.server::linal_connect()`, the HTTP client
 #' under `clients/r`). Persistence (`SAVE DATASET`, etc.) writes under
 #' `data_dir` exactly like the CLI/REPL does.
 #'

@@ -188,7 +188,7 @@ df = db.dataset("my_dataset").to_pandas()
 
 ```r
 # R CMD INSTALL clients/r-embedded (not yet published to CRAN)
-library(linaldb.embedded)
+library(linaldb)
 
 db <- linal_embedded_db()
 df <- linal_embedded_query(db, "SELECT id, embedding FROM docs WHERE score > 0.8")
