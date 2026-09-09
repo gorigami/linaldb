@@ -22,7 +22,7 @@ Both bindings call `linal::dsl::execute_line(&mut TensorDb, sql, line_no)`
 directly and convert the resulting `DslOutput` (or the `DslError` on
 failure) into a native value. **The two languages use different raw
 shapes at the FFI boundary** — each binding's own ergonomic wrapper layer
-(`linaldb_embedded/__init__.py`'s `Db.execute`, R's
+(`linaldb/__init__.py`'s `Db.execute`, R's
 `linal_embedded_execute()`) is what a caller should actually use; the raw
 shapes below exist to document what that wrapper is built on:
 
@@ -34,7 +34,7 @@ shapes below exist to document what that wrapper is built on:
 | `TensorTable(dataset, _)` | materialized into the same `Table` shape via `TensorDb::materialize_tensor_dataset` (Python only — the Rust side has a live `&mut TensorDb` to call it on) | **not supported** — raises `"TensorTable result is not yet supported by the embedded binding"` (the R crate only holds a bare `RefCell<TensorDb>` behind a free conversion function with no dataset-name context to materialize against; `SHOW` the dataset first to get a plain `Table` instead) | same as `Table`, or an error telling you to `SHOW` first |
 | `Tensor(t)` | `dict(shape=[...], data=[...], strides=[...], offset=<int>)` | `list(Tensor = list(shape = <int vec>, data = <dbl vec>))` | `TensorResult` (Python: `.to_numpy()`) / raw list (R: reshape yourself, `strides`/`offset` not currently exposed on the R side) |
 | `LazyTensor(_)` | raises `LinalError` | raises `"LazyTensor result is not materialized -- run SHOW <name> first"` | error in both — materialize with `SHOW <name>` first |
-| `Err(DslError)` | raises `linaldb_embedded.LinalError(str(e))` | raises an R error condition with `e.to_string()` | native exception/condition in both, carrying the engine's own error text verbatim (same rule as `CONTRACT.md` §4) |
+| `Err(DslError)` | raises `linaldb.LinalError(str(e))` | raises an R error condition with `e.to_string()` | native exception/condition in both, carrying the engine's own error text verbatim (same rule as `CONTRACT.md` §4) |
 
 Per-cell `Value` conversion (both languages convert every `Value`
 directly, no JSON round-trip):
@@ -75,7 +75,7 @@ convenience for `linal_embedded_execute()`'s result.
 
 ## 3. Error semantics
 
-- Every `DslError` surfaces as a native exception (`linaldb_embedded.LinalError`
+- Every `DslError` surfaces as a native exception (`linaldb.LinalError`
   in Python) or R error condition, carrying the engine's error string
   verbatim — same rule as `CONTRACT.md` §4, just without an HTTP status
   code or `status: "error"` envelope in between.

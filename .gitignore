@@ -27,8 +27,8 @@ clients/r/*.tar.gz
 clients/python-embedded/dist/
 clients/python-embedded/build/
 clients/python-embedded/.venv/
-clients/python-embedded/python/linaldb_embedded/*.so
-clients/python-embedded/python/linaldb_embedded/*.pyd
+clients/python-embedded/python/linaldb/*.so
+clients/python-embedded/python/linaldb/*.pyd
 
 # R native/embedded bindings (clients/r-embedded)
 clients/r-embedded/.Rhistory
