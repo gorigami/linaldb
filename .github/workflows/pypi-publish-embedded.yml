@@ -36,6 +36,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Create virtualenv
+        shell: bash
+        working-directory: clients/python-embedded
+        run: |
+          python -m venv .venv
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          fi
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+
       - name: Install maturin + test deps
         run: pip install maturin pytest pandas
 
