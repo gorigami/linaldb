@@ -383,7 +383,7 @@ HTTP server implementation built with **Axum**:
 
 Not part of the Rust crate — thin, no-compiled-extension HTTP clients in
 `clients/python/` (pip package `linaldb`) and `clients/r/` (R package
-`linaldb`), consuming exactly the two HTTP surfaces described above:
+`linaldb.server`), consuming exactly the two HTTP surfaces described above:
 `/execute` for ad-hoc DSL and `/delivery` for saved-dataset Parquet
 export. Both were built together against one shared wire-contract
 document, [`clients/CONTRACT.md`](../clients/CONTRACT.md) — written by

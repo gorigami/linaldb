@@ -1,4 +1,4 @@
-# linaldb (R client)
+# linaldb.server (R client)
 
 R client for [LINALDB](../../README.md) — a SQL-inspired analytical
 engine treating vectors, matrices, and tensors as first-class citizens.
@@ -22,7 +22,7 @@ non-default database).
 ## Usage
 
 ```r
-library(linaldb)
+library(linaldb.server)
 
 conn <- linal_connect("http://localhost:8080")
 df <- linal_query(conn, "SELECT id, embedding FROM docs WHERE score > 0.8")
@@ -64,5 +64,5 @@ testing can miss — see checkpoint 3's findings in
 
 ```sh
 R CMD build --no-build-vignettes .
-R CMD check --no-manual --no-vignettes --no-build-vignettes linaldb_0.1.0.tar.gz
+R CMD check --no-manual --no-vignettes --no-build-vignettes linaldb.server_0.1.0.tar.gz
 ```

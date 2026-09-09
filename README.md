@@ -164,7 +164,7 @@ df = client.dataset("my_dataset").to_pandas()
 
 ```r
 # devtools::install(file.path("clients", "r")) (not yet published to CRAN)
-library(linaldb)
+library(linaldb.server)
 
 conn <- linal_connect("http://localhost:8080")
 df <- linal_query(conn, "SELECT id, embedding FROM docs WHERE score > 0.8")

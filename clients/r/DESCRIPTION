@@ -1,4 +1,4 @@
-Package: linaldb
+Package: linaldb.server
 Type: Package
 Title: R Client for LINALDB
 Version: 0.1.0
