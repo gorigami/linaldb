@@ -9,10 +9,29 @@ description = "Embedded native Python bindings for LINALDB — in-process Tensor
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "LinalDB Community License v1.0" }
-authors = [{ name = "gorigami" }]
+authors = [{ name = "gorigami", email = "gorigamidev@gmail.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Database",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "pyarrow>=14.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/gorigami/linaldb"
+Repository = "https://github.com/gorigami/linaldb"
+Issues = "https://github.com/gorigami/linaldb/issues"
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]
