@@ -127,6 +127,6 @@ class Dataset:
         except ImportError as e:
             raise ImportError(
                 "Dataset.to_pandas() requires the `pandas` extra: "
-                'pip install "linaldb[pandas]"'
+                'pip install "linaldb-server[pandas]"'
             ) from e
         return self.to_arrow().to_pandas()
