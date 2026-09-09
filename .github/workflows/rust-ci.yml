@@ -18,7 +18,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install HDF5
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+        run: sudo apt-get update || true; sudo apt-get install -y libhdf5-dev
       - name: Check disk space
         run: df -h
       - name: Generate test data
@@ -52,7 +52,7 @@ jobs:
         with:
           components: clippy
       - name: Install HDF5
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+        run: sudo apt-get update || true; sudo apt-get install -y libhdf5-dev
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
@@ -65,7 +65,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install HDF5
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+        run: sudo apt-get update || true; sudo apt-get install -y libhdf5-dev
       - name: Build Release
         run: cargo build --release
       - name: Generate test data
