@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the `linaldb-embedded` Python native bindings will
+All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
