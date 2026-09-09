@@ -36,24 +36,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Create virtualenv
-        shell: bash
-        working-directory: clients/python-embedded
-        run: |
-          python -m venv .venv
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
-          else
-            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          fi
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
-
       - name: Install maturin + test deps
         run: pip install maturin pytest pandas
 
-      - name: Build + install (maturin develop)
+      # `maturin develop` needs an active virtualenv/conda env, which is
+      # fiddly to get right cross-platform in CI (Windows' venv layout vs.
+      # Git Bash's path handling tripped this up). `maturin build` + `pip
+      # install` the resulting wheel needs neither -- same approach the
+      # package's own README documents as the alternative to `develop`.
+      - name: Build + install wheel
+        shell: bash
         working-directory: clients/python-embedded
-        run: maturin develop --release
+        run: |
+          maturin build --release --out dist
+          pip install --force-reinstall dist/*.whl
 
       - name: Run tests
         working-directory: clients/python-embedded
