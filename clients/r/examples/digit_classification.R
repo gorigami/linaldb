@@ -24,7 +24,7 @@ pkgload_ok <- requireNamespace("pkgload", quietly = TRUE)
 if (pkgload_ok) {
   pkgload::load_all(file.path(this_dir, ".."), quiet = TRUE)
 } else {
-  library(linaldb)
+  library(linaldb.server)
 }
 
 repo_root <- normalizePath(file.path(this_dir, "..", "..", ".."))

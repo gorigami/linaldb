@@ -7,8 +7,8 @@ datasets/databases.
 
 import pytest
 
-import linaldb_embedded as linaldb
-from linaldb_embedded import ExecuteResult, LinalError
+import linaldb
+from linaldb import ExecuteResult, LinalError
 
 
 @pytest.fixture

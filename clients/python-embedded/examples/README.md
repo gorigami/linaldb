@@ -2,7 +2,7 @@
 
 Real end-to-end examples, embedded-mode counterparts of
 [`clients/python/examples`](../../python/examples): no `linal serve`
-subprocess, no HTTP — an in-process `linaldb_embedded.Db()` replaying real
+subprocess, no HTTP — an in-process `linaldb.Db()` replaying real
 DSL, running a real query, and cross-checking the result against an
 independent numpy recomputation from the same data read directly off
 disk.

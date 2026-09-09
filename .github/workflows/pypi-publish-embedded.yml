@@ -1,0 +1,142 @@
+name: PyPI Publish (linaldb, embedded)
+
+on:
+  push:
+    tags:
+      - "linaldb-v*"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install maturin + test deps
+        run: pip install maturin pytest pandas
+
+      - name: Build + install (maturin develop)
+        working-directory: clients/python-embedded
+        run: maturin develop --release
+
+      - name: Run tests
+        working-directory: clients/python-embedded
+        run: pytest -v
+
+  # One wheel per (OS, arch) covers all CPython >= 3.9 (pyo3's abi3-py39
+  # feature, clients/python-embedded/Cargo.toml) -- no per-Python-version
+  # fan-out needed. Matrix mirrors release.yml's existing OS coverage.
+  build-wheels:
+    name: Build wheels (${{ matrix.target }})
+    needs: [test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: clients/python-embedded
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+          # The manylinux container (Linux target only) doesn't ship cmake,
+          # which the vendored HDF5 build (hdf5-metno's `static` feature)
+          # needs -- install it before the cargo build runs. No-op on
+          # macOS/Windows runners, which already have cmake.
+          before-script-linux: |
+            if command -v cmake &> /dev/null; then
+              echo "cmake already present"
+            elif command -v yum &> /dev/null; then
+              yum install -y cmake3 && ln -sf /usr/bin/cmake3 /usr/bin/cmake
+            elif command -v apt-get &> /dev/null; then
+              apt-get update && apt-get install -y cmake
+            fi
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: clients/python-embedded/dist/*.whl
+          if-no-files-found: error
+
+  # Trusted publishing (OIDC) -- no API token stored anywhere. Requires a
+  # "pending publisher" registered on (test.)pypi.org for this exact repo +
+  # workflow filename + environment name before the first run; see
+  # https://docs.pypi.org/trusted-publishers/.
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [build-wheels]
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-wheels]
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

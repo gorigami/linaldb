@@ -61,14 +61,14 @@ class Client:
     def query(self, dsl: str):
         """Run a DSL command expected to return a table and return a
         `pandas.DataFrame`. Requires the `pandas` extra
-        (`pip install "linaldb[pandas]"`).
+        (`pip install "linaldb-server[pandas]"`).
         """
         try:
             import pandas as pd
         except ImportError as e:
             raise ImportError(
                 "Client.query() requires the `pandas` extra: "
-                'pip install "linaldb[pandas]"'
+                'pip install "linaldb-server[pandas]"'
             ) from e
 
         result = self.execute(dsl)
