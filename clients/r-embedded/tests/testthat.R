@@ -1,4 +1,4 @@
 library(testthat)
-library(linaldb.embedded)
+library(linaldb)
 
-test_check("linaldb.embedded")
+test_check("linaldb")

@@ -164,6 +164,6 @@ impl Db {
 }
 
 extendr_module! {
-    mod linaldb_embedded;
+    mod linaldb;
     impl Db;
 }

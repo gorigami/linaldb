@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the `linaldb.embedded` R binding will be
+All notable changes to the `linaldb` R binding will be
 documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 

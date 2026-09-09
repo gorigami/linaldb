@@ -6,13 +6,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         # nolint start\n\
         \n\
         #' @usage NULL\n\
-        #' @useDynLib linaldb.embedded, .registration = TRUE\n\
+        #' @useDynLib linaldb, .registration = TRUE\n\
         NULL\n\
         \n\
     ";
     let footer = "# nolint end\n";
-    let wrappers = linaldb_embedded::get_linaldb_embedded_metadata()
-        .make_r_wrappers(true, "linaldb.embedded")
+    let wrappers = linaldb::get_linaldb_metadata()
+        .make_r_wrappers(true, "linaldb")
         .map_err(|e| format!("failed to generate wrappers: {e}"))?;
     std::fs::write(wrapper_path, format!("{header}{wrappers}{footer}"))
         .map_err(|e| format!("failed to write {wrapper_path}: {e}"))?;
