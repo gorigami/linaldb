@@ -29,7 +29,7 @@ import numpy as np
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import linaldb  # noqa: E402
+import linaldb_server as linaldb  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LNL_SCRIPT = REPO_ROOT / "examples" / "hdf5_digit_classification.lnl"
