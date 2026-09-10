@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — three silent-correctness bugs found via linal-hub's pytest suite against the embedded Python bindings
+
+Found by writing a real pytest suite (`linal-hub/`, outside this repo) against the published
+`linaldb` PyPI package (`clients/python-embedded`) rather than trusting the docs — this project's
+recurring "real usage finds bugs unit tests miss" lesson, now extended to client-package testing.
+
+- **`HAVING` on an aliased aggregate silently matched zero rows.** `HAVING AVG(score) > 0.5`
+  alongside `AVG(score) AS avg_score` returned an empty result with no error: the parser lowers a
+  bare aggregate call anywhere in an expression (including HAVING) to a literal column-name
+  reference (`Ref("AVG(score)")`), which only matches the aggregate's real output column when the
+  SELECT list leaves it unaliased. Fixed by resolving HAVING's aggregate references against the
+  SELECT list's actual (possibly aliased) output column before lowering, and — matching this
+  project's loud-errors-over-silent-wrong-results ethos — raising a clear error if HAVING still
+  references an unknown column afterward, instead of silently building a predicate that evaluates
+  to `false` for every row.
+- **`HAVING SUM(...)` was completely broken, independent of aliasing.** Unlike `AVG`/`COUNT`/
+  `MIN`/`MAX`, `SUM` always lexes to its own keyword token (it doubles as the standalone
+  tensor-reduction keyword, `SUM a`), so `SUM(price)` inside HAVING/WHERE (anywhere outside a
+  SELECT column list, which has its own dedicated aggregate parser) parsed as the tensor-reduction
+  form applied to a raw column reference instead of an aggregate call — always evaluating to
+  `NULL`. Fixed with the same dual-form dispatch already used for `DISTANCE`/`MATMUL`/`TRANSPOSE`/
+  `FLATTEN`: `SUM(` immediately followed by an identifier or `*` now parses as the SQL aggregate
+  form.
+- **`CAST(<float literal> AS DOUBLE)` silently lost precision.** `CAST(1.23456789012345 AS
+  DOUBLE)` returned the value merely widened from an f32 rounding, discarding real double
+  precision the lexer/parser/AST already carried losslessly — the one narrowing site was
+  `dsl_expr_to_logical_expr`'s generic `Expr::Scalar` arm firing before its `Cast{to: Double}`
+  parent was ever inspected. Fixed by special-casing a literal directly cast to `DOUBLE`.
+- **`INSERT INTO t VALUES (...)` with more positional values than the target has columns silently
+  truncated the extras** instead of erroring — `Iterator::zip` dropped them before
+  `Schema::validate` (which does correctly catch too-*few* values) ever got a chance to see the
+  mismatch. Also closes the analogous gap for a named `INSERT` referencing an unknown column name.
+
+**Flagged, not fixed**: `CAST` inside a computed/`LAZY` column expression (`ADD COLUMN x =
+CAST(...) [LAZY]`) doesn't work at all today — `eval_row_expr` (`src/dsl/executor/query.rs`) has
+no `Expr::Cast` arm and silently evaluates to `Value::Null` for any cast target, not just
+`DOUBLE`. Out of scope here (a materially larger fix, different root cause — missing feature, not
+a narrowing bug); needs its own follow-up.
+
 ### Added — native Python/R embedded bindings
 
 Alongside the existing `clients/python`/`clients/r` HTTP thin clients, `clients/python-embedded`

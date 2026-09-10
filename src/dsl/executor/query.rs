@@ -230,12 +230,14 @@ pub(super) fn execute_select(
         plan = LogicalPlan::Aggregate {
             input: Box::new(plan),
             group_expr: group_exprs,
-            aggr_expr: aggr_exprs,
+            aggr_expr: aggr_exprs.clone(),
         };
         if let Some(having_expr) = &s.having {
+            let schema_now = plan.schema();
+            let predicate = resolve_having(having_expr, &aggr_exprs, &schema_now, line_no)?;
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
-                predicate: dsl_expr_to_logical_expr(having_expr),
+                predicate,
             };
         }
         if let Some(ord) = &s.order_by {
@@ -277,8 +279,13 @@ pub(super) fn execute_select(
             SelectColumns::All => false,
         };
 
-        if has_aggr {
-            let aggr_exprs: Vec<LogicalExpr> = match &s.columns {
+        // Computed unconditionally (empty when `!has_aggr`) so a HAVING
+        // clause on a plain, aggregate-free SELECT is still resolved and
+        // validated against the real schema below, not just the has_aggr
+        // case -- the same silent-failure gap applied there too before this
+        // fix, since `resolve_having` handles an empty `aggr_exprs` fine.
+        let aggr_exprs: Vec<LogicalExpr> = if has_aggr {
+            match &s.columns {
                 SelectColumns::Named(exprs) => exprs
                     .iter()
                     .filter_map(|e| match e {
@@ -295,18 +302,24 @@ pub(super) fn execute_select(
                     })
                     .collect(),
                 SelectColumns::All => vec![],
-            };
+            }
+        } else {
+            vec![]
+        };
+        if has_aggr {
             plan = LogicalPlan::Aggregate {
                 input: Box::new(plan),
                 group_expr: vec![],
-                aggr_expr: aggr_exprs,
+                aggr_expr: aggr_exprs.clone(),
             };
         }
 
         if let Some(having_expr) = &s.having {
+            let schema_now = plan.schema();
+            let predicate = resolve_having(having_expr, &aggr_exprs, &schema_now, line_no)?;
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
-                predicate: dsl_expr_to_logical_expr(having_expr),
+                predicate,
             };
         }
         if let Some(ord) = &s.order_by {
@@ -1138,6 +1151,217 @@ pub(super) fn agg_func_to_logical(f: &AggFuncAst) -> AggregateFunction {
     }
 }
 
+/// Recursively rewrites every `Expr::Ref(name)` in `expr` whose `name` is a
+/// key in `rename`, replacing it with the mapped value; every other node is
+/// cloned as-is. Used to resolve a `HAVING` clause's bare aggregate-call
+/// references (e.g. `Expr::Ref("AVG(score)")`, produced by the parser's
+/// aggregate-call special-case, see `dsl/parser/expr.rs`) against the SELECT
+/// list's real (possibly aliased) output column name before lowering.
+///
+/// `Call`/`Index` (tensor-DSL constructs like `ADD a b`/`t[0,1]`) can't
+/// plausibly appear inside a dataset-query HAVING boolean/comparison
+/// predicate, so they're passed through unrewritten rather than recursing
+/// into `CallExpr`'s own variants for a shape this rewrite never needs to
+/// reach.
+fn rewrite_ref_names(expr: &Expr, rename: &std::collections::HashMap<String, String>) -> Expr {
+    match expr {
+        Expr::Ref(name) => Expr::Ref(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
+        Expr::Int(_)
+        | Expr::Scalar(_)
+        | Expr::StringLit(_)
+        | Expr::Bool(_)
+        | Expr::DatasetRef(_)
+        | Expr::VecLiteral(_)
+        | Expr::MatLiteral(_)
+        | Expr::Call(_)
+        | Expr::Index { .. } => expr.clone(),
+        Expr::Infix { op, lhs, rhs } => Expr::Infix {
+            op: *op,
+            lhs: Box::new(rewrite_ref_names(lhs, rename)),
+            rhs: Box::new(rewrite_ref_names(rhs, rename)),
+        },
+        Expr::And(l, r) => Expr::And(
+            Box::new(rewrite_ref_names(l, rename)),
+            Box::new(rewrite_ref_names(r, rename)),
+        ),
+        Expr::Or(l, r) => Expr::Or(
+            Box::new(rewrite_ref_names(l, rename)),
+            Box::new(rewrite_ref_names(r, rename)),
+        ),
+        Expr::Not(e) => Expr::Not(Box::new(rewrite_ref_names(e, rename))),
+        Expr::IsNull(e) => Expr::IsNull(Box::new(rewrite_ref_names(e, rename))),
+        Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(rewrite_ref_names(e, rename))),
+        Expr::In { expr, list } => Expr::In {
+            expr: Box::new(rewrite_ref_names(expr, rename)),
+            list: list.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+        },
+        Expr::Between { expr, low, high } => Expr::Between {
+            expr: Box::new(rewrite_ref_names(expr, rename)),
+            low: Box::new(rewrite_ref_names(low, rename)),
+            high: Box::new(rewrite_ref_names(high, rename)),
+        },
+        Expr::Field { base, field } => Expr::Field {
+            base: Box::new(rewrite_ref_names(base, rename)),
+            field: field.clone(),
+        },
+        Expr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => Expr::Case {
+            operand: operand
+                .as_ref()
+                .map(|e| Box::new(rewrite_ref_names(e, rename))),
+            branches: branches
+                .iter()
+                .map(|(c, r)| (rewrite_ref_names(c, rename), rewrite_ref_names(r, rename)))
+                .collect(),
+            else_expr: else_expr
+                .as_ref()
+                .map(|e| Box::new(rewrite_ref_names(e, rename))),
+        },
+        Expr::Coalesce(args) => {
+            Expr::Coalesce(args.iter().map(|e| rewrite_ref_names(e, rename)).collect())
+        }
+        Expr::Nullif(a, b) => Expr::Nullif(
+            Box::new(rewrite_ref_names(a, rename)),
+            Box::new(rewrite_ref_names(b, rename)),
+        ),
+        Expr::ScalarFn { func, args } => Expr::ScalarFn {
+            func: *func,
+            args: args.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+        },
+        Expr::Cast { expr, to } => Expr::Cast {
+            expr: Box::new(rewrite_ref_names(expr, rename)),
+            to: *to,
+        },
+        Expr::VectorFn { func, args } => Expr::VectorFn {
+            func: *func,
+            args: args.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+        },
+    }
+}
+
+/// Collects every column name a lowered `LogicalExpr` predicate actually
+/// references, so callers can validate them against a real output schema
+/// (see `resolve_having` below) instead of letting an unresolvable
+/// reference silently evaluate to `false` at row-filtering time.
+fn collect_referenced_columns(expr: &LogicalExpr, out: &mut Vec<String>) {
+    match expr {
+        LogicalExpr::Column(name) => out.push(name.clone()),
+        LogicalExpr::Literal(_) | LogicalExpr::VecLiteral(_) | LogicalExpr::MatLiteral(_) => {}
+        LogicalExpr::BinaryExpr { left, right, .. } => {
+            collect_referenced_columns(left, out);
+            collect_referenced_columns(right, out);
+        }
+        LogicalExpr::And(l, r) | LogicalExpr::Or(l, r) => {
+            collect_referenced_columns(l, out);
+            collect_referenced_columns(r, out);
+        }
+        LogicalExpr::Not(e) | LogicalExpr::IsNull(e) | LogicalExpr::IsNotNull(e) => {
+            collect_referenced_columns(e, out)
+        }
+        LogicalExpr::In { expr, list } => {
+            collect_referenced_columns(expr, out);
+            list.iter().for_each(|e| collect_referenced_columns(e, out));
+        }
+        LogicalExpr::Between { expr, low, high } => {
+            collect_referenced_columns(expr, out);
+            collect_referenced_columns(low, out);
+            collect_referenced_columns(high, out);
+        }
+        LogicalExpr::AggregateExpr { expr, .. } => collect_referenced_columns(expr, out),
+        LogicalExpr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            if let Some(o) = operand {
+                collect_referenced_columns(o, out);
+            }
+            for (c, r) in branches {
+                collect_referenced_columns(c, out);
+                collect_referenced_columns(r, out);
+            }
+            if let Some(e) = else_expr {
+                collect_referenced_columns(e, out);
+            }
+        }
+        LogicalExpr::Coalesce(args) | LogicalExpr::ScalarFn { args, .. } => {
+            args.iter().for_each(|e| collect_referenced_columns(e, out))
+        }
+        LogicalExpr::VectorFn { args, .. } => {
+            args.iter().for_each(|e| collect_referenced_columns(e, out))
+        }
+        LogicalExpr::Nullif(a, b) => {
+            collect_referenced_columns(a, out);
+            collect_referenced_columns(b, out);
+        }
+        LogicalExpr::Cast { expr, .. } => collect_referenced_columns(expr, out),
+    }
+}
+
+/// Resolves and lowers a `HAVING` clause's AST expression into a
+/// `LogicalExpr` predicate, fixing two related silent-correctness gaps:
+///
+/// 1. The parser lowers a bare aggregate call (`AVG(score)`) anywhere in an
+///    expression -- including HAVING -- to `Expr::Ref("AVG(score)")`, a
+///    literal column-name lookup (`dsl/parser/expr.rs`). That string only
+///    matches the aggregate's real output column when the SELECT list left
+///    it unaliased; `AVG(score) AS avg_score` renames the real column to
+///    `avg_score`, so `HAVING AVG(score) > 0.5` would silently reference a
+///    column that no longer exists. This rewrites any such reference to the
+///    aggregate's actual output name first.
+/// 2. Once rewritten, every column the predicate still references is
+///    checked against `schema_now` (the Aggregate plan's real output
+///    schema) -- a genuinely unknown column now raises a clear error
+///    instead of silently building a predicate that evaluates to `false`
+///    for every row (`query::planner::eval_value` returns `None` for an
+///    unresolvable column, and a `None` operand in a comparison silently
+///    becomes `false`, not an error).
+fn resolve_having(
+    having_expr: &Expr,
+    aggr_exprs: &[LogicalExpr],
+    schema_now: &crate::core::tuple::Schema,
+    line: usize,
+) -> Result<LogicalExpr, DslError> {
+    let mut rename = std::collections::HashMap::new();
+    for a in aggr_exprs {
+        if let LogicalExpr::AggregateExpr {
+            func,
+            expr: inner,
+            alias: Some(alias),
+        } = a
+        {
+            let default_name = crate::query::logical::aggregate_default_name(func, inner);
+            if &default_name != alias {
+                rename.insert(default_name, alias.clone());
+            }
+        }
+    }
+
+    let rewritten = rewrite_ref_names(having_expr, &rename);
+    let predicate = dsl_expr_to_logical_expr(&rewritten);
+
+    let mut referenced = Vec::new();
+    collect_referenced_columns(&predicate, &mut referenced);
+    for name in &referenced {
+        if schema_now.get_field_index(name).is_none() {
+            let available: Vec<&str> = schema_now.fields.iter().map(|f| f.name.as_str()).collect();
+            return Err(DslError::Engine {
+                line,
+                source: crate::engine::EngineError::InvalidOp(format!(
+                    "HAVING references unknown column '{}' -- available: {}",
+                    name,
+                    available.join(", ")
+                )),
+            });
+        }
+    }
+
+    Ok(predicate)
+}
+
 pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
     match e {
         Expr::Ref(name) => LogicalExpr::Column(name.clone()),
@@ -1229,6 +1453,18 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
         }
         Expr::Cast { expr, to } => {
             use crate::query::logical::CastTarget as LCast;
+            // A bare numeric literal cast straight to DOUBLE must skip the
+            // generic recursive lowering below: `Expr::Scalar`'s own arm
+            // (above) always narrows to `Value::Float(f32)`, so by the time
+            // a Cast-to-Double evaluator would widen it back to f64, the
+            // literal's real precision is already gone. Same "check the
+            // target type before narrowing" idiom already used by
+            // INSERT/ALTER...DEFAULT (dsl/executor/mod.rs).
+            if matches!(to, CastTarget::Double) {
+                if let Expr::Scalar(f) = expr.as_ref() {
+                    return LogicalExpr::Literal(Value::Float64(*f));
+                }
+            }
             let lto = match to {
                 CastTarget::Int => LCast::Int,
                 CastTarget::Float => LCast::Float,
@@ -1474,6 +1710,14 @@ fn eval_row_expr(expr: &Expr, env: &std::collections::HashMap<&str, &Value>) -> 
                 _ => Value::Null,
             }
         }
+        // TODO(known gap, flagged not fixed): this wildcard also swallows
+        // `Expr::Cast` — a computed/LAZY column (`ADD COLUMN x = CAST(...)
+        // [LAZY]`) silently evaluates to Value::Null for *any* CAST target,
+        // not just DOUBLE. Different root cause from the Cast-arm precision
+        // fix in `dsl_expr_to_logical_expr` above (missing feature here, not
+        // a narrowing bug) and a materially larger fix (needs a full
+        // CastTarget match mirroring `query::physical::evaluate_expression`).
+        // See CHANGELOG.md's "Flagged, not fixed" note.
         _ => Value::Null,
     }
 }

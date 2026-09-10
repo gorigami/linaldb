@@ -346,6 +346,27 @@ impl Parser {
                     args,
                 });
             }
+            // SUM(col) -> SQL aggregate ref (matching the generic-identifier
+            // COUNT/AVG/MIN/MAX special case below); SUM tensor -> tensor
+            // algebra. Unlike AVG/COUNT/MIN/MAX, "SUM" always lexes to this
+            // dedicated keyword token (it doubles as the standalone tensor-
+            // reduction keyword, `SUM a`), so without this arm `SUM(price)`
+            // anywhere outside a SELECT column list (e.g. inside HAVING or
+            // WHERE) fell straight into parse_call_expr, parsing `(price)`
+            // as SUM's single tensor operand instead of an aggregate
+            // reference -- same class of gap as the DISTANCE arm above.
+            Some(Token::Sum) if self.peek_at(1) == Some(&Token::LParen) => {
+                self.advance();
+                self.advance();
+                let arg = if self.at(&Token::Star) {
+                    self.advance();
+                    "*".to_string()
+                } else {
+                    self.eat_ident()?
+                };
+                self.eat(&Token::RParen)?;
+                return Ok(Expr::Ref(format!("SUM({})", arg)));
+            }
             Some(Token::Add)
             | Some(Token::Subtract)
             | Some(Token::Multiply)
