@@ -4,6 +4,24 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.1] - 2026-09-10
+
+Bumped for the engine fix below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- `HAVING` on an aliased aggregate (`HAVING AVG(score) > 0.5` alongside
+  `AVG(score) AS avg_score`) no longer silently matches zero rows.
+- `HAVING SUM(...)` — previously broken independent of aliasing — now
+  resolves correctly.
+- `CAST(<float literal> AS DOUBLE)` no longer silently loses precision.
+- `INSERT INTO t VALUES (...)` with more positional values than the target
+  has columns (or a named `INSERT` naming an unknown column) now errors
+  instead of silently truncating/dropping data.
+
+See the parent repository's `CHANGELOG.md` for full detail — all four were
+found via a real pytest suite written against this exact published PyPI
+package (`linal-hub`, a local project, not yet published anywhere).
+
 ## [0.1.0] - 2026-09-06 (unreleased, not yet published to PyPI)
 
 Initial release: a PyO3 extension (`src/lib.rs`) embedding the engine's
