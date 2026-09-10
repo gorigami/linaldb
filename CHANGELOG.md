@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.77] - 2026-09-10
+
 ### Fixed — three silent-correctness bugs found via linal-hub's pytest suite against the embedded Python bindings
 
 Found by writing a real pytest suite (`linal-hub/`, outside this repo) against the published
