@@ -256,6 +256,14 @@ pub fn execute_statement(
                 .clone();
             let values: Vec<Value> = match s.row {
                 InsertRow::Named(named) => {
+                    for (k, _) in &named {
+                        if !schema.fields.iter().any(|f| &f.name == k) {
+                            return Err(DslError::Parse {
+                                line: line_no,
+                                msg: format!("Unknown column '{}' in INSERT INTO {}", k, dataset),
+                            });
+                        }
+                    }
                     let col_map: std::collections::HashMap<&str, &InsertValue> =
                         named.iter().map(|(k, v)| (k.as_str(), v)).collect();
                     schema
@@ -283,28 +291,39 @@ pub fn execute_statement(
                         })
                         .collect()
                 }
-                InsertRow::Positional(vals) => vals
-                    .into_iter()
-                    .zip(schema.fields.iter())
-                    .map(|(v, f)| match v {
-                        InsertValue::Scalar(n) => match f.value_type {
-                            ValueType::Int => Value::Int(n as i64),
-                            ValueType::Float64 => Value::Float64(n),
-                            _ => Value::Float(n as f32),
-                        },
-                        InsertValue::Text(t) => Value::String(t),
-                        InsertValue::Vector(v) => {
-                            Value::Vector(v.into_iter().map(|x| x as f32).collect())
-                        }
-                        InsertValue::Matrix(m) => Value::Matrix(
-                            m.into_iter()
-                                .map(|row| row.into_iter().map(|x| x as f32).collect())
-                                .collect(),
-                        ),
-                        InsertValue::Bool(b) => Value::Bool(b),
-                        InsertValue::TensorRef(_) | InsertValue::Null => Value::Null,
-                    })
-                    .collect(),
+                InsertRow::Positional(vals) => {
+                    if vals.len() != schema.fields.len() {
+                        return Err(DslError::Parse {
+                            line: line_no,
+                            msg: format!(
+                                "Value count mismatch: expected {}, got {}",
+                                schema.fields.len(),
+                                vals.len()
+                            ),
+                        });
+                    }
+                    vals.into_iter()
+                        .zip(schema.fields.iter())
+                        .map(|(v, f)| match v {
+                            InsertValue::Scalar(n) => match f.value_type {
+                                ValueType::Int => Value::Int(n as i64),
+                                ValueType::Float64 => Value::Float64(n),
+                                _ => Value::Float(n as f32),
+                            },
+                            InsertValue::Text(t) => Value::String(t),
+                            InsertValue::Vector(v) => {
+                                Value::Vector(v.into_iter().map(|x| x as f32).collect())
+                            }
+                            InsertValue::Matrix(m) => Value::Matrix(
+                                m.into_iter()
+                                    .map(|row| row.into_iter().map(|x| x as f32).collect())
+                                    .collect(),
+                            ),
+                            InsertValue::Bool(b) => Value::Bool(b),
+                            InsertValue::TensorRef(_) | InsertValue::Null => Value::Null,
+                        })
+                        .collect()
+                }
             };
             let tuple = Tuple::new(schema.clone(), values).map_err(|e| DslError::Parse {
                 line: line_no,

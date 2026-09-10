@@ -20,6 +20,7 @@
 //         final projection
 
 use linal::core::config::EngineConfig;
+use linal::core::value::Value;
 use linal::dsl::{execute_line, DslOutput};
 use linal::engine::TensorDb;
 use tempfile::TempDir;
@@ -507,4 +508,180 @@ fn test_bare_aggregate_survives_alongside_window_function() {
         }
         other => panic!("Expected Table output, got: {other:?}"),
     }
+}
+
+// ── H: HAVING must resolve aliased aggregates and error on unknown columns
+//      instead of silently matching zero rows ──────────────────────────────
+//
+// Found via linal-hub's pytest suite against the published `linaldb` PyPI
+// package: `HAVING AVG(score) > 0.5` alongside `AVG(score) AS avg_score`
+// silently returned zero rows with no error, because the parser lowers a
+// bare aggregate call in HAVING to a literal column-name Ref
+// (`"AVG(score)"`), which stops matching once the SELECT list renames that
+// same aggregate's real output column via an alias.
+
+#[test]
+fn test_having_with_aliased_aggregate_resolves_correctly() {
+    let mut db = TensorDb::new();
+    exec(
+        &mut db,
+        "DATASET diagnostics COLUMNS (region: String, score: Float)",
+        1,
+    );
+    exec(&mut db, "INSERT INTO diagnostics VALUES (\"west\", 0.9)", 2);
+    exec(&mut db, "INSERT INTO diagnostics VALUES (\"west\", 0.1)", 3);
+    exec(&mut db, "INSERT INTO diagnostics VALUES (\"east\", 0.9)", 4);
+
+    let out = exec(
+        &mut db,
+        "SELECT region, AVG(score) AS avg_score FROM diagnostics GROUP BY region HAVING AVG(score) > 0.5",
+        5,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            assert_eq!(
+                ds.rows.len(),
+                1,
+                "HAVING on an aliased aggregate must still filter correctly, got rows: {:?}",
+                ds.rows
+            );
+            assert_eq!(ds.rows[0].values[0], Value::String("east".to_string()));
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_having_with_unaliased_aggregate_still_works() {
+    // Regression guard: the pre-existing working case (no alias) must keep
+    // working after the alias-resolution fix.
+    let mut db = TensorDb::new();
+    exec(
+        &mut db,
+        "DATASET diagnostics COLUMNS (region: String, score: Float)",
+        1,
+    );
+    exec(&mut db, "INSERT INTO diagnostics VALUES (\"west\", 0.9)", 2);
+    exec(&mut db, "INSERT INTO diagnostics VALUES (\"west\", 0.1)", 3);
+    exec(&mut db, "INSERT INTO diagnostics VALUES (\"east\", 0.9)", 4);
+
+    let out = exec(
+        &mut db,
+        "SELECT region, AVG(score) FROM diagnostics GROUP BY region HAVING AVG(score) > 0.5",
+        5,
+    );
+    match out {
+        DslOutput::Table(ds) => assert_eq!(ds.rows.len(), 1),
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_having_unknown_column_errors_loudly() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: Int, price: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, 10.0)", 2);
+
+    let result = execute_line(
+        &mut db,
+        "SELECT id, SUM(price) AS total FROM t GROUP BY id HAVING nonexistent_col > 1",
+        3,
+    );
+    assert!(
+        result.is_err(),
+        "HAVING referencing an unknown column must error, not silently return nothing"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("nonexistent_col"),
+        "error should name the unresolved column, got: {msg}"
+    );
+}
+
+#[test]
+fn test_having_without_group_by_on_global_aggregate() {
+    // Covers the second HAVING call site (no GROUP BY / global aggregate).
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: Int, price: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, 10.0)", 2);
+    exec(&mut db, "INSERT INTO t VALUES (2, 20.0)", 3);
+
+    let out = exec(
+        &mut db,
+        "SELECT SUM(price) AS total FROM t HAVING SUM(price) > 100",
+        4,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            assert_eq!(ds.rows.len(), 0, "SUM(price)=30 must not pass HAVING > 100");
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+
+    let out = exec(
+        &mut db,
+        "SELECT SUM(price) AS total FROM t HAVING SUM(price) > 10",
+        5,
+    );
+    match out {
+        DslOutput::Table(ds) => {
+            assert_eq!(ds.rows.len(), 1, "SUM(price)=30 must pass HAVING > 10");
+        }
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+// ── I: INSERT must reject a value/column-name count that doesn't match the
+//      target schema, instead of silently truncating or dropping extras ────
+//
+// Found via linal-hub's pytest suite: `INSERT INTO t VALUES (1, 2, 3)` into
+// a 1-column dataset succeeded silently as `(1,)` -- `Iterator::zip` drops
+// the excess values before `Tuple::new`/`Schema::validate` (which DOES
+// correctly catch too-FEW values) ever sees the mismatch.
+
+#[test]
+fn test_insert_positional_too_many_values_errors() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int)", 1);
+
+    let result = execute_line(&mut db, "INSERT INTO t VALUES (1, 2, 3)", 2);
+    assert!(
+        result.is_err(),
+        "INSERT with more values than columns must error, not silently truncate"
+    );
+
+    let out = exec(&mut db, "SELECT * FROM t", 3);
+    match out {
+        DslOutput::Table(ds) => assert_eq!(
+            ds.rows.len(),
+            0,
+            "the failed INSERT must not leave a silently-truncated partial row"
+        ),
+        other => panic!("Expected Table output, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_insert_positional_too_few_values_still_errors() {
+    // Regression guard for the pre-existing under-supply error path.
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int, b: Int)", 1);
+
+    let result = execute_line(&mut db, "INSERT INTO t VALUES (1)", 2);
+    assert!(
+        result.is_err(),
+        "INSERT with fewer values than columns must still error"
+    );
+}
+
+#[test]
+fn test_insert_named_unknown_column_errors() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int)", 1);
+
+    let result = execute_line(&mut db, "INSERT INTO t (a = 1, bogus = 2)", 2);
+    assert!(
+        result.is_err(),
+        "INSERT naming an unknown column must error, not silently drop it"
+    );
 }

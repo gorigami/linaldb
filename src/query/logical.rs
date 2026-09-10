@@ -110,6 +110,20 @@ pub enum JoinType {
     Full,
 }
 
+/// The default (unaliased) output column name for an aggregate expression,
+/// e.g. `AVG(score)` -- used both by `LogicalPlan::Aggregate::schema()`
+/// below and by HAVING-clause alias resolution in `dsl::executor::query`,
+/// so the two can never drift out of sync (a HAVING clause naming a bare
+/// aggregate call must match exactly what an unaliased SELECT would have
+/// produced for that same aggregate).
+pub fn aggregate_default_name(func: &AggregateFunction, inner: &Expr) -> String {
+    let col_name = match inner {
+        Expr::Column(n) => n.clone(),
+        _ => "val".to_string(),
+    };
+    format!("{}({})", format!("{:?}", func).to_uppercase(), col_name)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AggregateFunction {
     Sum,
@@ -248,15 +262,9 @@ impl LogicalPlan {
                         alias,
                     } = expr
                     {
-                        let name = if let Some(a) = alias {
-                            a.clone()
-                        } else {
-                            let col_name = match inner.as_ref() {
-                                Expr::Column(n) => n.clone(),
-                                _ => "val".to_string(),
-                            };
-                            format!("{}({})", format!("{:?}", func).to_uppercase(), col_name)
-                        };
+                        let name = alias
+                            .clone()
+                            .unwrap_or_else(|| aggregate_default_name(func, inner));
                         let mut typ = crate::core::value::ValueType::Int; // Default
 
                         // Infer for SUM/MIN/MAX if inner is likely Vector (not perfect, but MVP)

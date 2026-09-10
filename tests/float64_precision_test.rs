@@ -254,3 +254,52 @@ fn double_field_is_compatible_with_itself() {
     let field = Field::new("x", ValueType::Float64);
     assert!(field.is_compatible(&Value::Float64(GPS_LIKE)));
 }
+
+// ── CAST of a bare numeric literal to DOUBLE must not lose precision ───────
+//
+// Found via linal-hub's pytest suite against the published `linaldb` PyPI
+// package: `CAST(1.23456789012345 AS DOUBLE)` returned the f32-rounded
+// value merely widened to f64, even though the lexer/parser/AST already
+// carry the literal at full f64 precision -- `dsl_expr_to_logical_expr`'s
+// generic `Expr::Scalar` arm narrowed to `Value::Float(f32)` before the
+// enclosing `Cast{to: Double}` node ever ran.
+
+const LITERAL_TEXT: &str = "1.23456789012345";
+const LITERAL_VALUE: f64 = 1.234_567_890_123_45;
+
+#[test]
+fn cast_bare_float_literal_as_double_preserves_full_precision() {
+    let mut db = TensorDb::new();
+    execute_script(&mut db, "DATASET t COLUMNS (id: Int)").expect("setup failed");
+    execute_line(&mut db, "INSERT INTO t VALUES (1)", 0).expect("insert failed");
+
+    execute_line(
+        &mut db,
+        &format!("DATASET r FROM t SELECT CAST({LITERAL_TEXT} AS DOUBLE) AS v"),
+        0,
+    )
+    .expect("CAST AS DOUBLE failed");
+
+    let ds = db.get_dataset("r").expect("dataset not found");
+    assert_eq!(ds.schema.fields[0].value_type, ValueType::Float64);
+    assert_eq!(ds.rows[0].values[0], Value::Float64(LITERAL_VALUE));
+}
+
+#[test]
+fn cast_negative_float_literal_as_double_preserves_full_precision() {
+    // Unary minus on a numeric literal folds into `Expr::Scalar(-n)` at
+    // parse time, hitting the identical code shape as the positive case.
+    let mut db = TensorDb::new();
+    execute_script(&mut db, "DATASET t COLUMNS (id: Int)").expect("setup failed");
+    execute_line(&mut db, "INSERT INTO t VALUES (1)", 0).expect("insert failed");
+
+    execute_line(
+        &mut db,
+        &format!("DATASET r FROM t SELECT CAST(-{LITERAL_TEXT} AS DOUBLE) AS v"),
+        0,
+    )
+    .expect("CAST AS DOUBLE failed");
+
+    let ds = db.get_dataset("r").expect("dataset not found");
+    assert_eq!(ds.rows[0].values[0], Value::Float64(-LITERAL_VALUE));
+}
