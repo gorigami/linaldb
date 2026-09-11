@@ -326,7 +326,11 @@ fn test_engine_binary_and_unary_scenario() {
     assert_eq!(c1.data_ref(), vec![1.0, 1.0, 0.0]);
 
     assert_eq!(corr_ac.shape.rank(), 0);
-    assert!((corr_ac.data[0] - 1.0).abs() < 1e-6);
+    // Pearson correlation of a=[1,0,0] and c=[1,1,0] (not their dot product, which happens to
+    // also be 1.0 for this pair -- CORRELATE computes true Pearson correlation, see
+    // kernels::pearson_correlation_1d): mean_a=1/3, mean_c=2/3, cov=1/3, var_a=var_c=2/3,
+    // corr = (1/3) / (2/3) = 0.5.
+    assert!((corr_ac.data[0] - 0.5).abs() < 1e-6);
 
     let expected = 1.0 / 2f32.sqrt();
     assert!((sim_ac.data[0] - expected).abs() < 1e-6);

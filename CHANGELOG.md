@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.79] - 2026-09-11
+
+### Fixed — two silent-correctness bugs found via a real end-to-end example (linal-hub leukemia gene-expression classification notebook)
+
+Found while building a `linal-hub` notebook that pushes the engine through a real, non-trivial
+data-science workflow (gene-expression marker selection + nearest-centroid classification on
+the Golub et al. leukemia dataset) — this project's recurring "real usage finds bugs unit tests
+miss" lesson, again.
+
+- **`CORRELATE a WITH b` computed a raw dot product, not the documented Pearson correlation.**
+  `docs/DSL_REFERENCE.md` has always described `CORRELATE` as "Pearson correlation between two
+  vectors," but `BinaryOp::Correlate` (`src/engine/db.rs`) was wired to `backend.dot`, the same
+  unnormalized dot product `DOT`/`SUM(MULTIPLY a b)` compute — not mean-centered, not scaled by
+  either vector's own spread. `CORRELATE [1,2,3,4] WITH [2,4,5,9]` returned `61.0` (the dot
+  product) instead of the true Pearson correlation, `0.9648`. Fixed with a new
+  `kernels::pearson_correlation_1d` kernel and a `ComputeBackend::correlate` method (default
+  implementation shared by all three backends), replacing the `backend.dot` call.
+- **`SUM`/`MEAN`/`STDEV` returned a rank-1 `Vector(1)` instead of a true scalar, silently
+  corrupting `vector - MEAN(vector)` (and other elementwise ops against a reduction result) past
+  index 0.** These three reductions built their result as `Shape::new(vec![1])` instead of the
+  proper scalar shape `Shape::new(Vec::new())` that `CORRELATE`/`SIMILARITY`/`DISTANCE` already
+  used. Combining that wrongly-shaped `[1]` result with a longer vector via `+`/`-`/`*`/`/`
+  doesn't hit the engine's correct scalar-broadcast path
+  (`elementwise_binary_op_with_timestamp`'s `(rank, 0)` case) — it instead hits the path meant
+  for two same-rank vectors of genuinely different lengths, which pads the shorter one with the
+  operation's neutral element (`0.0` for add/subtract) rather than broadcasting its single value.
+  The practical effect: `v - MEAN(v)` (the standard way to center a vector before computing a
+  real correlation, and the exact workaround the linal-hub notebook needed for the bug above)
+  only updated `v`'s first element and silently left the rest unchanged. Fixed by giving `SUM`/
+  `MEAN`/`STDEV` a true rank-0 scalar shape.
+
 ## [0.1.78] - 2026-09-11
 
 ### Fixed — intermittent CI test failure in the REPL's own unit tests

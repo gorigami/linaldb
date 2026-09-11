@@ -1201,7 +1201,7 @@ impl DatabaseInstance {
             BinaryOp::Correlate => {
                 let value = self
                     .backend
-                    .dot(ctx, &a, &b)
+                    .correlate(ctx, &a, &b)
                     .map_err(EngineError::InvalidOp)?;
                 let shape = Shape::new(Vec::<usize>::new());
                 let data = vec![value];

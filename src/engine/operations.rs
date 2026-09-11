@@ -11,7 +11,7 @@ pub enum BinaryOp {
     Multiply,
     /// a / b (element-wise)
     Divide,
-    /// CORRELATE a WITH b  -> dot(a, b) (rank-1)
+    /// CORRELATE a WITH b  -> Pearson correlation coefficient(a, b) (rank-1)
     Correlate,
     /// SIMILARITY a WITH b -> cosine_similarity(a, b) (rank-1)
     Similarity,

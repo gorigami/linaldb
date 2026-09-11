@@ -133,9 +133,12 @@ LINAL provides two ways to perform math: Functional keywords and Infix operators
 - `NORMALIZE a`: Scales vector to unit length (L2 norm).
 - `SCALE a BY n`: Multiplies all elements by a scalar `n`.
 - `STACK t1 t2 ...`: Combines tensors along Axis 0.
-- `SUM a`: Sum of all elements in the tensor.
-- `MEAN a`: Arithmetic mean of all elements.
-- `STDEV a`: Standard deviation of all elements.
+- `SUM a`: Sum of all elements in the tensor. Result is a true scalar (rank-0 tensor, shape
+  `[]`) — the same convention `CORRELATE`/`SIMILARITY`/`DISTANCE` (below) use — so it correctly
+  broadcasts against a longer vector in a subsequent `ADD`/`SUBTRACT`/`MULTIPLY`/`DIVIDE`
+  (e.g. `v - SUM v`) instead of being treated as a same-rank vector of differing length.
+- `MEAN a`: Arithmetic mean of all elements. Result is a true scalar (rank-0), same as `SUM`.
+- `STDEV a`: Standard deviation of all elements. Result is a true scalar (rank-0), same as `SUM`.
 
 ### Lazy Evaluation
 

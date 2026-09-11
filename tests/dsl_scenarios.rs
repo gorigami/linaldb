@@ -35,8 +35,10 @@ LET a_norm   = NORMALIZE a
     let corr = db.get("corr").unwrap();
     assert_eq!(corr.shape.rank(), 0);
     assert_eq!(corr.data.len(), 1);
-    // dot([1,2,3],[4,5,6]) = 32
-    assert!((corr.data[0] - 32.0).abs() < 1e-6);
+    // b = a + 3 is a perfect positive affine relationship -> Pearson correlation of 1.0
+    // (CORRELATE computes true Pearson correlation, not a raw dot product -- see
+    // kernels::pearson_correlation_1d).
+    assert!((corr.data[0] - 1.0).abs() < 1e-6);
 
     let sim = db.get("sim").unwrap();
     assert_eq!(sim.shape.rank(), 0);

@@ -13,7 +13,12 @@ fn test_statistical_aggregations() {
     execute_line(&mut db, "LET s1 = SUM v1", 1).unwrap();
     let s1 = db.get("s1").unwrap();
     assert_eq!(s1.data_ref()[0], 10.0);
-    assert_eq!(s1.shape.dims, vec![1]);
+    // A true scalar (rank-0), not a rank-1 Vector(1) -- a [1]-shaped result here used to make
+    // `vector - SUM(vector)` (and other elementwise ops against a reduction) silently corrupt
+    // every element past index 0 by falling into the differing-length-vector padding path
+    // instead of scalar broadcast. See kernels::sum_with_timestamp.
+    assert_eq!(s1.shape.dims, Vec::<usize>::new());
+    assert_eq!(s1.shape.rank(), 0);
 
     // 3. Test MEAN
     execute_line(&mut db, "LET m1 = MEAN v1", 1).unwrap();
@@ -50,6 +55,38 @@ fn test_statistical_aggregations() {
             assert_eq!(t.data_ref()[0], 10.0);
         }
         _ => panic!("Expected Tensor output from SHOW"),
+    }
+}
+
+/// Regression test for a silent-correctness bug found via a real end-to-end example
+/// (leukemia gene-expression classification in linal-hub): `SUM`/`MEAN`/`STDEV` used to return
+/// a rank-1 `Vector(1)` instead of a true scalar (rank-0), which made `vector - MEAN(vector)`
+/// (and other elementwise ops against a reduction result) silently fall into the
+/// differing-length-vector *padding* branch instead of scalar broadcast -- only index 0 got the
+/// real operation, every other element passed through untouched.
+#[test]
+fn test_vector_minus_own_mean_centers_every_element() {
+    let mut db = TensorDb::new();
+
+    execute_line(&mut db, "VECTOR v = [1, 2, 3, 4]", 1).unwrap();
+    execute_line(&mut db, "LET m = MEAN v", 1).unwrap();
+    execute_line(&mut db, "LET centered = v - m", 1).unwrap();
+
+    let centered = db.get("centered").unwrap();
+    assert_eq!(centered.data_ref(), &[-1.5, -0.5, 0.5, 1.5]);
+
+    // Same shape-broadcast path, exercised via ADD/MULTIPLY/DIVIDE against SUM/STDEV results too.
+    execute_line(&mut db, "LET s = SUM v", 1).unwrap();
+    execute_line(&mut db, "LET plus_sum = v + s", 1).unwrap();
+    let plus_sum = db.get("plus_sum").unwrap();
+    assert_eq!(plus_sum.data_ref(), &[11.0, 12.0, 13.0, 14.0]); // s = 10
+
+    execute_line(&mut db, "LET sd = STDEV v", 1).unwrap();
+    execute_line(&mut db, "LET scaled = v / sd", 1).unwrap();
+    let scaled = db.get("scaled").unwrap();
+    let expected_sd = 1.25f32.sqrt();
+    for (actual, original) in scaled.data_ref().iter().zip([1.0, 2.0, 3.0, 4.0]) {
+        assert!((actual - original / expected_sd).abs() < 1e-5);
     }
 }
 
