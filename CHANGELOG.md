@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — intermittent CI test failure in the REPL's own unit tests
+
+`repl_ui::tests::highlight_dsl_line_colors_leading_keyword_and_strings` and three sibling tests
+toggled the `colored` crate's process-global color override with no synchronization between them;
+since `cargo test` runs tests concurrently on separate threads within one process, one test's
+`set_override`/`unset_override` could land in the middle of another's, intermittently suppressing
+the ANSI codes the assertion expected. Serialized the four affected tests behind a `static Mutex`,
+mirroring the existing `DATA_DIR_LOCK` pattern already used in `tests/cli_hardening_test.rs`. Test
+infrastructure only — REPL syntax highlighting itself was never wrong, and no user-facing behavior
+changed.
+
 ## [0.1.77] - 2026-09-10
 
 ### Fixed — three silent-correctness bugs found via linal-hub's pytest suite against the embedded Python bindings

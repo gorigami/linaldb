@@ -548,6 +548,13 @@ impl Completer for LinalHelper {
 mod tests {
     use super::*;
     use rustyline::history::MemHistory;
+    use std::sync::Mutex;
+
+    // These four tests toggle colored::control's process-global override
+    // (colored's SHOULD_COLORIZE is one shared AtomicBool pair with no
+    // per-thread isolation) and race against each other under cargo test's
+    // default concurrent-thread runner. Serialize them.
+    static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn cli_verb_hint_flags_known_shell_commands() {
@@ -593,6 +600,7 @@ mod tests {
 
     #[test]
     fn highlight_dsl_line_colors_leading_keyword_and_strings() {
+        let _guard = COLOR_OVERRIDE_LOCK.lock().unwrap();
         colored::control::set_override(true);
         let highlighted = highlight_dsl_line("SELECT * FROM t WHERE name = \"alice\"");
         assert!(matches!(highlighted, Cow::Owned(_)));
@@ -605,6 +613,7 @@ mod tests {
 
     #[test]
     fn highlight_dsl_line_passes_through_unrecognized_input() {
+        let _guard = COLOR_OVERRIDE_LOCK.lock().unwrap();
         colored::control::set_override(true);
         let highlighted = highlight_dsl_line("3+3");
         assert!(matches!(highlighted, Cow::Borrowed(_)));
@@ -634,6 +643,7 @@ mod tests {
         // Regression test for the exact gotcha `render_box` must avoid:
         // padding must be computed from the *plain* text length, never
         // from a colored string's byte/char count.
+        let _guard = COLOR_OVERRIDE_LOCK.lock().unwrap();
         colored::control::set_override(true);
         let colored_text = "abc".red().bold().to_string();
         assert!(colored_text.chars().count() > 3); // proves ANSI bytes are present
@@ -643,6 +653,7 @@ mod tests {
 
     #[test]
     fn render_box_pads_all_rows_to_the_widest_plain_content() {
+        let _guard = COLOR_OVERRIDE_LOCK.lock().unwrap();
         colored::control::set_override(false);
         let rows = vec![
             ("short".to_string(), "short".to_string()),
