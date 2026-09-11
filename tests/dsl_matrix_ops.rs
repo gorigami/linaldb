@@ -168,13 +168,13 @@ fn test_dsl_vector_operations() {
     let script = r#"
         VECTOR a = [1, 2, 3]
         VECTOR b = [4, 5, 6]
-        
+
         LET sum = ADD a b
-        LET dot = CORRELATE a WITH b
+        LET corr = CORRELATE a WITH b
         LET sim = SIMILARITY a WITH b
-        
+
         SHOW sum
-        SHOW dot
+        SHOW corr
         SHOW sim
     "#;
 
@@ -183,8 +183,32 @@ fn test_dsl_vector_operations() {
     let sum = db.get("sum").unwrap();
     assert_eq!(sum.data_ref(), vec![5.0, 7.0, 9.0]);
 
-    let dot = db.get("dot").unwrap();
-    assert_eq!(dot.data[0], 32.0); // 1*4 + 2*5 + 3*6 = 32
+    // b = a + 3 is a perfect positive affine relationship -> Pearson correlation of 1.0.
+    let corr = db.get("corr").unwrap();
+    assert!((corr.data[0] - 1.0).abs() < 1e-5);
+}
+
+/// Regression test for a silent-correctness bug found via a real end-to-end example (leukemia
+/// gene-expression classification in linal-hub): `CORRELATE` is documented
+/// (docs/DSL_REFERENCE.md) as computing Pearson correlation, but was actually wired to a raw,
+/// unnormalized dot product (`dot([1,2,3,4],[2,4,5,9]) = 61`, visibly not a correlation
+/// coefficient). This pair is not perfectly (anti-)correlated, so the two statistics give
+/// clearly different numbers -- the perfectly-correlated pair in `dsl_scenarios.rs` alone
+/// wouldn't have caught a dot-product-in-disguise, since a perfect correlation is 1.0 either way.
+#[test]
+fn test_correlate_is_pearson_not_dot_product() {
+    let mut db = TensorDb::new();
+
+    let script = r#"
+        VECTOR a = [1, 2, 3, 4]
+        VECTOR b = [2, 4, 5, 9]
+        LET corr = CORRELATE a WITH b
+    "#;
+    execute_script(&mut db, script).unwrap();
+
+    let corr = db.get("corr").unwrap();
+    // Hand-computed Pearson correlation for this pair -- nowhere near 61.0 (the raw dot product).
+    assert!((corr.data[0] - 0.9647638).abs() < 1e-5);
 }
 
 #[test]

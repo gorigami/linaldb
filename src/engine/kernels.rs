@@ -567,6 +567,43 @@ pub fn dot_1d(a: &Tensor, b: &Tensor) -> Result<f32, String> {
     Ok(sum)
 }
 
+/// Pearson correlation coefficient between two rank-1 tensors (vectors).
+///
+/// This is the actual statistic `CORRELATE a WITH b` is documented to compute
+/// (docs/DSL_REFERENCE.md) — mean-centered and normalized by each vector's own spread, unlike
+/// `dot_1d` (raw, unnormalized) which `BinaryOp::Correlate` was previously wired to by mistake.
+pub fn pearson_correlation_1d(a: &Tensor, b: &Tensor) -> Result<f32, String> {
+    ensure_rank_1(a, "pearson_correlation_1d")?;
+    ensure_rank_1(b, "pearson_correlation_1d")?;
+    ensure_same_shape(&a.shape, &b.shape)?;
+
+    let a_data = a.data_ref();
+    let b_data = b.data_ref();
+    let n = a_data.len();
+    if n == 0 {
+        return Err("Cannot compute Pearson correlation of an empty tensor".into());
+    }
+    let n_f = n as f32;
+
+    let mean_a: f32 = a_data.iter().sum::<f32>() / n_f;
+    let mean_b: f32 = b_data.iter().sum::<f32>() / n_f;
+
+    let (mut cov, mut var_a, mut var_b) = (0.0f32, 0.0f32, 0.0f32);
+    for (&x, &y) in a_data.iter().zip(b_data.iter()) {
+        let dx = x - mean_a;
+        let dy = y - mean_b;
+        cov += dx * dy;
+        var_a += dx * dx;
+        var_b += dy * dy;
+    }
+
+    if var_a == 0.0 || var_b == 0.0 {
+        return Err("Cannot compute Pearson correlation with a zero-variance vector".into());
+    }
+
+    Ok(cov / (var_a.sqrt() * var_b.sqrt()))
+}
+
 /// L2 Norm of a tensor (any rank)
 pub fn l2_norm_1d(a: &Tensor) -> Result<f32, String> {
     // Treat as a flat vector of elements
@@ -649,8 +686,13 @@ pub fn sum_with_timestamp(
         total
     };
 
+    // A true scalar (rank-0), not a rank-1 Vector(1) -- see CORRELATE/SIMILARITY/DISTANCE for
+    // the same convention. A rank-1 [1]-shaped result here used to make `vector - SUM(vector)`
+    // (and other elementwise ops) silently fall into the differing-length-vector padding branch
+    // in `elementwise_binary_op_with_timestamp` instead of the correct scalar-broadcast branch,
+    // corrupting every element past index 0.
     let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
-    Tensor::new(new_id, Shape::new(vec![1]), vec![s], metadata)
+    Tensor::new(new_id, Shape::new(Vec::new()), vec![s], metadata)
 }
 
 /// Mean of all elements in a tensor
@@ -671,8 +713,9 @@ pub fn mean_with_timestamp(
     let s_tensor = sum_with_timestamp(a, TensorId::new(), timestamp)?;
     let m = s_tensor.data_ref()[0] / total_elements;
 
+    // True scalar (rank-0) -- see the comment on `sum_with_timestamp` above for why this matters.
     let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
-    Tensor::new(new_id, Shape::new(vec![1]), vec![m], metadata)
+    Tensor::new(new_id, Shape::new(Vec::new()), vec![m], metadata)
 }
 
 /// Standard deviation of all elements in a tensor
@@ -721,8 +764,9 @@ pub fn stdev_with_timestamp(
     let variance = sq_diff_sum / total_elements;
     let stdev = variance.sqrt();
 
+    // True scalar (rank-0) -- see the comment on `sum_with_timestamp` above for why this matters.
     let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
-    Tensor::new(new_id, Shape::new(vec![1]), vec![stdev], metadata)
+    Tensor::new(new_id, Shape::new(Vec::new()), vec![stdev], metadata)
 }
 
 /// Normaliza un tensor rank-1 a norma 1 (L2)

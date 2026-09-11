@@ -1,5 +1,6 @@
 use crate::core::tensor::{Tensor, TensorId};
 use crate::engine::context::ExecutionContext;
+use crate::engine::kernels;
 
 pub mod pool;
 pub use pool::{PoolStats, TensorPool};
@@ -82,6 +83,17 @@ pub trait ComputeBackend: std::fmt::Debug + Send + Sync {
         b: &Tensor,
     ) -> Result<f32, String>;
     fn distance(&self, ctx: &mut ExecutionContext, a: &Tensor, b: &Tensor) -> Result<f32, String>;
+    /// Pearson correlation coefficient between two rank-1 tensors. Default implementation
+    /// shared by every backend (scalar/cpu/simd) -- this is a small O(n) scan with no
+    /// SIMD-specific fast path today, unlike `dot`/`cosine_similarity`.
+    fn correlate(
+        &self,
+        _ctx: &mut ExecutionContext,
+        a: &Tensor,
+        b: &Tensor,
+    ) -> Result<f32, String> {
+        kernels::pearson_correlation_1d(a, b)
+    }
 
     // Unary operations
     fn scale(
