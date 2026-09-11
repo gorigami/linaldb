@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.78] - 2026-09-11
+
 ### Fixed — intermittent CI test failure in the REPL's own unit tests
 
 `repl_ui::tests::highlight_dsl_line_colors_leading_keyword_and_strings` and three sibling tests
