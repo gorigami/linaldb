@@ -91,11 +91,7 @@ fn multi_output_let_binds_decompositions() {
     assert!((a00 - 4.0).abs() < 1e-3);
     assert!((a01 - 7.0).abs() < 1e-3);
 
-    run(
-        &mut db,
-        "MATRIX piv = [[0, 2, 1], [1, 1, 1], [2, 0, 1]]",
-        3,
-    );
+    run(&mut db, "MATRIX piv = [[0, 2, 1], [1, 1, 1], [2, 0, 1]]", 3);
     run(&mut db, "LET p, l, u = LU piv", 4);
     assert_eq!(tensor_data(&db, "p").len(), 9);
     assert_eq!(tensor_data(&db, "l").len(), 9);
