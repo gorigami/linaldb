@@ -4,6 +4,24 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.2] - 2026-09-12
+
+Bumped for the engine fix below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- `CORRELATE a WITH b` now computes true Pearson correlation instead of a raw,
+  unnormalized dot product it was silently wired to.
+- `SUM`/`MEAN`/`STDEV` now return a true scalar (rank-0) instead of a
+  rank-1 `Vector(1)` — previously, combining one of these with a longer
+  vector via `+`/`-`/`*`/`/` (e.g. `v - MEAN(v)`, the standard way to center
+  a vector) silently corrupted every element past the first instead of
+  broadcasting correctly.
+
+See the parent repository's `CHANGELOG.md` (`[0.1.79]`) for full detail —
+both were found via a real end-to-end notebook (`linal-hub`, a local
+project, not yet published anywhere) doing gene-expression marker
+selection and classification entirely in `linaldb` DSL.
+
 ## [0.1.1] - 2026-09-10
 
 Bumped for the engine fix below (this crate has no code of its own beyond the
