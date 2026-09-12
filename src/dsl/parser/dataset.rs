@@ -826,9 +826,20 @@ impl Parser {
             });
         }
 
-        // Check for ranking window functions: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD
-        if let Some(Token::Ident(s)) = self.peek() {
-            let upper = s.to_uppercase();
+        // Check for ranking window functions: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD.
+        // `RANK` is matched as its own dedicated `Token::Rank` too (not just
+        // `Token::Ident("RANK")`) since Phase 8's standalone `RANK a` tensor
+        // operator (LINEAGE_AND_LINALG_PLAN.md) made "RANK" a lexer keyword --
+        // without this, `RANK()` as a SQL window function stopped parsing
+        // entirely, the same class of keyword/SQL-identifier collision
+        // `Token::Sum`/`Token::Distance` already have dedicated handling for
+        // elsewhere in this parser.
+        let ranking_ident = match self.peek() {
+            Some(Token::Ident(s)) => Some(s.to_uppercase()),
+            Some(Token::Rank) => Some("RANK".to_string()),
+            _ => None,
+        };
+        if let Some(upper) = ranking_ident {
             match upper.as_str() {
                 "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "LAG" | "LEAD" => {
                     let fname = upper.clone();

@@ -386,7 +386,19 @@ impl Parser {
             | Some(Token::MatchedFilter)
             | Some(Token::Scale)
             | Some(Token::Reshape)
-            | Some(Token::Stack) => return self.parse_call_expr(),
+            | Some(Token::Stack)
+            | Some(Token::Trace)
+            | Some(Token::Determinant)
+            | Some(Token::Rank)
+            | Some(Token::Inverse)
+            | Some(Token::Solve)
+            | Some(Token::Eigenvalues)
+            | Some(Token::Qr)
+            | Some(Token::Lu)
+            | Some(Token::Cholesky)
+            | Some(Token::Eigen)
+            | Some(Token::Svd)
+            | Some(Token::Pca) => return self.parse_call_expr(),
             Some(Token::Ident(_)) => {
                 let name = self.eat_ident()?;
                 if name == "true" {
@@ -675,6 +687,30 @@ impl Parser {
                     return Err(self.error("STACK requires at least 2 operands"));
                 }
                 CallExpr::Stack(operands)
+            }
+            Some(Token::Trace) => CallExpr::Trace(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Determinant) => CallExpr::Determinant(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Rank) => CallExpr::Rank(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Inverse) => CallExpr::Inverse(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Solve) => {
+                let a = self.parse_simple_expr()?;
+                let b = self.parse_simple_expr()?;
+                CallExpr::Solve(Box::new(a), Box::new(b))
+            }
+            Some(Token::Eigenvalues) => CallExpr::Eigenvalues(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Qr) => CallExpr::Qr(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Lu) => CallExpr::Lu(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Cholesky) => CallExpr::Cholesky(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Eigen) => CallExpr::Eigen(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Svd) => CallExpr::Svd(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Pca) => {
+                let input = self.parse_simple_expr()?;
+                self.eat(&Token::Components)?;
+                let components = self.eat_usize()?;
+                CallExpr::Pca {
+                    input: Box::new(input),
+                    components,
+                }
             }
             _ => return Err(self.unexpected("a named operation")),
         };
