@@ -115,8 +115,8 @@ fn save_dataset_core(
         DatasetMetadata::new(disk_name.clone(), DatasetOrigin::Created)
     };
 
-    let content_hash = format!("{}:{}", dataset_name, dataset.rows.len());
-    metadata.update_hash(content_hash);
+    let content_hash = dataset.content_hash();
+    metadata.update_hash(content_hash.clone());
     metadata.record_schema(dataset.schema.as_ref().clone().into());
     storage
         .save_dataset_metadata(&metadata)
@@ -124,6 +124,22 @@ fn save_dataset_core(
             line: line_no,
             msg: format!("Failed to save metadata: {}", e),
         })?;
+
+    // SAVE doesn't transform data, just persists it -- `record_provenance`
+    // recognizes this as a redundant no-op (no inputs, output hash already
+    // has a producer) and skips it rather than shadowing the real ancestry
+    // that produced `dataset` in the first place. If this *is* the dataset's
+    // first-ever record (e.g. built purely via tensor ops, never through a
+    // provenance-emitting statement), it's kept as a real root record.
+    let record = crate::core::provenance::ProvenanceRecord::new(
+        "SAVE DATASET",
+        crate::core::tensor::ExecutionId::new(),
+    )
+    .with_outputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
+        disk_name.clone(),
+        content_hash,
+    )]);
+    db.active_instance_mut().record_provenance(record);
 
     Ok(DslOutput::Message(format!(
         "Saved dataset '{}' (v{}) to '{}'",
@@ -583,6 +599,28 @@ fn import_dataset_core(
             line: line_no,
             msg: format!("Failed to save legacy metadata: {}", e),
         })?;
+
+    // Hash the just-persisted package through the same `load_dataset` path
+    // `LOAD DATASET`/`db.get_dataset` use later, not `record_batch_content_hash`
+    // on the connector's in-flight `RecordBatch`: the two encode the same
+    // logical data completely differently (Arrow IPC bytes vs. this crate's
+    // own `dataset_legacy::Dataset` -- schema+rows serde_json), so hashing
+    // them with different schemes would mean this IMPORT record's output
+    // hash could never match what a later `DATASET ... FROM` lookup
+    // computes for the same dataset, silently breaking the ancestry chain
+    // right at its root.
+    if let Ok(reloaded) = storage.load_dataset(ds_name) {
+        let record = crate::core::provenance::ProvenanceRecord::new(
+            format!("IMPORT {}", connector.name()),
+            crate::core::tensor::ExecutionId::new(),
+        )
+        .with_param("path", path_str)
+        .with_outputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
+            ds_name.to_string(),
+            reloaded.content_hash(),
+        )]);
+        db.active_instance_mut().record_provenance(record);
+    }
 
     let mut msg = format!(
         "Imported dataset '{}' and persisted to {}",

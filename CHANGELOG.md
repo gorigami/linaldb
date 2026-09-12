@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `EXPLAIN LINEAGE`: unified, persisted provenance for tensors and datasets
+
+Real derivation history now survives a restart, and works identically whether you ask about a
+tensor or a dataset — replacing three separate, weakly-connected lineage mechanisms with one
+(see `LINEAGE_AND_LINALG_PLAN.md`'s Phase 0 outcome for the full audit/design writeup).
+
+- New `src/core/provenance.rs`: `ProvenanceRecord` (operation + structured `parameters` +
+  `inputs`/`outputs` + timestamp + execution id + engine version, all required fields) and
+  `ProvenanceEntity` (`Tensor{id,name,content_hash}` / `Dataset{name,content_hash}`) —
+  content-hash-addressed so ancestry resolves across a restart even though `TensorId`/dataset
+  instance ids are process-local UUIDs regenerated on `LOAD`. `ProvenanceStore` is one
+  append-only JSONL log (`{data_dir}/{db}/provenance.jsonl`) per `DatabaseInstance`, shared by
+  every tensor and dataset in it.
+- New `EXPLAIN LINEAGE <name> [AS JSON]` DSL command — text-tree (default) or JSON export, the
+  latter shaped for OpenLineage-style compatibility. `SHOW LINEAGE <name>` keeps working as a
+  documented alias (and, unlike before, now also resolves dataset names, not just tensors).
+- Every existing tensor operator (`ADD`/`SUBTRACT`/`MATMUL`/`NORMALIZE`/`FFT`/`WHITEN`/
+  `BANDPASS`/... — all ~16 `eval_*` sites in `engine/db.rs`) and dataset operation (`IMPORT`,
+  `DATASET ... FROM` including `GROUP BY` and computed/window columns, `ALTER DATASET ADD
+  COLUMN`, `SAVE DATASET`) now records into the same `ProvenanceStore` — the unification point
+  is this event log, not the data model.
+- Real SHA256 content hashing replaces two previous placeholders: `core/storage.rs`'s
+  `format!("{name}:{row_count}")` (not an actual hash of content) and every connector's
+  (`csv`/`hdf5`/`numpy`/`zarr`) empty-string `dataset_hash`.
+- A dataset's legacy per-package `lineage.json` is kept as a read-compatibility fallback for
+  datasets saved before this feature — new lookups go through `ProvenanceStore` first.
+- Docs clarify `AUDIT DATASET` (referential-integrity check) and `EXPLAIN LINEAGE` (derivation
+  history) are unrelated despite the naming similarity — the two were previously easy to
+  conflate.
+
+Two pre-existing, unrelated bugs surfaced and fixed while building this (this project's
+recurring "a real end-to-end workflow finds bugs unit tests miss" pattern, again):
+
+- **`DatasetMetadata::update_stats` never refreshed its own cached `schema` field.** Every
+  schema-changing mutation (e.g. `ALTER DATASET ... ADD COLUMN`) correctly updated
+  `Dataset.schema` and `column_stats`, but the *metadata's own* `schema` copy — the one
+  `save_legacy_metadata` persists to `.meta.json`, and the one `ParquetStorage::load_dataset`
+  rebuilds a reloaded dataset from — stayed stale. A newly added column's data safely reached
+  `data.parquet`, but silently became unreadable after any `SAVE` + reload, because the metadata
+  never admitted the column existed. Found by building the exact `ALTER ... ADD COLUMN` → `SAVE`
+  → restart → `LOAD` → `EXPLAIN LINEAGE` round trip this feature's own integration test exercises.
+- **Ancestry resolution could self-reference or misattribute on a content-hash collision.** An
+  operation that doesn't change its data's content (e.g. a `FILTER` that removes no rows) leaves
+  a record's own input carrying the same hash as its output; resolving purely by hash could match
+  a record against itself (infinite recursion) or attribute one entity's history to a different,
+  later entity that coincidentally produced identical bytes. Fixed by bounding ancestry search to
+  records causally prior to the one being resolved, and preferring a same-named match among
+  hash-matching candidates before falling back to hash alone.
+
+Deliberately out of scope for this change (tracked in `LINEAGE_AND_LINALG_PLAN.md` for a
+follow-up): row-level provenance, full OpenLineage/PROV spec compliance, and JOIN provenance —
+`DATASET ... FROM` has no `JOIN` support today (`DatasetFromClause` has no `joins` field), so
+there is currently no DSL path that turns a JOIN's result into a named, persistable dataset to
+attach lineage to.
+
 ## [0.1.79] - 2026-09-11
 
 ### Fixed — two silent-correctness bugs found via a real end-to-end example (linal-hub leukemia gene-expression classification notebook)

@@ -1156,8 +1156,9 @@ impl StorageEngine for ParquetStorage {
         // 2. Generate new Metadata
         let mut metadata = DatasetMetadata::new(dataset_name.to_string(), DatasetOrigin::Created);
 
-        // Compute content hash (simple hash based on row count and name)
-        let content_hash = format!("{}:{}", dataset_name, dataset.rows.len());
+        // Real SHA256 over schema + rows (see LINEAGE_AND_LINALG_PLAN.md's
+        // Phase 0 outcome, audit finding 4) -- was `format!("{name}:{row_count}")`.
+        let content_hash = dataset.content_hash();
         metadata.update_hash(content_hash);
 
         // 3. Generate minimal Lineage

@@ -116,10 +116,22 @@ impl DatasetMetadata {
         }
     }
 
-    /// Update statistics based on current rows
+    /// Update statistics based on current rows. Also refreshes `self.schema`
+    /// -- this is the metadata's own cached copy of the dataset's schema
+    /// (separate from `Dataset.schema` itself), and every schema-changing
+    /// mutation (e.g. `add_computed_column`) calls this to sync stats but
+    /// was leaving `self.schema` stale, since only `column_stats`/
+    /// `row_count` were being recomputed here. A stale cached schema here
+    /// silently truncated data on the next `SAVE DATASET` + reload cycle:
+    /// `save_legacy_metadata` persists this exact struct to `.meta.json`,
+    /// and `ParquetStorage::load_dataset` rebuilds the reloaded dataset
+    /// using `.meta.json`'s schema -- so a newly added column's *data*
+    /// safely reached `data.parquet`, but became unreadable after reload
+    /// because the metadata never admitted the column existed.
     pub fn update_stats(&mut self, schema: &Schema, rows: &[Tuple]) {
         self.row_count = rows.len();
         self.updated_at = Utc::now();
+        self.schema = schema.clone();
         self.column_stats = schema
             .fields
             .iter()
@@ -197,6 +209,31 @@ impl Dataset {
         };
         dataset.rebuild_partitions();
         Ok(dataset)
+    }
+
+    /// Real content hash over schema + rows (SHA256, via
+    /// `crate::core::provenance::compute_content_hash`) -- replaces the
+    /// `format!("{name}:{row_count}")` placeholder that used to stand in for
+    /// a hash in `core/storage.rs` and `dsl/persistence.rs`. Used as the
+    /// stable, content-derived key `ProvenanceStore` resolves ancestry by
+    /// (see `LINEAGE_AND_LINALG_PLAN.md`'s Phase 0 outcome, finding 4/5).
+    ///
+    /// Hashes `self.schema.fields` (`Vec<Field>`, order-stable) and each
+    /// row's `values` -- deliberately never `Schema` or `Tuple` themselves
+    /// (whole-struct serialization, via their `#[derive(Serialize)]`):
+    /// `Schema` carries a derived `field_indices: HashMap<String, usize>`,
+    /// and every `Tuple` embeds an `Arc<Schema>` with the very same field,
+    /// so serializing either pulls that `HashMap` in. `HashMap`'s
+    /// serialization order is randomized per instance (a fresh
+    /// `RandomState` seed every `Schema::new` call), so hashing it made two
+    /// structurally-identical datasets produced by different code paths --
+    /// or even the same path called twice -- hash differently, silently
+    /// breaking every ancestry match.
+    pub fn content_hash(&self) -> String {
+        let row_values: Vec<&Vec<Value>> = self.rows.iter().map(|t| &t.values).collect();
+        let bytes = serde_json::to_vec(&(&self.schema.fields, &row_values))
+            .unwrap_or_else(|_| format!("{:?}", self.schema.fields).into_bytes());
+        crate::core::provenance::compute_content_hash(&bytes)
     }
 
     /// Recompute `metadata` (row count + column stats) and `partitions`

@@ -647,7 +647,7 @@ Clears all in-memory registers (Tensors and Datasets) for the current session.
 - `SHOW DATABASES` / `SHOW ALL DATABASES`: List all database instances.
 - `SHOW SCHEMA <dataset>`: Display column names and types for a legacy dataset.
 - `SHOW SHAPE <name>`: Display only the shape dimensions of a tensor.
-- `SHOW LINEAGE <name>`: Display the recursive computation graph that produced a tensor.
+- `SHOW LINEAGE <name>`: Display the recursive derivation graph that produced a tensor *or* a dataset — superseded by `EXPLAIN LINEAGE` (§9, Query Planning) below, kept working as an alias for backward compatibility.
 - `SHOW INDEXES [<dataset>]`: List all indexes; optionally filter to a specific dataset.
 
 ### Dataset Metadata & Versioning
@@ -671,7 +671,13 @@ SHOW "--- Begin training phase ---"
   - `EXPLAIN [PLAN] DATASET <name>`: plan for a plain dataset scan, or, if followed by `FROM <source> ...`, for a `DATASET ... FROM` materialized-view query (§2).
   - `EXPLAIN [PLAN] SEARCH ...`: plan for any of the three `SEARCH` forms (§7).
   - `EXPLAIN <name>`: shorthand for `EXPLAIN DATASET <name>`.
-- `AUDIT DATASET <name>`: Perform a deep health check on the reference graph — detects dangling tensor references.
+
+### Lineage & Provenance
+
+- `EXPLAIN LINEAGE <name>`: Show the real, persisted derivation ancestry for a tensor or dataset — a genuinely different thing from `EXPLAIN <target>` above (that shows a *query plan*; this shows *how the data actually got here*: every `IMPORT`, `DATASET ... FROM`, `ADD COMPUTED COLUMN`, tensor op, and `SAVE`, in order). Resolves `<name>` against tensor names first, then dataset names. Survives a restart: ancestry is read from a persisted, content-hash-addressed provenance log (`{data_dir}/{db}/provenance.jsonl`), not just the current session's in-memory state, so it still works on a dataset you just `LOAD`ed fresh. A name with no recorded history (e.g. one that predates this feature) resolves as a single `ROOT` node rather than erroring.
+  - `EXPLAIN LINEAGE <name> AS JSON`: same ancestry, as JSON, for programmatic or compliance consumption.
+  - `SHOW LINEAGE <name>` is a working, documented-as-superseded alias for the text-tree form.
+- `AUDIT DATASET <name>`: Perform a deep **referential-integrity** health check — detects dangling tensor references in a dataset's columns. This is unrelated to derivation history despite the naming similarity: `AUDIT DATASET` answers "do this dataset's column references still resolve?"; `EXPLAIN LINEAGE` answers "how was this data derived?". Use `EXPLAIN LINEAGE`, not `AUDIT DATASET`, to inspect provenance.
 - `DELIVER <dataset> [TO '<path>']`: Check whether a dataset is deliverable over the `/delivery` HTTP routes (§10). Errors if the dataset doesn't exist. If it exists but hasn't been persisted yet, reports that and points to `SAVE DATASET`; if a delivery manifest is found (default path `<data_dir>/<db>/datasets/<name>/manifest.json`, or the directory given by `TO`), confirms it's ready to serve.
 
 ---

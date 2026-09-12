@@ -80,9 +80,23 @@ impl Parser {
     // EXPLAIN [PLAN] DATASET <name>
     // EXPLAIN [PLAN] SEARCH <ds> ON <col> QUERY <q> LIMIT <k>
     // EXPLAIN [PLAN] SELECT ...
+    // EXPLAIN LINEAGE <name> [AS JSON]
     // EXPLAIN <bare_ident>
     pub(super) fn parse_explain(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Explain)?;
+        if self.at(&Token::Lineage) {
+            self.advance();
+            let name = self.eat_ident()?;
+            let json = if self.at(&Token::As) {
+                self.advance();
+                self.at_ident("JSON") && self.advance().is_some()
+            } else {
+                false
+            };
+            return Ok(Statement::Explain(ExplainStmt {
+                target: ExplainTarget::Lineage { name, json },
+            }));
+        }
         if self.at_ident("PLAN") {
             self.advance();
         }
