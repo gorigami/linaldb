@@ -75,7 +75,7 @@ impl Connector for CsvConnector {
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            dataset_hash: "".to_string(), // TODO: Compute hash if needed
+            dataset_hash: crate::core::provenance::record_batch_content_hash(&combined_batch),
             operation: format!("Imported from CSV: {}", path),
             parents: vec![],
             engine_version: env!("CARGO_PKG_VERSION").to_string(),

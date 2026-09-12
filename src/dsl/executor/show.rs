@@ -96,11 +96,11 @@ pub(super) fn execute_show(
         }
 
         ShowTarget::Lineage(name) => {
-            let tree = db.get_lineage_tree(&name).map_err(|e| DslError::Engine {
+            let tree = resolve_lineage_tree(db, &name).map_err(|e| DslError::Engine {
                 line: line_no,
                 source: e,
             })?;
-            let mut output = format!("Lineage for tensor '{}':\n", name);
+            let mut output = format!("Lineage for '{}':\n", name);
             output.push_str(&format_lineage_tree(&tree, 0));
             Ok(DslOutput::Message(output))
         }
@@ -309,17 +309,33 @@ pub(super) fn execute_show(
     }
 }
 
-fn format_lineage_tree(node: &crate::engine::LineageNode, indent: usize) -> String {
+/// Resolves `name` against tensor names first, then dataset names, per the
+/// locked `EXPLAIN LINEAGE` grammar design (0.5) -- shared by `SHOW LINEAGE`
+/// and `EXPLAIN LINEAGE` so there's exactly one resolution path.
+pub(super) fn resolve_lineage_tree(
+    db: &TensorDb,
+    name: &str,
+) -> Result<crate::core::provenance::ProvenanceTree, crate::engine::EngineError> {
+    match db.get_tensor_lineage_tree(name) {
+        Ok(tree) => Ok(tree),
+        Err(_) => db.get_dataset_lineage_tree(name),
+    }
+}
+
+pub(super) fn format_lineage_tree(
+    node: &crate::core::provenance::ProvenanceTree,
+    indent: usize,
+) -> String {
     let mut out = String::new();
     let indent_str = "  ".repeat(indent);
-    let name_part = if let Some(name) = &node.name {
-        format!(" ({})", name)
-    } else {
-        String::new()
-    };
+    let hash = node.entity.content_hash();
+    let short_hash = &hash[..hash.len().min(8)];
     out.push_str(&format!(
-        "{}{}{} [{}]\n",
-        indent_str, node.operation, name_part, node.tensor_id.0
+        "{}{} ({}) [{}]\n",
+        indent_str,
+        node.operation,
+        node.entity.display_name(),
+        short_hash
     ));
     for input in &node.inputs {
         out.push_str(&format_lineage_tree(input, indent + 1));

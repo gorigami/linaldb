@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,14 +15,6 @@ struct NameEntry {
     kind: TensorKind,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LineageNode {
-    pub tensor_id: TensorId,
-    pub name: Option<String>,
-    pub operation: String,
-    pub inputs: Vec<LineageNode>,
-}
-
 /// Individual database instance containing its own stores and name mappings
 pub struct DatabaseInstance {
     pub name: String,
@@ -35,10 +26,19 @@ pub struct DatabaseInstance {
     pub backend: Box<dyn crate::core::backend::ComputeBackend>,
     /// Almacenamiento de expresiones para tensores perezosos
     pub lazy_store: HashMap<TensorId, crate::core::tensor::Expression>,
+    /// `{data_dir}/{name}` -- where this instance's `provenance.jsonl` lives.
+    db_dir: std::path::PathBuf,
+    /// Unified provenance log shared by tensors and datasets in this DB (see
+    /// `LINEAGE_AND_LINALG_PLAN.md` / `src/core/provenance.rs`). Loaded from
+    /// disk on construction so a recovered DB has its full prior ancestry.
+    pub provenance: crate::core::provenance::ProvenanceStore,
 }
 
 impl DatabaseInstance {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, db_dir: std::path::PathBuf) -> Self {
+        let provenance =
+            crate::core::provenance::ProvenanceStore::load_jsonl(db_dir.join("provenance.jsonl"))
+                .unwrap_or_default();
         Self {
             name,
             store: InMemoryTensorStore::new(),
@@ -48,7 +48,103 @@ impl DatabaseInstance {
             dataset_vars: HashMap::new(),
             backend: Box::new(crate::core::backend::CpuBackend::new()),
             lazy_store: HashMap::new(),
+            db_dir,
+            provenance,
         }
+    }
+
+    /// Append one provenance record to both the in-memory store and
+    /// `{db_dir}/provenance.jsonl`. Persistence failure (e.g. read-only
+    /// disk) is logged but never fails the operation that produced the
+    /// record -- provenance is best-effort, correctness of the operation
+    /// itself is not conditioned on it.
+    ///
+    /// Skips a *redundant no-op* record: `find_producer` resolves ancestry
+    /// by content hash, most-recent-wins, so a record with no inputs whose
+    /// every output hash was already produced by an earlier (richer) record
+    /// would silently shadow real ancestry -- e.g. `SAVE DATASET d` after
+    /// `DATASET d FROM t GROUP BY x` persists unchanged content and must
+    /// not erase `t`'s ancestry from `EXPLAIN LINEAGE d`. A record with real
+    /// inputs, or whose output is genuinely new content, is always kept.
+    pub fn record_provenance(&mut self, record: crate::core::provenance::ProvenanceRecord) {
+        let redundant = record.inputs.is_empty()
+            && !record.outputs.is_empty()
+            && record
+                .outputs
+                .iter()
+                .all(|o| self.provenance.find_producer(o.content_hash()).is_some());
+        if redundant {
+            return;
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&self.db_dir) {
+            eprintln!(
+                "warning: could not create '{}' for provenance persistence: {e}",
+                self.db_dir.display()
+            );
+        } else {
+            let path = self.db_dir.join("provenance.jsonl");
+            if let Err(e) = crate::core::provenance::ProvenanceStore::append_jsonl(&path, &record) {
+                eprintln!("warning: failed to persist provenance record to {path:?}: {e}");
+            }
+        }
+        self.provenance.append(record);
+    }
+
+    /// `{db_dir}/datasets/{name}/lineage.json`, if this dataset was ever
+    /// saved through the legacy per-package format (audit finding 1's third
+    /// construct) -- used as a read-compatibility fallback by
+    /// `get_dataset_lineage_tree` for datasets saved before this feature, or
+    /// whose provenance record predates a restart, per the locked Phase 0
+    /// design (0.4).
+    fn legacy_dataset_lineage(&self, name: &str) -> Option<crate::core::dataset::DatasetLineage> {
+        let path = self.db_dir.join("datasets").join(name).join("lineage.json");
+        let content = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Phase 2 unification: every tensor op's `eval_*` method already builds
+    /// a `core::tensor::Lineage` (kept as-is -- it's `TensorMetadata`'s
+    /// in-memory fast path, still what `get_tensor_lineage_tree` walks per
+    /// Phase 1's scope split) right before attaching it to the output
+    /// tensor. This call, added right after that attach point in each
+    /// `eval_*` method, additionally records the *same* operation into the
+    /// unified `ProvenanceStore` -- the actual Phase 2.1 unification, since
+    /// tensor and dataset ops now emit into one store instead of two. Reuses
+    /// `lineage`'s `operation`/`inputs`/`execution_id` directly so each call
+    /// site only adds one line, not a re-derivation of data already at hand.
+    fn record_tensor_provenance(
+        &mut self,
+        tensor: &Tensor,
+        lineage: &crate::core::tensor::Lineage,
+    ) {
+        let mut inputs = Vec::with_capacity(lineage.inputs.len());
+        for id in &lineage.inputs {
+            if let Ok(t) = self.store.get(*id) {
+                let name = self
+                    .names
+                    .iter()
+                    .find(|(_, entry)| entry.id == *id)
+                    .map(|(n, _)| n.clone());
+                inputs.push(crate::core::provenance::ProvenanceEntity::tensor(
+                    *id,
+                    name,
+                    t.data_hash().to_string(),
+                ));
+            }
+        }
+        let output = crate::core::provenance::ProvenanceEntity::tensor(
+            tensor.id,
+            None,
+            tensor.data_hash().to_string(),
+        );
+        let record = crate::core::provenance::ProvenanceRecord::new(
+            lineage.operation.clone(),
+            lineage.execution_id,
+        )
+        .with_inputs(inputs)
+        .with_outputs(vec![output]);
+        self.record_provenance(record);
     }
 
     // ... all existing methods of the old TensorDb ...
@@ -375,10 +471,11 @@ impl TensorDb {
 
     pub fn with_config(config: crate::core::config::EngineConfig) -> Self {
         let default_name = config.storage.default_db.clone();
+        let default_dir = config.storage.data_dir.join(&default_name);
         let mut dbs = HashMap::new();
         dbs.insert(
             default_name.clone(),
-            DatabaseInstance::new(default_name.clone()),
+            DatabaseInstance::new(default_name.clone(), default_dir),
         );
 
         let mut db = Self {
@@ -407,8 +504,9 @@ impl TensorDb {
                     if file_type.is_dir() {
                         let db_name = entry.file_name().to_string_lossy().into_owned();
                         if !self.databases.contains_key(&db_name) {
+                            let db_dir = data_dir.join(&db_name);
                             self.databases
-                                .insert(db_name.clone(), DatabaseInstance::new(db_name));
+                                .insert(db_name.clone(), DatabaseInstance::new(db_name, db_dir));
                         }
                     }
                 }
@@ -449,7 +547,7 @@ impl TensorDb {
         }
 
         self.databases
-            .insert(name.clone(), DatabaseInstance::new(name));
+            .insert(name.clone(), DatabaseInstance::new(name, db_path));
         Ok(())
     }
 
@@ -571,8 +669,18 @@ impl TensorDb {
         self.active_instance().verify_tensor_dataset(ds_name_or_var)
     }
 
-    pub fn get_lineage_tree(&self, name: &str) -> Result<LineageNode, EngineError> {
-        self.active_instance().get_lineage_tree(name)
+    pub fn get_tensor_lineage_tree(
+        &self,
+        name: &str,
+    ) -> Result<crate::core::provenance::ProvenanceTree, EngineError> {
+        self.active_instance().get_tensor_lineage_tree(name)
+    }
+
+    pub fn get_dataset_lineage_tree(
+        &self,
+        name: &str,
+    ) -> Result<crate::core::provenance::ProvenanceTree, EngineError> {
+        self.active_instance().get_dataset_lineage_tree(name)
     }
 
     pub fn remove_tensor(&mut self, name: &str) -> bool {
@@ -1025,43 +1133,91 @@ impl DatabaseInstance {
         Err(EngineError::NameNotFound(source.to_string()))
     }
 
-    pub fn get_lineage_tree(&self, name: &str) -> Result<LineageNode, EngineError> {
+    /// Tensor ancestry, shaped as a `ProvenanceTree` for parity with
+    /// `get_dataset_lineage_tree` (Phase 2.3's unification proof). Still
+    /// walks the live in-memory `TensorMetadata.lineage` chain rather than
+    /// `self.provenance` -- tensor ops don't emit into the unified store
+    /// until Phase 2 rewires `eval_unary`/`eval_binary` (see
+    /// `LINEAGE_AND_LINALG_PLAN.md` Phase 1 vs Phase 2 scope split); this
+    /// is the same resolution `SHOW LINEAGE` always did, just re-shaped.
+    pub fn get_tensor_lineage_tree(
+        &self,
+        name: &str,
+    ) -> Result<crate::core::provenance::ProvenanceTree, EngineError> {
         let entry = self
             .names
             .get(name)
             .ok_or_else(|| EngineError::NameNotFound(name.to_string()))?;
-        self.resolve_lineage_node(entry.id, Some(name.to_string()))
+        self.resolve_tensor_lineage(entry.id, Some(name.to_string()))
     }
 
-    fn resolve_lineage_node(
+    fn resolve_tensor_lineage(
         &self,
         id: TensorId,
         name: Option<String>,
-    ) -> Result<LineageNode, EngineError> {
-        let tensor = self.store.get(id)?;
-        let mut inputs = Vec::new();
+    ) -> Result<crate::core::provenance::ProvenanceTree, EngineError> {
+        use crate::core::provenance::{ProvenanceEntity, ProvenanceTree};
 
-        let operation = if let Some(lineage) = &tensor.metadata.lineage {
-            for input_id in &lineage.inputs {
-                // Find name for input if exists in this instance
-                let input_name = self
-                    .names
-                    .iter()
-                    .find(|(_, entry)| entry.id == *input_id)
-                    .map(|(n, _)| n.clone());
-                inputs.push(self.resolve_lineage_node(*input_id, input_name)?);
-            }
-            lineage.operation.clone()
-        } else {
-            "ROOT".to_string()
+        let tensor = self.store.get(id)?;
+        let entity = ProvenanceEntity::tensor(id, name, tensor.data_hash().to_string());
+
+        let Some(lineage) = &tensor.metadata.lineage else {
+            return Ok(ProvenanceTree::root(entity));
         };
 
-        Ok(LineageNode {
-            tensor_id: id,
-            name,
-            operation,
+        let mut inputs = Vec::new();
+        for input_id in &lineage.inputs {
+            let input_name = self
+                .names
+                .iter()
+                .find(|(_, entry)| entry.id == *input_id)
+                .map(|(n, _)| n.clone());
+            inputs.push(self.resolve_tensor_lineage(*input_id, input_name)?);
+        }
+
+        Ok(ProvenanceTree {
+            entity,
+            operation: lineage.operation.clone(),
+            parameters: Default::default(),
+            timestamp: None,
+            execution_id: Some(lineage.execution_id),
             inputs,
         })
+    }
+
+    /// Dataset ancestry via the unified `ProvenanceStore`, with a
+    /// read-compatibility fallback to a legacy per-package `lineage.json`
+    /// (see `LINEAGE_AND_LINALG_PLAN.md` Phase 0 outcome, 0.4) for datasets
+    /// saved before this feature existed.
+    pub fn get_dataset_lineage_tree(
+        &self,
+        name: &str,
+    ) -> Result<crate::core::provenance::ProvenanceTree, EngineError> {
+        use crate::core::provenance::ProvenanceEntity;
+
+        let dataset = self.get_dataset(name)?;
+        let entity = ProvenanceEntity::dataset(name.to_string(), dataset.content_hash());
+        let tree = self.provenance.resolve_ancestry(&entity);
+        if tree.operation != "ROOT" {
+            return Ok(tree);
+        }
+
+        // No record in the unified store -- fall back to the legacy
+        // lineage.json this dataset may have been saved with.
+        if let Some(legacy) = self.legacy_dataset_lineage(name) {
+            if let Some(node) = legacy.nodes.last() {
+                return Ok(crate::core::provenance::ProvenanceTree {
+                    entity,
+                    operation: node.operation.clone(),
+                    parameters: Default::default(),
+                    timestamp: None,
+                    execution_id: None,
+                    inputs: Vec::new(),
+                });
+            }
+        }
+
+        Ok(tree)
     }
 
     pub fn find_referencing_datasets(&self, tensor_id: TensorId) -> Vec<String> {
@@ -1147,7 +1303,8 @@ impl DatabaseInstance {
             operation: op.to_string(),
             inputs: vec![in_tensor.id],
         };
-        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1247,6 +1404,12 @@ impl DatabaseInstance {
                 Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
         }
 
+        // `result_tensor.metadata.lineage` is guaranteed `Some` here: either
+        // set inline (Distance) or by the catch-all just above.
+        if let Some(lineage) = result_tensor.metadata.lineage.clone() {
+            self.record_tensor_provenance(&result_tensor, &lineage);
+        }
+
         let out_id = self.store.insert_existing_tensor(result_tensor)?;
         self.names.insert(
             output_name.into(),
@@ -1288,7 +1451,8 @@ impl DatabaseInstance {
             operation: "MATMUL".to_string(),
             inputs: vec![a.id, b.id],
         };
-        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_kind = match (kind_a, kind_b) {
             (TensorKind::Strict, _) | (_, TensorKind::Strict) => TensorKind::Strict,
@@ -1329,7 +1493,8 @@ impl DatabaseInstance {
             operation: "RESHAPE".to_string(),
             inputs: vec![in_tensor.id],
         };
-        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1377,8 +1542,9 @@ impl DatabaseInstance {
             operation: "FFT".to_string(),
             inputs: vec![in_tensor.id],
         };
-        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1424,9 +1590,10 @@ impl DatabaseInstance {
             operation: "IFFT".to_string(),
             inputs: vec![in_tensor.id],
         };
-        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, signal, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1470,8 +1637,9 @@ impl DatabaseInstance {
             operation: "MAGNITUDE".to_string(),
             inputs: vec![in_tensor.id],
         };
-        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, mag, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1533,9 +1701,10 @@ impl DatabaseInstance {
             operation: format!("PSD(window={})", window),
             inputs: vec![in_tensor.id],
         };
-        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, spectrum, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1598,9 +1767,10 @@ impl DatabaseInstance {
             operation: "WHITEN".to_string(),
             inputs: vec![signal_tensor.id, psd_tensor.id],
         };
-        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, whitened, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1659,9 +1829,10 @@ impl DatabaseInstance {
             operation: format!("BANDPASS({low_hz}-{high_hz}Hz @ {sample_rate}Hz)"),
             inputs: vec![in_tensor.id],
         };
-        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, filtered, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1724,9 +1895,10 @@ impl DatabaseInstance {
             operation: "MATCHED_FILTER".to_string(),
             inputs: vec![data_tensor.id, template_tensor.id],
         };
-        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, correlation, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
@@ -1773,7 +1945,8 @@ impl DatabaseInstance {
             operation: format!("STACK(axis={})", axis),
             inputs: tensors.iter().map(|t| t.id).collect(),
         };
-        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names
@@ -1889,7 +2062,8 @@ impl DatabaseInstance {
             operation: format!("INDEX{:?}", indices),
             inputs: vec![tensor.id],
         };
-        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names
@@ -1918,7 +2092,8 @@ impl DatabaseInstance {
             operation: format!("SLICE{:?}", specs),
             inputs: vec![tensor.id],
         };
-        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
+        result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
+        self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names
@@ -1974,9 +2149,11 @@ impl DatabaseInstance {
             operation: format!("FIELD_ACCESS({})", field_name),
             inputs: Vec::new(),
         };
-        let metadata = crate::core::tensor::TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata =
+            crate::core::tensor::TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let tensor = crate::core::tensor::Tensor::new(new_id, shape, tensor_data, metadata)
             .map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&tensor, &lineage);
 
         let out_id = self.store.insert_existing_tensor(tensor)?;
         self.names.insert(
@@ -2056,9 +2233,11 @@ impl DatabaseInstance {
             operation: format!("COLUMN_ACCESS({})", column_name),
             inputs: Vec::new(),
         };
-        let metadata = crate::core::tensor::TensorMetadata::new(new_id, None).with_lineage(lineage);
+        let metadata =
+            crate::core::tensor::TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let tensor = crate::core::tensor::Tensor::new(new_id, shape, tensor_data, metadata)
             .map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&tensor, &lineage);
 
         let out_id = self.store.insert_existing_tensor(tensor)?;
         self.names.insert(

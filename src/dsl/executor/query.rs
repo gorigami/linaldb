@@ -17,6 +17,8 @@ pub(super) fn execute_create_dataset_from(
     clause: DatasetFromClause,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
+    let source_name = clause.source.clone();
+    let had_group_by = !clause.group_by.is_empty();
     // Delegate to `execute_select` instead of re-deriving a LogicalPlan by
     // hand: the hand-rolled version here used to build its own Project/
     // Aggregate plan directly from `clause.select` and only ever kept
@@ -71,6 +73,39 @@ pub(super) fn execute_create_dataset_from(
     target_ds
         .metadata
         .update_stats(&target_ds.schema, &target_ds.rows);
+    let output_hash = target_ds.content_hash();
+
+    let operation = if had_group_by {
+        "DATASET FROM (GROUP BY)"
+    } else {
+        "DATASET FROM"
+    };
+    let inputs = if let Ok(src_ds) = db.get_dataset(&source_name) {
+        vec![crate::core::provenance::ProvenanceEntity::dataset(
+            source_name.clone(),
+            src_ds.content_hash(),
+        )]
+    } else if let Ok(src_tensor) = db.get(&source_name) {
+        vec![crate::core::provenance::ProvenanceEntity::tensor(
+            src_tensor.id,
+            Some(source_name.clone()),
+            src_tensor.data_hash().to_string(),
+        )]
+    } else {
+        Vec::new()
+    };
+    let record = crate::core::provenance::ProvenanceRecord::new(
+        operation,
+        crate::core::tensor::ExecutionId::new(),
+    )
+    .with_param("source", source_name)
+    .with_inputs(inputs)
+    .with_outputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
+        name,
+        output_hash,
+    )]);
+    db.active_instance_mut().record_provenance(record);
+
     Ok(DslOutput::None)
 }
 
@@ -1038,6 +1073,7 @@ pub(super) fn execute_add_computed_column(
         });
     }
 
+    let before_hash = ds.content_hash();
     let logical_expr = dsl_expr_to_logical_expr(expr);
 
     if lazy {
@@ -1130,6 +1166,26 @@ pub(super) fn execute_add_computed_column(
             source: e,
         })?;
     }
+
+    let after_ds = db.get_dataset(dataset).map_err(|e| DslError::Engine {
+        line: line_no,
+        source: e,
+    })?;
+    let after_hash = after_ds.content_hash();
+    let record = crate::core::provenance::ProvenanceRecord::new(
+        "ADD COMPUTED COLUMN",
+        crate::core::tensor::ExecutionId::new(),
+    )
+    .with_param("column", col_name)
+    .with_inputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
+        dataset.to_string(),
+        before_hash,
+    )])
+    .with_outputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
+        dataset.to_string(),
+        after_hash,
+    )]);
+    db.active_instance_mut().record_provenance(record);
 
     Ok(DslOutput::Message(format!(
         "Added computed column '{}' to dataset '{}'",

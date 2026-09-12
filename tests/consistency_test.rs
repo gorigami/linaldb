@@ -21,7 +21,11 @@ fn test_show_lineage() {
 
     if let linal::dsl::DslOutput::Message(msg) = output {
         println!("{}", msg);
-        assert!(msg.contains("Lineage for tensor 'd'"));
+        // "Lineage for 'd'" (not "... for tensor 'd'"): SHOW LINEAGE's
+        // message is entity-agnostic now that it resolves tensors and
+        // datasets through the same ProvenanceStore-backed path (see
+        // LINEAGE_AND_LINALG_PLAN.md's Phase 0 outcome).
+        assert!(msg.contains("Lineage for 'd'"));
         assert!(msg.contains("MULTIPLY (d)"));
         assert!(msg.contains("ADD (c)"));
         assert!(msg.contains("ROOT (a)"));

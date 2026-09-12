@@ -11,6 +11,27 @@ pub fn execute_explain(
     target: ExplainTarget,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
+    // `EXPLAIN LINEAGE` shows real persisted provenance ancestry, not a
+    // query plan -- it doesn't fit the LogicalPlan shape the rest of this
+    // function builds, so it's handled separately and returns early.
+    if let ExplainTarget::Lineage { name, json } = target {
+        let tree = super::show::resolve_lineage_tree(db, &name).map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+        let output = if json {
+            serde_json::to_string_pretty(&tree).map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: format!("Failed to serialize lineage as JSON: {e}"),
+            })?
+        } else {
+            let mut out = format!("Lineage for '{}':\n", name);
+            out.push_str(&super::show::format_lineage_tree(&tree, 0));
+            out
+        };
+        return Ok(DslOutput::Message(output));
+    }
+
     let logical_plan = match target {
         ExplainTarget::Dataset(name) => {
             let source_ds = db.get_dataset(&name).map_err(|e| DslError::Engine {
@@ -252,6 +273,8 @@ pub fn execute_explain(
 
             plan
         }
+
+        ExplainTarget::Lineage { .. } => unreachable!("handled by the early return above"),
     };
 
     let planner = Planner::new(db);

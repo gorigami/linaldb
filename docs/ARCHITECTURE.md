@@ -708,11 +708,52 @@ Every stored tensor carries a `TensorKind` tag:
 
 ## Lineage & Provenance
 
-LINAL implements a robust **Lineage Tracking** system that ensures every derived tensor carries its computational history.
+A unified `ProvenanceRecord`/`ProvenanceEntity`/`ProvenanceStore` model
+(`src/core/provenance.rs`) tracks derivation history for **both** tensors and
+datasets through one event log per `DatabaseInstance`, not two disconnected
+mechanisms (see `LINEAGE_AND_LINALG_PLAN.md`'s Phase 0 outcome for the full
+design rationale — OpenLineage's Job/Run/Dataset/facet vocabulary mapped
+cleanly onto linaldb's concepts and is the shape `EXPLAIN LINEAGE ... AS
+JSON` exports in).
 
-- **Persistent Provenance**: Lineage metadata (Source Operation, Input Tensor IDs, Execution Context) is serialized alongside the tensor data.
-- **Audit Trails**: Users can trace any final result back to its root "ground-truth" tensors using the `SHOW LINEAGE` command.
-- **Traceability**: Every execution batch is assigned a unique `ExecutionId`, allowing auditors to group related operations.
+- **`ProvenanceRecord`**: one event — `operation` (name), structured
+  `parameters`, `inputs`/`outputs` (`Vec<ProvenanceEntity>`), `timestamp`,
+  `execution_id`, `engine_version`. Required fields, not optional add-ons.
+- **`ProvenanceEntity`**: `Tensor { id, name, content_hash }` or `Dataset {
+  name, content_hash }` — the unification point is this event type, not the
+  underlying data model (a `Dataset` and a `Tensor` stay structurally
+  different). `content_hash` is a real SHA256, not the tensor id / dataset
+  name+row-count placeholder either side used before — the stable key
+  ancestry resolves by, since `TensorId`/dataset instance ids are
+  process-local UUIDs regenerated on `LOAD`.
+- **`ProvenanceStore`**: append-only JSONL log at
+  `{data_dir}/{db}/provenance.jsonl`, one per `DatabaseInstance`, loaded on
+  construction so a recovered DB has its full prior ancestry.
+  `resolve_ancestry` walks it by content hash (bounded to records causally
+  prior to the one being resolved, both to terminate on a content-preserving
+  no-op operation and to disambiguate two different-named entities that
+  happen to share a hash — see the method's own doc comment for the
+  reasoning) to build a `ProvenanceTree`, the shape `EXPLAIN LINEAGE`/`SHOW
+  LINEAGE` render.
+- **`EXPLAIN LINEAGE <name> [AS JSON]`**: the user-facing command (§9 of
+  `docs/DSL_REFERENCE.md`), text-tree or JSON. `SHOW LINEAGE <name>` is kept
+  working as a documented-superseded alias, same resolver.
+- **Tensor ops** (`eval_unary`/`eval_binary`/`eval_matmul`/... in
+  `engine/db.rs`) still attach the lightweight `core::tensor::Lineage` to
+  `TensorMetadata` for the in-memory fast path, *and* record into the same
+  `ProvenanceStore` via `DatabaseInstance::record_tensor_provenance` — one
+  store, not a tensor-only side path.
+- **Dataset ops** (`IMPORT`, `DATASET ... FROM` — including `GROUP BY` and
+  computed/window columns, `ADD COMPUTED COLUMN`, `SAVE DATASET`) record
+  into the same store via `DatabaseInstance::record_provenance`. A dataset's
+  legacy per-package `lineage.json` (`data_dir/.../datasets/<name>/lineage.json`)
+  is kept as a **read-compatibility fallback only**, for datasets saved
+  before this feature existed — new ancestry lookups go through
+  `ProvenanceStore` first.
+- **`AUDIT DATASET`** is unrelated: a referential-integrity check (do
+  column→tensor references resolve), not derivation history — see
+  "Consistency & Auditing" below and `docs/DSL_REFERENCE.md`'s "Lineage &
+  Provenance" subsection for the explicit disambiguation.
 
 ---
 

@@ -422,6 +422,10 @@ pub enum ExplainTarget {
     Search(SearchStmt),
     /// `EXPLAIN [PLAN] SELECT …`
     Select(SelectStmt),
+    /// `EXPLAIN LINEAGE <name> [AS JSON]` -- real persisted provenance
+    /// ancestry (tensor or dataset), not a query plan. `json` selects the
+    /// JSON export mode over the default human-readable text tree.
+    Lineage { name: String, json: bool },
 }
 
 #[derive(Debug, Clone)]

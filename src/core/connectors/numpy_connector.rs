@@ -221,7 +221,7 @@ impl NumpyConnector {
         lineage.add_node(crate::core::dataset::lineage::LineageNode {
             id: uuid::Uuid::new_v4(),
             dataset_name: "numpy_import".to_string(),
-            dataset_hash: "".to_string(),
+            dataset_hash: crate::core::provenance::record_batch_content_hash(&batch),
             operation: "import".to_string(),
             parents: vec![],
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -258,7 +258,7 @@ impl NumpyConnector {
         lineage.add_node(crate::core::dataset::lineage::LineageNode {
             id: uuid::Uuid::new_v4(),
             dataset_name: "numpy_import".to_string(),
-            dataset_hash: "".to_string(),
+            dataset_hash: crate::core::provenance::record_batch_content_hash(&batch),
             operation: "import".to_string(),
             parents: vec![],
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
