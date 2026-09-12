@@ -143,9 +143,27 @@ impl TensorMetadata {
 
     /// Internal method to compute hash if not already set.
     /// Usually called by Tensor::data_hash()
-    pub(crate) fn compute_hash(&self, data: &[f32]) -> &str {
+    ///
+    /// Hashes `shape_dims` *and* `data` together, not `data` alone: this is
+    /// used as `ProvenanceStore`'s content-addressing key
+    /// (`LINEAGE_AND_LINALG_PLAN.md` Phase 0), and `data` here must already
+    /// be the tensor's *logical* (shape/stride-aware) values, not its raw
+    /// storage buffer -- a zero-copy `TRANSPOSE`/slice shares the exact same
+    /// underlying `Arc<Vec<f32>>` as its input (this engine's storage model,
+    /// see `CLAUDE.md`), so hashing the raw buffer alone made a transposed
+    /// tensor and its untransposed source hash *identically*, silently
+    /// misattributing ancestry for any workflow that transposes a matrix
+    /// before combining it with something else (found via a real showcase
+    /// notebook -- `A @ Aᵗ` before an eigendecomposition -- this project's
+    /// recurring bug-finding pattern, again). Including `shape_dims` also
+    /// covers the reshape case: two different shapes can iterate to the
+    /// same flat value sequence, but never to the same `(shape, values)` pair.
+    pub(crate) fn compute_hash(&self, shape_dims: &[usize], data: &[f32]) -> &str {
         self.data_hash.get_or_init(|| {
             let mut hasher = Sha256::new();
+            for dim in shape_dims {
+                hasher.update(dim.to_le_bytes());
+            }
             // Convert f32 slice to byte slice for hashing
             // Safety: f32 has no padding bits and we are just reading bits for hashing
             let bytes: &[u8] = unsafe {
@@ -380,10 +398,20 @@ impl Tensor {
         None
     }
 
-    /// Get or compute the cryptographic hash of the tensor data.
-    /// This is a lazy operation.
+    /// Get or compute the cryptographic hash of the tensor's *logical* data
+    /// (shape + values as `to_logical_vec()` produces them) -- not the raw
+    /// storage buffer, which a zero-copy view (transpose/slice) can share
+    /// byte-for-byte with a differently-shaped tensor. This is a lazy
+    /// operation; the logical materialization only runs once per tensor
+    /// (cached in `TensorMetadata.data_hash`), same as before this
+    /// distinction existed.
     pub fn data_hash(&self) -> &str {
-        self.metadata.compute_hash(&self.data)
+        if let Some(contiguous) = self.as_contiguous_slice() {
+            self.metadata.compute_hash(&self.shape.dims, contiguous)
+        } else {
+            self.metadata
+                .compute_hash(&self.shape.dims, &self.to_logical_vec())
+        }
     }
 
     /// Returns the logical data as a contiguous vector.
@@ -516,7 +544,7 @@ mod tests {
 
         // Compute hash
         let data = vec![1.0, 2.0, 3.0];
-        metadata.compute_hash(&data);
+        metadata.compute_hash(&[3], &data);
 
         let serialized_with_hash = serde_json::to_string(&metadata).unwrap();
         assert!(serialized_with_hash.contains("data_hash"));
@@ -542,5 +570,40 @@ mod tests {
         // Request again, should be the same instance (cached)
         let hash2 = tensor.data_hash();
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn data_hash_distinguishes_a_zero_copy_transpose_from_its_source() {
+        // A zero-copy transpose shares the exact same underlying `Arc<Vec<f32>>`
+        // as its source, differing only in shape/strides -- data_hash() must
+        // still tell them apart (see its own doc comment for the real bug this
+        // regression-tests, found via a genuine A @ Aᵗ workflow).
+        let data = Arc::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let original_id = TensorId::new();
+        let original = Tensor::from_shared(
+            original_id,
+            Shape::new(vec![2, 3]),
+            data.clone(),
+            Arc::new(TensorMetadata::new(original_id, None)),
+        )
+        .unwrap();
+
+        let transposed_id = TensorId::new();
+        let transposed = Tensor::from_shared_strided(
+            transposed_id,
+            Shape::new(vec![3, 2]),
+            data,
+            Arc::new(TensorMetadata::new(transposed_id, None)),
+            vec![1, 3],
+            0,
+        )
+        .unwrap();
+
+        assert_ne!(
+            original.data_hash(),
+            transposed.data_hash(),
+            "a transposed view must not hash identically to its untransposed source"
+        );
     }
 }

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `EXPLAIN LINEAGE` could misattribute ancestry across a zero-copy `TRANSPOSE`
+
+Found while building a real `linal-hub` showcase notebook for `EXPLAIN LINEAGE`/the linear
+algebra suite (v0.1.80) — this project's recurring "a real end-to-end workflow finds bugs unit
+tests miss" pattern, again, striking even during the release-validation notebook itself.
+
+`Tensor::data_hash()` hashed the tensor's raw storage buffer (`self.data: Arc<Vec<f32>>`), not
+its logical (shape/stride-aware) values. `TRANSPOSE` is a zero-copy view in this engine (swaps
+shape/strides, shares the exact same underlying buffer as its input) — so a transposed matrix
+and its untransposed source hashed *identically*, even though they're logically different
+tensors. Since `ProvenanceStore` resolves ancestry by content hash, any workflow that transposes
+a matrix before combining it with something else (e.g. `Aᵗ @ A` before an eigendecomposition —
+exactly what the showcase notebook does) could have `EXPLAIN LINEAGE` misattribute part of the
+ancestry chain. Fixed: `data_hash()` now hashes the logical, shape-aware representation
+(`to_logical_vec()`, or the already-contiguous slice when no materialization is needed) plus the
+shape's own dimensions — the latter also covers `RESHAPE`, whose zero-copy output can iterate to
+the same flat value sequence as its input despite a different shape.
+
 ## [0.1.80] - 2026-09-12
 
 ### Added — classical linear algebra: `TRACE`/`DETERMINANT`/`RANK`/`INVERSE`/`SOLVE`/`EIGENVALUES`/`QR`/`LU`/`CHOLESKY`/`EIGEN`/`SVD`/`PCA`
