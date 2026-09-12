@@ -40,6 +40,17 @@ SET DATASET users METADATA tags = "scientific,test"
 SAVE DATASET users
 LIST DATASETS
 
+// --- Lineage/provenance + classical linear algebra (LINEAGE_AND_LINALG_PLAN.md) ---
+// This is release.yml's only cross-platform check for these features, so it's
+// deliberately included here rather than left to the (Linux-only) rust-ci.yml
+// full test suite -- see that plan's Phase 7.3.
+EXPLAIN LINEAGE users
+EXPLAIN LINEAGE users AS JSON
+MATRIX smoke_m = [[4, 7], [2, 6]]
+LET smoke_det = DETERMINANT smoke_m
+LET smoke_inv = INVERSE smoke_m
+LET smoke_q, smoke_r = QR smoke_m
+
 // --- Cleanup & Context Switching ---
 CREATE DATABASE IF NOT EXISTS temp_db
 USE temp_db
