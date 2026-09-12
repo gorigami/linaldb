@@ -784,6 +784,128 @@ impl TensorDb {
             .eval_fft(ctx, output_name, input_name)
     }
 
+    pub fn eval_trace(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_trace(ctx, output_name, input_name)
+    }
+
+    pub fn eval_determinant(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_determinant(ctx, output_name, input_name)
+    }
+
+    pub fn eval_rank(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_rank(ctx, output_name, input_name)
+    }
+
+    pub fn eval_inverse(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_inverse(ctx, output_name, input_name)
+    }
+
+    pub fn eval_solve(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        a_name: &str,
+        b_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_solve(ctx, output_name, a_name, b_name)
+    }
+
+    pub fn eval_eigenvalues(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_eigenvalues(ctx, output_name, input_name)
+    }
+
+    pub fn eval_qr(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_qr(ctx, output_names, input_name)
+    }
+
+    pub fn eval_lu(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_lu(ctx, output_names, input_name)
+    }
+
+    pub fn eval_cholesky(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_cholesky(ctx, output_name, input_name)
+    }
+
+    pub fn eval_eigen(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_eigen(ctx, output_names, input_name)
+    }
+
+    pub fn eval_svd(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_svd(ctx, output_names, input_name)
+    }
+
+    pub fn eval_pca(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        components: usize,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_pca(ctx, output_name, input_name, components)
+    }
+
     pub fn eval_ifft(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -1494,6 +1616,422 @@ impl DatabaseInstance {
             inputs: vec![in_tensor.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `TRACE a` -- sum of the diagonal of a square matrix. Bypasses
+    /// `ComputeBackend`/`UnaryOp` like `FFT` above: classical linear
+    /// algebra is a distinct numerical domain (`core::linalg`, built on
+    /// `nalgebra`), not an elementwise/reduction op the SIMD/Rayon backend
+    /// trait was designed for. Scalar result, same rank-0 `Tensor` shape
+    /// `SUM`/`MEAN`/`CORRELATE` already use.
+    pub fn eval_trace(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_scalar(
+            ctx,
+            output_name,
+            input_name,
+            "TRACE",
+            crate::core::linalg::trace,
+        )
+    }
+
+    /// `DETERMINANT a`. Scalar result; `0.0` for a singular matrix is a
+    /// legitimate result here (unlike `INVERSE`/`SOLVE`, nothing unsafe
+    /// about reporting a real zero determinant).
+    pub fn eval_determinant(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_scalar(
+            ctx,
+            output_name,
+            input_name,
+            "DETERMINANT",
+            crate::core::linalg::determinant,
+        )
+    }
+
+    /// `RANK a` -- numerical rank via SVD. Scalar (integer-valued `f32`)
+    /// result, no new scalar `Value` variant needed.
+    pub fn eval_rank(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_scalar(
+            ctx,
+            output_name,
+            input_name,
+            "RANK",
+            crate::core::linalg::rank,
+        )
+    }
+
+    /// Shared plumbing for the three linear-algebra ops that produce a
+    /// single scalar (`TRACE`/`DETERMINANT`/`RANK`) -- same
+    /// get-tensor/compute/wrap-as-rank-0-Tensor/attach-lineage/record-
+    /// provenance/insert shape three times over, differing only in which
+    /// `core::linalg` function computes the scalar and what the operation
+    /// name is.
+    fn eval_linalg_scalar(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        op_name: &str,
+        compute: fn(&Tensor) -> Result<f32, String>,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let value = compute(&in_tensor).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: op_name.to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(
+            new_id,
+            Shape::new(Vec::<usize>::new()),
+            vec![value],
+            metadata,
+        )
+        .map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `INVERSE a`. Matrix result. Errors loudly (never a silent `NaN`) if
+    /// `a` is singular -- see `core::linalg::inverse`'s doc comment.
+    pub fn eval_inverse(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let (data, shape) =
+            crate::core::linalg::inverse(&in_tensor).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "INVERSE".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `SOLVE a b` -- solves `a x = b` for `x`. Vector result. Errors
+    /// loudly on a singular `a`, same philosophy as `INVERSE`.
+    pub fn eval_solve(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        a_name: &str,
+        b_name: &str,
+    ) -> Result<(), EngineError> {
+        let (a_ref, kind_a) = self.get_with_kind(a_name)?;
+        let (b_ref, _kind_b) = self.get_with_kind(b_name)?;
+        let a_tensor = a_ref.clone();
+        let b_tensor = b_ref.clone();
+        let x = crate::core::linalg::solve(&a_tensor, &b_tensor).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let n = x.len();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "SOLVE".to_string(),
+            inputs: vec![a_tensor.id, b_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, Shape::new(vec![n]), x, metadata)
+            .map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: kind_a,
+            },
+        );
+        Ok(())
+    }
+
+    /// `EIGENVALUES a` -- real eigenvalues of a **symmetric** matrix only
+    /// (Phase 8.3: guarantees real eigenvalues, no complex `Value` support
+    /// needed). Vector result.
+    pub fn eval_eigenvalues(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let eigenvalues = crate::core::linalg::eigenvalues_symmetric(&in_tensor)
+            .map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let n = eigenvalues.len();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "EIGENVALUES".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, Shape::new(vec![n]), eigenvalues, metadata)
+            .map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// Shared plumbing for the "one matrix in, several matrices/vectors out"
+    /// decompositions (`QR`/`LU`/`EIGEN`/`SVD`) bound via Phase 8.4's
+    /// multi-output `LET a, b[, c] = ...`. `compute` returns its outputs in
+    /// bind order as a uniform `Vec<(data, shape)>` (see
+    /// `core::linalg::{qr,lu,eigen,svd}_outputs`); this attaches the same
+    /// `Lineage`/`ProvenanceRecord` (one record, all outputs -- a real
+    /// "this operation produced these N tensors together", not N
+    /// independent records) to every output tensor and binds them to
+    /// `output_names` positionally.
+    fn eval_linalg_multi(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+        op_name: &str,
+        compute: fn(&Tensor) -> Result<Vec<crate::core::linalg::MatrixData>, String>,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let outputs_data = compute(&in_tensor).map_err(EngineError::InvalidOp)?;
+        if outputs_data.len() != output_names.len() {
+            return Err(EngineError::InvalidOp(format!(
+                "{op_name} produces {} output(s), but {} name(s) were given in LET",
+                outputs_data.len(),
+                output_names.len()
+            )));
+        }
+
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: op_name.to_string(),
+            inputs: vec![in_tensor.id],
+        };
+
+        let mut output_entities = Vec::with_capacity(outputs_data.len());
+        let mut tensors = Vec::with_capacity(outputs_data.len());
+        for (data, shape) in outputs_data {
+            let new_id = self.store.gen_id();
+            let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+            let t = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+            output_entities.push(crate::core::provenance::ProvenanceEntity::tensor(
+                t.id,
+                None,
+                t.data_hash().to_string(),
+            ));
+            tensors.push(t);
+        }
+
+        let input_entity = crate::core::provenance::ProvenanceEntity::tensor(
+            in_tensor.id,
+            None,
+            in_tensor.data_hash().to_string(),
+        );
+        let record = crate::core::provenance::ProvenanceRecord::new(op_name, ctx.execution_id())
+            .with_inputs(vec![input_entity])
+            .with_outputs(output_entities);
+        self.record_provenance(record);
+
+        for (name, t) in output_names.iter().zip(tensors) {
+            let out_id = self.store.insert_existing_tensor(t)?;
+            self.names.insert(
+                name.clone(),
+                NameEntry {
+                    id: out_id,
+                    kind: in_kind,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// `QR a` -- QR decomposition. Bind with `LET q, r = QR a`.
+    pub fn eval_qr(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_multi(
+            ctx,
+            output_names,
+            input_name,
+            "QR",
+            crate::core::linalg::qr_outputs,
+        )
+    }
+
+    /// `LU a` -- LU decomposition with partial pivoting. Bind with
+    /// `LET p, l, u = LU a`.
+    pub fn eval_lu(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_multi(
+            ctx,
+            output_names,
+            input_name,
+            "LU",
+            crate::core::linalg::lu_outputs,
+        )
+    }
+
+    /// `CHOLESKY a` -- single output (`L`), doesn't need the multi-output
+    /// helper above.
+    pub fn eval_cholesky(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let (data, shape) =
+            crate::core::linalg::cholesky(&in_tensor).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "CHOLESKY".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
+    /// `EIGEN a` -- full eigendecomposition of a **symmetric** matrix. Bind
+    /// with `LET vals, vecs = EIGEN a`.
+    pub fn eval_eigen(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_multi(
+            ctx,
+            output_names,
+            input_name,
+            "EIGEN",
+            crate::core::linalg::eigen_outputs,
+        )
+    }
+
+    /// `SVD a`. Bind with `LET u, s, vt = SVD a`.
+    pub fn eval_svd(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_multi(
+            ctx,
+            output_names,
+            input_name,
+            "SVD",
+            crate::core::linalg::svd_outputs,
+        )
+    }
+
+    /// `PCA a COMPONENTS k` -- single output (the projected data), built on
+    /// `SVD`. The Phase 8.6 capstone.
+    pub fn eval_pca(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+        components: usize,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let (data, shape) =
+            crate::core::linalg::pca(&in_tensor, components).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: format!("PCA(components={components})"),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
         self.record_tensor_provenance(&result, &lineage);
 
         let out_id = self.store.insert_existing_tensor(result)?;

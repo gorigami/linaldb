@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — classical linear algebra: `TRACE`/`DETERMINANT`/`RANK`/`INVERSE`/`SOLVE`/`EIGENVALUES`/`QR`/`LU`/`CHOLESKY`/`EIGEN`/`SVD`/`PCA`
+
+Real linear algebra, natively in the engine — half of "SQL meets Linear Algebra" that was
+previously missing entirely (no inverse/determinant/solve/eigendecomposition/SVD/any
+decomposition existed before this). Built on `nalgebra` (pure Rust, matching the `realfft`
+precedent over binding to a system LAPACK/BLAS). See `LINEAGE_AND_LINALG_PLAN.md` Phase 8.
+
+- Single-output (plain `LET <name> = ...`): `TRACE`, `DETERMINANT`, `RANK` (numerical rank via
+  SVD), `INVERSE`, `SOLVE a b` (`Ax = b`), `EIGENVALUES` (symmetric matrices only — real
+  eigenvalues guaranteed, no complex-number `Value` support needed), `CHOLESKY`, `PCA a
+  COMPONENTS k` (dimensionality reduction, built on `SVD`).
+- New multi-output `LET a, b[, c] = <expr>` binding syntax, for the three decompositions with
+  more than one natural output: `QR` (`Q`, `R`), `LU` (`P`, `L`, `U` — `P` included so `P @ a ==
+  L @ U` actually holds, not just `L @ U ≈ a`), `SVD` (`U`, `s`, `Vᵗ`), and `EIGEN` (full
+  eigendecomposition — eigenvalues + eigenvectors, symmetric-only for the same reason as
+  `EIGENVALUES`; a truly general eigendecomposition can have complex results).
+- Every operator errors loudly (never a silent `NaN`/`Inf`-filled result) on a singular,
+  non-square, or non-symmetric input, and emits a real `ProvenanceRecord` from day one — the
+  entire point of building the unified provenance model first (see the entry above).
+- `RANK()` the SQL window function and `RANK a` the new tensor operator share the keyword
+  `RANK`; both still parse correctly (fixed a real regression this surfaced: adding `RANK` as a
+  lexer keyword broke `RANK() OVER (...)`, since that parser path expected `RANK` to lex as a
+  generic identifier).
+
 ### Added — `EXPLAIN LINEAGE`: unified, persisted provenance for tensors and datasets
 
 Real derivation history now survives a restart, and works identically whether you ask about a

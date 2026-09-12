@@ -351,32 +351,55 @@ Every operator below emits a real `ProvenanceRecord` (operation name + structure
 inputs + outputs) from the moment it's implemented — no separate "add lineage later" step,
 because Phases 0-7 already built the foundation.
 
-- [ ] 8.0 Add `nalgebra` dependency (pure Rust — matches the `rustfft`/`realfft` precedent
+- [x] 8.0 Add `nalgebra` dependency (pure Rust — matches the `rustfft`/`realfft` precedent
       already in this codebase over binding to LAPACK/BLAS). Build the
       `Tensor ↔ nalgebra` conversion scaffolding (f32 tensor → f64 nalgebra matrix → compute →
-      f64 → f32 back), reused by every operator below.
-- [ ] 8.1 `TRACE`, `DETERMINANT`, `RANK` — single scalar outputs, no new DSL binding syntax
+      f64 → f32 back), reused by every operator below. — `nalgebra = "0.33"`;
+      `src/core/linalg.rs`'s `tensor_to_matrix`/`matrix_to_tensor_data`.
+- [x] 8.1 `TRACE`, `DETERMINANT`, `RANK` — single scalar outputs, no new DSL binding syntax
       needed. Each emits provenance per the rule above.
-- [ ] 8.2 `INVERSE`, `SOLVE` (`Ax = b`) — loud-error-on-singular/near-singular philosophy
+- [x] 8.2 `INVERSE`, `SOLVE` (`Ax = b`) — loud-error-on-singular/near-singular philosophy
       (detected via the crate's own condition/pivot reporting — never silently return `NaN`).
-- [ ] 8.3 `EIGENVALUES` for **symmetric** matrices only (real eigenvalues guaranteed, no
+- [x] 8.3 `EIGENVALUES` for **symmetric** matrices only (real eigenvalues guaranteed, no
       complex-number handling needed yet).
-- [ ] 8.4 Design and implement multi-output `LET a, b, c = <expr>` binding syntax (lexer/
-      parser/AST/executor) — the prerequisite for every decomposition below.
-- [ ] 8.5 `LU`, `QR`, `CHOLESKY`, full eigendecomposition (eigenvalues + eigenvectors, general
-      case), `SVD` — each using 8.4's multi-output binding.
-- [ ] 8.6 `PCA`, built on 8.5's `SVD` — the capstone: real dimensionality reduction natively in
+- [x] 8.4 Design and implement multi-output `LET a, b, c = <expr>` binding syntax (lexer/
+      parser/AST/executor) — the prerequisite for every decomposition below. —
+      `Statement::LetMulti`/`LetMultiStmt` (new AST variant, `Let`/`LetStmt` untouched);
+      arity (names.len() vs. the bound op's real output count) checked at execution time in
+      `eval_let_multi`, with a clear error either direction (too few/many names, or a
+      single-output op like `CHOLESKY` used with multi-output `LET`).
+- [x] 8.5 `LU`, `QR`, `CHOLESKY`, full eigendecomposition (eigenvalues + eigenvectors, general
+      case), `SVD` — each using 8.4's multi-output binding. — **two deviations from the literal
+      text, both documented in code/docs**: `CHOLESKY` stayed single-output (bind with a plain
+      `LET l = CHOLESKY a`) since it only ever has one real output — forcing 8.4's syntax on it
+      would add ceremony, not value. `EIGEN`'s "general case" stayed **symmetric-only**, same as
+      `EIGENVALUES` (8.3) — a truly general eigendecomposition can produce complex
+      eigenvalues/eigenvectors, and this engine has no `Value::Complex`; going "general" here
+      would have silently contradicted 8.3's own locked constraint. `LU` returns `P`, `L`, `U`
+      (not just `L`, `U`) specifically so `P @ a == L @ U` holds for any input needing pivoting.
+- [x] 8.6 `PCA`, built on 8.5's `SVD` — the capstone: real dimensionality reduction natively in
       the engine.
-- [ ] 8.7 Unit tests per operator: hand-computable small matrices (2x2/3x3) with known
+- [x] 8.7 Unit tests per operator: hand-computable small matrices (2x2/3x3) with known
       determinant/inverse/eigenvalues; property checks (`A · A⁻¹ ≈ I`, `A · solve(A,b) ≈ b`,
       `A ≈ V·diag(λ)·V⁻¹` for a diagonalizable test case); singular/ill-conditioned matrix
-      error-path tests.
-- [ ] 8.8 `docs/DSL_REFERENCE.md` additions for every new keyword.
-- [ ] 8.9 `CHANGELOG.md` entries.
-- [ ] 8.10 Full CI-exact suite, fmt, clippy, smoke test — same bar as Phase 5.4.
+      error-path tests. — 21 unit tests in `src/core/linalg.rs` (numerics in isolation,
+      including `P@a≈L@U`, `a≈L@Lᵗ`, `a≈V@diag@Vᵗ`, `a≈U@diag(s)@Vᵗ` property checks) + 8
+      DSL-level integration tests in `tests/linalg_operators_test.rs` (real lexer→parser→
+      executor→engine pipeline, multi-output `LET` binding, error paths, provenance).
+- [x] 8.8 `docs/DSL_REFERENCE.md` additions for every new keyword. — new "Classical Linear
+      Algebra" subsection (§3) + multi-output `LET` grammar note.
+- [x] 8.9 `CHANGELOG.md` entries. — includes a real regression found and fixed while wiring
+      `RANK` as a lexer keyword: it collided with the pre-existing `RANK()` SQL window function,
+      which expected `RANK` to lex as a generic identifier (`src/dsl/parser/dataset.rs`).
+- [x] 8.10 Full CI-exact suite, fmt, clippy, smoke test — same bar as Phase 5.4. — all green;
+      `cargo test --lib` (212 passed) run explicitly after the `RANK` keyword fix to catch any
+      other keyword/SQL-identifier collision the new tokens (`TRACE`/`DETERMINANT`/`INVERSE`/
+      `SOLVE`/`EIGENVALUES`/`QR`/`LU`/`CHOLESKY`/`EIGEN`/`SVD`/`PCA`/`COMPONENTS`) might cause —
+      none found.
 - [ ] 8.11 Version bump + tag → GitHub Release + PyPI publish (same two-pipeline process as
       Phase 7), cross-platform validation, install-and-reverify through the real published
-      wheel.
+      wheel. — **not started**: this is the same class of irreversible, external action Phase 7
+      is gated on; needs explicit user go-ahead, same as Phase 7.
 
 ---
 

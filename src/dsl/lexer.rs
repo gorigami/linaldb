@@ -247,6 +247,32 @@ pub enum Token {
     Rate,
     #[token("MATCHED_FILTER")]
     MatchedFilter,
+    #[token("TRACE")]
+    Trace,
+    #[token("DETERMINANT")]
+    Determinant,
+    #[token("RANK")]
+    Rank,
+    #[token("INVERSE")]
+    Inverse,
+    #[token("SOLVE")]
+    Solve,
+    #[token("EIGENVALUES")]
+    Eigenvalues,
+    #[token("QR")]
+    Qr,
+    #[token("LU")]
+    Lu,
+    #[token("CHOLESKY")]
+    Cholesky,
+    #[token("EIGEN")]
+    Eigen,
+    #[token("SVD")]
+    Svd,
+    #[token("PCA")]
+    Pca,
+    #[token("COMPONENTS")]
+    Components,
 
     // ─── Punctuation & operators ──────────────────────────────────────────────
     #[token("[")]

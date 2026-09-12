@@ -319,7 +319,134 @@ fn eval_call(
             let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
             db.eval_stack(ctx, output, name_refs, 0).map_err(eng)
         }
+        CallExpr::Trace(a) => {
+            let a = operand!(a, "a");
+            db.eval_trace(ctx, output, &a).map_err(eng)
+        }
+        CallExpr::Determinant(a) => {
+            let a = operand!(a, "a");
+            db.eval_determinant(ctx, output, &a).map_err(eng)
+        }
+        CallExpr::Rank(a) => {
+            let a = operand!(a, "a");
+            db.eval_rank(ctx, output, &a).map_err(eng)
+        }
+        CallExpr::Inverse(a) => {
+            let a = operand!(a, "a");
+            db.eval_inverse(ctx, output, &a).map_err(eng)
+        }
+        CallExpr::Solve(a, b) => {
+            let (a, b) = (operand!(a, "a"), operand!(b, "b"));
+            db.eval_solve(ctx, output, &a, &b).map_err(eng)
+        }
+        CallExpr::Eigenvalues(a) => {
+            let a = operand!(a, "a");
+            db.eval_eigenvalues(ctx, output, &a).map_err(eng)
+        }
+        CallExpr::Cholesky(a) => {
+            let a = operand!(a, "a");
+            db.eval_cholesky(ctx, output, &a).map_err(eng)
+        }
+        CallExpr::Pca { input, components } => {
+            let a = operand!(input, "a");
+            db.eval_pca(ctx, output, &a, *components).map_err(eng)
+        }
+        // QR/LU/EIGEN/SVD produce more than one output and can't bind to a
+        // single `LET <name> = ...` -- see `eval_call_multi` below for the
+        // real dispatch, reached via `LET a, b[, c] = ...` (Phase 8.4).
+        CallExpr::Qr(_) => Err(DslError::Parse {
+            line: line_no,
+            msg: "QR produces two outputs -- use `LET q, r = QR a`".into(),
+        }),
+        CallExpr::Lu(_) => Err(DslError::Parse {
+            line: line_no,
+            msg: "LU produces three outputs -- use `LET p, l, u = LU a`".into(),
+        }),
+        CallExpr::Eigen(_) => Err(DslError::Parse {
+            line: line_no,
+            msg: "EIGEN produces two outputs -- use `LET vals, vecs = EIGEN a`".into(),
+        }),
+        CallExpr::Svd(_) => Err(DslError::Parse {
+            line: line_no,
+            msg: "SVD produces three outputs -- use `LET u, s, vt = SVD a`".into(),
+        }),
     }
+}
+
+/// `LET a, b[, c] = <expr>` -- Phase 8.4's multi-output binding. `expr` must
+/// be one of the decompositions with more than one natural output
+/// (`QR`/`LU`/`EIGEN`/`SVD`); anything else is a parse-time-shaped error
+/// here (there's nothing wrong with the expression itself, just with using
+/// it in a multi-output binding).
+pub(super) fn eval_let_multi(
+    db: &mut TensorDb,
+    ctx: &mut ExecutionContext,
+    names: &[String],
+    _lazy: bool,
+    expr: &Expr,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let eng = |e| DslError::Engine {
+        line: line_no,
+        source: e,
+    };
+    let not_multi_output = |op: &str| {
+        Err(DslError::Parse {
+            line: line_no,
+            msg: format!(
+                "{op} has a single output -- use `LET <name> = {op} ...`, not multi-output LET"
+            ),
+        })
+    };
+
+    let Expr::Call(call) = expr else {
+        return Err(DslError::Parse {
+            line: line_no,
+            msg: "multi-output LET requires a decomposition call (QR/LU/EIGEN/SVD)".into(),
+        });
+    };
+
+    match call {
+        CallExpr::Qr(a) => {
+            let tmp = fresh_temp("a");
+            let a_name = eval_expr_to_name(db, ctx, &tmp, a, false, line_no)?;
+            db.eval_qr(ctx, names, &a_name).map_err(eng)?;
+        }
+        CallExpr::Lu(a) => {
+            let tmp = fresh_temp("a");
+            let a_name = eval_expr_to_name(db, ctx, &tmp, a, false, line_no)?;
+            db.eval_lu(ctx, names, &a_name).map_err(eng)?;
+        }
+        CallExpr::Eigen(a) => {
+            let tmp = fresh_temp("a");
+            let a_name = eval_expr_to_name(db, ctx, &tmp, a, false, line_no)?;
+            db.eval_eigen(ctx, names, &a_name).map_err(eng)?;
+        }
+        CallExpr::Svd(a) => {
+            let tmp = fresh_temp("a");
+            let a_name = eval_expr_to_name(db, ctx, &tmp, a, false, line_no)?;
+            db.eval_svd(ctx, names, &a_name).map_err(eng)?;
+        }
+        CallExpr::Trace(_) => return not_multi_output("TRACE"),
+        CallExpr::Determinant(_) => return not_multi_output("DETERMINANT"),
+        CallExpr::Rank(_) => return not_multi_output("RANK"),
+        CallExpr::Inverse(_) => return not_multi_output("INVERSE"),
+        CallExpr::Solve(_, _) => return not_multi_output("SOLVE"),
+        CallExpr::Eigenvalues(_) => return not_multi_output("EIGENVALUES"),
+        CallExpr::Cholesky(_) => return not_multi_output("CHOLESKY"),
+        CallExpr::Pca { .. } => return not_multi_output("PCA"),
+        _ => {
+            return Err(DslError::Parse {
+                line: line_no,
+                msg: "multi-output LET requires a decomposition call (QR/LU/EIGEN/SVD)".into(),
+            })
+        }
+    }
+
+    Ok(DslOutput::Message(format!(
+        "Defined variables: {}",
+        names.join(", ")
+    )))
 }
 
 fn apply_index(
@@ -588,6 +715,20 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Stack(ops) => {
             let names: Vec<String> = ops.iter().map(expr_to_string).collect();
             format!("STACK {}", names.join(" "))
+        }
+        CallExpr::Trace(a) => format!("TRACE {}", expr_to_string(a)),
+        CallExpr::Determinant(a) => format!("DETERMINANT {}", expr_to_string(a)),
+        CallExpr::Rank(a) => format!("RANK {}", expr_to_string(a)),
+        CallExpr::Inverse(a) => format!("INVERSE {}", expr_to_string(a)),
+        CallExpr::Solve(a, b) => format!("SOLVE {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Eigenvalues(a) => format!("EIGENVALUES {}", expr_to_string(a)),
+        CallExpr::Qr(a) => format!("QR {}", expr_to_string(a)),
+        CallExpr::Lu(a) => format!("LU {}", expr_to_string(a)),
+        CallExpr::Cholesky(a) => format!("CHOLESKY {}", expr_to_string(a)),
+        CallExpr::Eigen(a) => format!("EIGEN {}", expr_to_string(a)),
+        CallExpr::Svd(a) => format!("SVD {}", expr_to_string(a)),
+        CallExpr::Pca { input, components } => {
+            format!("PCA {} COMPONENTS {}", expr_to_string(input), components)
         }
     }
 }
