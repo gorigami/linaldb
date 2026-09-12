@@ -1,6 +1,6 @@
 [package]
 name = "linal-python"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "PyO3 native bindings for LINALDB — embeds the same synchronous TensorDb/execute_line the CLI/REPL uses directly in a Python process, no server required."
 
