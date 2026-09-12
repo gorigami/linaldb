@@ -193,6 +193,58 @@ indexing) already works on it unmodified. See `SIGNAL_PROCESSING_PLAN.md`
 at the repo root for the full design history — this is the last operator
 that plan calls for, though the plan may grow in future rounds.
 
+### Classical Linear Algebra
+
+Built on `nalgebra` (pure Rust, matching the `realfft` precedent above over
+binding to a system LAPACK/BLAS). Every fallible operator here errors
+loudly on a singular/non-square/non-symmetric input — never a silent `NaN`
+in the result. See `LINEAGE_AND_LINALG_PLAN.md` Phase 8 for the full design
+history.
+
+**Single-output** (bind with a plain `LET <name> = ...`):
+
+- `TRACE a`: Sum of the diagonal. `a` must be a square `Matrix`. Result is a true scalar (rank-0), same convention as `SUM`/`MEAN`/`STDEV` above.
+- `DETERMINANT a`: `a` must be a square `Matrix`. Result is a true scalar. `0.0` for a singular matrix is a legitimate result, not an error.
+- `RANK a`: Numerical rank via singular value decomposition. Result is a true scalar, integer-valued (e.g. `2.0`) — no new scalar `Value` variant for an integer result.
+- `INVERSE a`: `a` must be a square `Matrix`. Result is a `Matrix` the same shape. **Errors if `a` is singular** — never returns a matrix full of `NaN`/`Inf`.
+- `SOLVE a b`: Solves `a x = b` for `x` via LU decomposition with partial pivoting. `a` must be square; `b` a `Vector` with length matching `a`'s row count. Result is a `Vector`. **Errors if `a` is singular.**
+- `EIGENVALUES a`: Real eigenvalues of a **symmetric** matrix only (guarantees real results — no complex-number `Value` support exists). `a` must be square and symmetric (checked within a relative numerical tolerance; a non-symmetric input errors rather than silently producing a wrong answer). Result is a `Vector` of eigenvalues in no particular guaranteed order.
+- `CHOLESKY a`: Cholesky decomposition (`a = L * Lᵗ`) of a symmetric **positive-definite** matrix. Result is the lower-triangular `Matrix` `L`. **Errors if `a` isn't positive-definite.**
+- `PCA a COMPONENTS k`: Projects `a`'s rows (samples) onto their top-`k` principal components — mean-centers each column, then keeps the top-`k` components of the centered data's SVD. `k` must be between 1 and `a`'s column count. Result is a `Matrix` with the same row count as `a` and `k` columns. Built directly on `SVD` below.
+
+**Multi-output** (bind with `LET a, b[, c] = ...` — see below):
+
+- `QR a`: QR decomposition (`a = Q * R`) of any rectangular `Matrix`. Two outputs, bind order `Q`, `R`.
+- `LU a`: LU decomposition with partial pivoting (`P * a = L * U`). `a` must be square. Three outputs, bind order `P`, `L`, `U` — `P` is included specifically so `P @ a == L @ U` actually holds; a caller that only kept `L`/`U` and dropped `P` would find that equality silently false for any input that needs row pivoting.
+- `EIGEN a`: Full eigendecomposition (eigenvalues + eigenvectors) of a **symmetric** matrix only — deliberately narrower than "the general case," since a truly general eigendecomposition can have complex eigenvalues/eigenvectors and this engine has no complex `Value` support (the same constraint `EIGENVALUES` already has). Two outputs, bind order eigenvalues (`Vector`), eigenvectors (`Matrix`, as columns).
+- `SVD a`: Singular value decomposition (`a = U * diag(s) * Vᵗ`) of any rectangular `Matrix`. Three outputs, bind order `U`, `s` (`Vector` of singular values), `Vᵗ`.
+
+```sql
+MATRIX m = [[4, 7], [2, 6]]
+LET tr = TRACE m           -- 10.0
+LET det = DETERMINANT m    -- 10.0
+LET inv = INVERSE m        -- Matrix(2, 2)
+VECTOR b = [4, 6]
+LET x = SOLVE m b          -- Vector(2): solves m @ x = b
+
+LET q, r = QR m            -- multi-output LET: two names, one expression
+LET p, l, u = LU m
+MATRIX sym = [[2, 1], [1, 2]]
+LET vals, vecs = EIGEN sym
+LET u, s, vt = SVD m
+```
+
+#### Multi-output `LET`
+
+`LET a, b[, c] = <expr>` binds more than one name from a single expression
+in one statement — the only expressions that support this are the
+decompositions above with more than one natural output (`QR`/`LU`/`EIGEN`/
+`SVD`). The number of names must match that expression's real output count
+exactly; a mismatch (either direction) is a clear error, not a silent
+truncation or `NULL`-fill. Using a single-output operator (e.g. `CHOLESKY`)
+with multi-output `LET`, or a multi-output operator with a plain single-name
+`LET`, is also a clear error pointing at the correct form to use instead.
+
 ---
 
 ## 4. Query & Engineering (SQL)

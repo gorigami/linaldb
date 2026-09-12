@@ -403,6 +403,19 @@ impl Parser {
         };
 
         let name = self.eat_ident()?;
+
+        // `LET a, b, c = <expr>` — multi-output binding (Phase 8.4).
+        if self.at(&Token::Comma) {
+            let mut names = vec![name];
+            while self.at(&Token::Comma) {
+                self.advance();
+                names.push(self.eat_ident()?);
+            }
+            self.eat(&Token::Eq)?;
+            let expr = self.parse_expr()?;
+            return Ok(Statement::LetMulti(LetMultiStmt { names, lazy, expr }));
+        }
+
         self.eat(&Token::Eq)?;
         let expr = self.parse_expr()?;
 

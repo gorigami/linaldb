@@ -16,6 +16,9 @@ pub enum Statement {
     // ─── Assignment / computation ────────────────────────────────────────────
     /// `LET <name> = <expr>` or `LAZY LET <name> = <expr>`
     Let(LetStmt),
+    /// `LET a, b, c = <expr>` — multi-output binding (Phase 8.4), for
+    /// decompositions with more than one natural output.
+    LetMulti(LetMultiStmt),
     /// `DERIVE <name> FROM <expr>`
     Derive(DeriveStmt),
 
@@ -146,6 +149,18 @@ pub struct MatrixStmt {
 #[derive(Debug, Clone)]
 pub struct LetStmt {
     pub name: String,
+    pub lazy: bool,
+    pub expr: Expr,
+}
+
+/// `LET a, b, c = <expr>` — multi-output binding (LINEAGE_AND_LINALG_PLAN.md
+/// Phase 8.4), the prerequisite for decompositions with more than one
+/// natural output (`LU`/`QR`/`EIGEN`/`SVD`). `names.len()` must match the
+/// bound `CallExpr` variant's real output count -- checked at execution
+/// time, not parse time (the parser doesn't know each op's arity).
+#[derive(Debug, Clone)]
+pub struct LetMultiStmt {
+    pub names: Vec<String>,
     pub lazy: bool,
     pub expr: Expr,
 }
@@ -827,6 +842,48 @@ pub enum CallExpr {
     // ── N-ary operations ────────────────────────────────────────────────────
     /// `STACK t1 t2 t3 ...`
     Stack(Vec<Expr>),
+
+    // ── Classical linear algebra (LINEAGE_AND_LINALG_PLAN.md Phase 8) ──────
+    /// `TRACE a` — sum of the diagonal of a square matrix. Scalar result.
+    Trace(Box<Expr>),
+    /// `DETERMINANT a`. Scalar result.
+    Determinant(Box<Expr>),
+    /// `RANK a` — numerical rank via SVD. Scalar (integer-valued `f32`)
+    /// result, like every other scalar reduction (`SUM`/`MEAN`/...).
+    Rank(Box<Expr>),
+    /// `INVERSE a`. Matrix result; errors (never `NaN`) if `a` is singular.
+    Inverse(Box<Expr>),
+    /// `SOLVE a b` — solves `a x = b` for `x`. Vector result; errors (never
+    /// `NaN`) if `a` is singular.
+    Solve(Box<Expr>, Box<Expr>),
+    /// `EIGENVALUES a` — real eigenvalues of a **symmetric** matrix only
+    /// (Phase 8.3: real eigenvalues guaranteed, no complex `Value` support
+    /// needed yet). Vector result.
+    Eigenvalues(Box<Expr>),
+    /// `QR a` — QR decomposition. Two-output (`Q`, `R`); bind with
+    /// `LET q, r = QR a`.
+    Qr(Box<Expr>),
+    /// `LU a` — LU decomposition with partial pivoting. Three-output
+    /// (`P`, `L`, `U`, in that order so `P @ a == L @ U`); bind with
+    /// `LET p, l, u = LU a`.
+    Lu(Box<Expr>),
+    /// `CHOLESKY a` — Cholesky decomposition of a symmetric
+    /// positive-definite matrix. Single output (`L`), usable with a plain
+    /// `LET l = CHOLESKY a` — doesn't need Phase 8.4's multi-output binding.
+    Cholesky(Box<Expr>),
+    /// `EIGEN a` — full eigendecomposition of a **symmetric** matrix
+    /// (eigenvalues + eigenvectors; see `core::linalg::eigen_symmetric`'s
+    /// doc comment for why this stays symmetric-only rather than the
+    /// plan's original "general case" wording). Two-output (eigenvalues
+    /// vector, eigenvector matrix); bind with `LET vals, vecs = EIGEN a`.
+    Eigen(Box<Expr>),
+    /// `SVD a` — singular value decomposition. Three-output (`U`, `S`,
+    /// `Vt`); bind with `LET u, s, vt = SVD a`.
+    Svd(Box<Expr>),
+    /// `PCA a COMPONENTS <k>` — projects `a`'s rows onto their top-`k`
+    /// principal components. Single output (the projected data), built on
+    /// `SVD` — the Phase 8.6 capstone.
+    Pca { input: Box<Expr>, components: usize },
 }
 
 #[derive(Debug, Clone)]
