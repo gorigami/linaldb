@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.80] - 2026-09-12
+
 ### Added — classical linear algebra: `TRACE`/`DETERMINANT`/`RANK`/`INVERSE`/`SOLVE`/`EIGENVALUES`/`QR`/`LU`/`CHOLESKY`/`EIGEN`/`SVD`/`PCA`
 
 Real linear algebra, natively in the engine — half of "SQL meets Linear Algebra" that was
