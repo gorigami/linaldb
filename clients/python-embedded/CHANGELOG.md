@@ -4,6 +4,20 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.3] - 2026-09-12
+
+Bumped for the engine features below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- New `EXPLAIN LINEAGE <name> [AS JSON]` DSL command — real, persisted derivation
+  history for a tensor or dataset, surviving a restart. `SHOW LINEAGE <name>` keeps
+  working as an alias, and now also resolves dataset names (previously tensor-only).
+- Real classical linear algebra: `TRACE`, `DETERMINANT`, `RANK`, `INVERSE`, `SOLVE`,
+  `EIGENVALUES`, `CHOLESKY`, `PCA`, and the decompositions `QR`/`LU`/`EIGEN`/`SVD` via
+  a new multi-output `LET a, b[, c] = <expr>` binding syntax.
+
+See the parent repository's `CHANGELOG.md` (`[0.1.80]`) for full detail.
+
 ## [0.1.2] - 2026-09-12
 
 Bumped for the engine fix below (this crate has no code of its own beyond the
