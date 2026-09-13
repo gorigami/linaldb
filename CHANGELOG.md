@@ -25,6 +25,22 @@ already had. New regression tests in `src/core/backend/simd.rs` (`add`/`sub`/`mu
 broadcasting a scalar against a >=1024-element tensor, plus one confirming the SIMD fast path is
 still taken for matching same-shape tensors above the threshold).
 
+### Fixed — un-aliased qualified `SELECT` column labeled `__cmp_0` instead of its real name
+
+Found while building a real `linal-hub` economics notebook: `SELECT t.col FROM t` (no `AS`)
+returned the correct value but reported the output column as `__cmp_0` — the SELECT-list
+classifier (`parse_select_expr`, `src/dsl/parser/dataset.rs`) only special-cased a *bare*
+`Expr::Ref` as a plain `SelectExpr::Column`; a qualified reference parses to `Expr::Field {
+base: Ref(_), field }` via the general expression parser, which fell into the generic
+`SelectExpr::Computed` catch-all — whose unaliased-naming fallback (`__cmp_{idx}`, meant for a
+genuine expression like `price * 2`) fired even though this is just a plain column reference.
+Data was always correct; only the schema/output column label was wrong. Fixed by recognizing a
+qualified reference with no alias as `SelectExpr::Column(field)` too (bare field name, matching
+how every other qualified-column reference in this engine already resolves — by final field
+name only, not full table-qualified disambiguation). New regression tests in
+`tests/qualified_column_test.rs` cover a plain qualified `SELECT`, one across a `JOIN`, and a
+guard confirming an explicit `AS` alias still wins.
+
 ## [0.1.82] - 2026-09-13
 
 ### Fixed — `JOIN` silently returned the wrong table's value for a colliding qualified column (severe)

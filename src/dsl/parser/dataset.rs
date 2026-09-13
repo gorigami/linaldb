@@ -979,6 +979,17 @@ impl Parser {
         match (expr, alias) {
             // Simple column reference with no alias → Column
             (Expr::Ref(name), None) => Ok(SelectExpr::Column(name)),
+            // A qualified column reference (`t.col`) with no alias is still just
+            // a plain column, not a genuinely computed expression -- treat it as
+            // `Column` too (bare name, matching how this engine already resolves
+            // every other qualified-column reference: it doesn't disambiguate
+            // by table, only by the final field name). Without this arm it fell
+            // into the generic `Computed` catch-all below, which names an
+            // un-aliased result `__cmp_{idx}` -- a fallback meant for genuine
+            // expressions like `price * 2`, not a plain column reference.
+            (Expr::Field { base, field }, None) if matches!(*base, Expr::Ref(_)) => {
+                Ok(SelectExpr::Column(field))
+            }
             // Everything else → Computed
             (expr, alias) => Ok(SelectExpr::Computed {
                 expr: Box::new(expr),

@@ -269,3 +269,68 @@ fn test_join_colliding_column_name_aggregate_resolves_correct_side() {
     // If this silently averaged left_t.grp (1, 1) instead, it would read 1.0.
     assert_eq!(ds.rows[0].values[1], Value::Float(150.0));
 }
+
+// ── Bug #5: an un-aliased qualified SELECT column was labeled `__cmp_0`
+//    instead of its real name ─────────────────────────────────────────────
+//
+// Found 2026-09-13 building a real-data notebook outside this repo
+// (`linal-hub/notebooks/08_production_network_systemic_risk.ipynb`):
+// `SELECT t.col FROM t` (no `AS`) returned the correct value but reported
+// the output column as `__cmp_0` -- the SELECT-list classifier only treated
+// a *bare* `Expr::Ref` as a plain `Column`; a qualified `Expr::Field`
+// reference with no alias fell into the generic `Computed` catch-all, whose
+// unaliased-naming fallback (`__cmp_{idx}`, meant for a genuine expression
+// like `price * 2`) fired even though this is just a column reference.
+
+#[test]
+fn test_unaliased_qualified_select_column_keeps_its_real_name() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int, b: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, 2.0)", 2);
+
+    let out = exec(&mut db, "SELECT t.a, t.b FROM t", 3);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let names: Vec<&str> = ds.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["a", "b"]);
+    assert_eq!(ds.rows[0].values[0], Value::Int(1));
+    assert_eq!(ds.rows[0].values[1], Value::Float(2.0));
+}
+
+#[test]
+fn test_unaliased_qualified_select_column_keeps_its_real_name_across_join() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET orders COLUMNS (id: Int, user_id: Int)", 1);
+    exec(&mut db, "INSERT INTO orders VALUES (1, 5)", 2);
+    exec(&mut db, "DATASET users COLUMNS (uid: Int, name: String)", 3);
+    exec(&mut db, "INSERT INTO users VALUES (5, \"bob\")", 4);
+
+    let out = exec(
+        &mut db,
+        "SELECT orders.id, users.name FROM orders JOIN users ON orders.user_id = users.uid",
+        5,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let names: Vec<&str> = ds.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["id", "name"]);
+}
+
+#[test]
+fn test_qualified_select_column_with_alias_still_uses_the_alias() {
+    // Guard against over-broadening the new Column-classification arm: an
+    // explicit `AS` alias must still win, exactly as it already does for a
+    // bare (unqualified) column reference.
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1)", 2);
+
+    let out = exec(&mut db, "SELECT t.a AS renamed FROM t", 3);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let names: Vec<&str> = ds.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["renamed"]);
+}
