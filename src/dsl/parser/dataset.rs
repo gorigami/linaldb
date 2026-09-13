@@ -40,7 +40,7 @@ impl Parser {
                     self.eat(&Token::By)?;
                     let mut cols = vec![];
                     loop {
-                        cols.push(self.eat_ident()?);
+                        cols.push(self.eat_qualified_column_name()?);
                         if self.at(&Token::Comma) {
                             self.advance();
                         } else {
@@ -58,7 +58,7 @@ impl Parser {
                     self.eat(&Token::By)?;
                     let mut columns = vec![];
                     loop {
-                        let col = self.eat_ident()?;
+                        let col = self.eat_qualified_column_name()?;
                         let ascending = if self.at_ident("DESC") {
                             self.advance();
                             false
@@ -496,10 +496,10 @@ impl Parser {
                     if self.at(&Token::By) {
                         self.advance();
                     }
-                    group_by.push(self.eat_ident()?);
+                    group_by.push(self.eat_qualified_column_name()?);
                     while self.at(&Token::Comma) {
                         self.advance();
-                        group_by.push(self.eat_ident()?);
+                        group_by.push(self.eat_qualified_column_name()?);
                     }
                 }
                 Some(Token::Having) => {
@@ -513,7 +513,7 @@ impl Parser {
                     }
                     let mut columns = vec![];
                     loop {
-                        let col = self.eat_ident()?;
+                        let col = self.eat_qualified_column_name()?;
                         let ascending = if self.at_ident("DESC") {
                             self.advance();
                             false
@@ -878,7 +878,7 @@ impl Parser {
                     self.advance();
                     self.eat(&Token::LParen)?;
                     let (col, offset) = if fname == "LAG" || fname == "LEAD" {
-                        let col = self.eat_ident()?;
+                        let col = self.eat_qualified_column_name()?;
                         let off = if self.at(&Token::Comma) {
                             self.advance();
                             self.eat_usize()?
@@ -1007,7 +1007,7 @@ impl Parser {
             self.advance();
             self.eat(&Token::By)?;
             loop {
-                partition_by.push(self.eat_ident()?);
+                partition_by.push(self.eat_qualified_column_name()?);
                 if self.at(&Token::Comma) {
                     self.advance();
                 } else {
@@ -1019,7 +1019,7 @@ impl Parser {
             self.advance();
             self.eat(&Token::By)?;
             loop {
-                let col = self.eat_ident()?;
+                let col = self.eat_qualified_column_name()?;
                 let asc = if self.at_ident("DESC") {
                     self.advance();
                     false

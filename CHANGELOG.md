@@ -41,6 +41,26 @@ name only, not full table-qualified disambiguation). New regression tests in
 `tests/qualified_column_test.rs` cover a plain qualified `SELECT`, one across a `JOIN`, and a
 guard confirming an explicit `AS` alias still wins.
 
+### Fixed — a qualified column failed to parse in `GROUP BY`/`ORDER BY`/window `PARTITION BY`/`LAG`/`LEAD`
+
+Found investigating the bug above: `GROUP BY t.col`, plain `ORDER BY t.col`, window
+`PARTITION BY t.col`/`ORDER BY t.col`, and `LAG(t.col)`/`LEAD(t.col)`'s column argument all
+failed to parse at all (`expected ')', found '.'` or similar), even though the identical
+qualified column already works fine in `SELECT`/`WHERE`. Root cause: unlike the general
+expression parser (which handles `t.col` naturally via `Expr::Field`), each of these
+clauses (`src/dsl/parser/dataset.rs`) parsed its column name via a single raw `eat_ident()`
+that never checked for a following `.` — an oversight, not a deliberate restriction (no
+existing test exercised a qualified column in any of these clauses before this fix), present
+in **two independently duplicated** copies of the `GROUP BY`/`ORDER BY` grammar (`parse_select`
+and `parse_dataset_from_clause`). Fixed with one new shared parser helper,
+`eat_qualified_column_name` (`src/dsl/parser/mod.rs`), that parses an optional `.ident`
+qualifier and discards it — this doesn't change any resolution behavior (`Schema::get_field_index`
+is a flat exact-string lookup with no qualifier awareness, and every qualified-column reference
+in this engine already resolves by final field name only, never true table disambiguation), it
+only accepts syntax that previously failed to parse. Swapped in at all 7 affected call sites.
+New regression tests in `tests/qualified_column_test.rs` (DSL-level, real data) and
+`src/dsl/parser/mod.rs` (parser unit tests) cover every affected clause.
+
 ## [0.1.82] - 2026-09-13
 
 ### Fixed — `JOIN` silently returned the wrong table's value for a colliding qualified column (severe)
