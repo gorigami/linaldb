@@ -4,6 +4,23 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.5] - 2026-09-13
+
+Bumped for the engine fixes below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- A `JOIN`'s `SELECT`/`WHERE`/aggregate expressions could silently return the
+  *wrong* table's value for a qualified `table.col` reference when both sides
+  of the join shared a bare column name — no error, just wrong data.
+- The 12 classical-linear-algebra keywords (`RANK`, `TRACE`, `DETERMINANT`, ...)
+  are now usable as ordinary identifiers (column names, `AS` aliases, bare
+  references) anywhere the grammar expects one, not just as the operator they
+  otherwise start.
+- `FROM` is now optional for a literal/computed-only `SELECT`
+  (e.g. `SELECT L2_NORM([3.0, 4.0]) AS five`, no dataset needed).
+
+See the parent repository's `CHANGELOG.md` (`[0.1.82]`) for full detail.
+
 ## [0.1.4] - 2026-09-13
 
 Bumped for the engine fix below (this crate has no code of its own beyond the
@@ -66,12 +83,16 @@ See the parent repository's `CHANGELOG.md` for full detail — all four were
 found via a real pytest suite written against this exact published PyPI
 package (`linal-hub`, a local project, not yet published anywhere).
 
-## [0.1.0] - 2026-09-06 (unreleased, not yet published to PyPI)
+## [0.1.0] - 2026-09-09
 
 Initial release: a PyO3 extension (`src/lib.rs`) embedding the engine's
 synchronous `TensorDb`/`execute_line` directly in the Python process, no
 server required — alongside, not replacing, the HTTP-based
-`clients/python` package.
+`clients/python` package. Built 2026-09-06; published to PyPI as
+[`linaldb`](https://pypi.org/project/linaldb/0.1.0/) on 2026-09-09
+alongside the naming rename from `linaldb-embedded`, with wheels for
+macOS (aarch64), Linux (manylinux x86_64), and Windows (x86_64), all
+`cp39-abi3`.
 
 - `Db(data_dir=None)` / `Db.execute()` / `Db.query()`, returning an
   `ExecuteResult` (table) or `TensorResult` (bare tensor) mirroring the
