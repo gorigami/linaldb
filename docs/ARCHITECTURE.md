@@ -12,8 +12,9 @@ This document provides a comprehensive overview of the LINAL engine architecture
 6. [Query Processing](#query-processing)
 7. [Type System](#type-system)
 8. [Lineage & Provenance](#lineage--provenance)
-9. [Consistency & Auditing](#consistency--auditing)
-10. [Design Principles](#design-principles)
+9. [Classical Linear Algebra](#classical-linear-algebra)
+10. [Consistency & Auditing](#consistency--auditing)
+11. [Design Principles](#design-principles)
 
 ---
 
@@ -711,10 +712,13 @@ Every stored tensor carries a `TensorKind` tag:
 A unified `ProvenanceRecord`/`ProvenanceEntity`/`ProvenanceStore` model
 (`src/core/provenance.rs`) tracks derivation history for **both** tensors and
 datasets through one event log per `DatabaseInstance`, not two disconnected
-mechanisms (see `LINEAGE_AND_LINALG_PLAN.md`'s Phase 0 outcome for the full
-design rationale — OpenLineage's Job/Run/Dataset/facet vocabulary mapped
-cleanly onto linaldb's concepts and is the shape `EXPLAIN LINEAGE ... AS
-JSON` exports in).
+mechanisms. The design maps onto OpenLineage's Job/Run/Dataset/facet
+vocabulary (a DSL statement type ~ Job, one `ProvenanceRecord` ~ Run, a
+`Tensor`/`Dataset` ~ Dataset, `parameters`/`engine_version` ~ facets) —
+close enough that a real OpenLineage exporter later is a mapping function
+away, not a redesign, which is also the shape `EXPLAIN LINEAGE ... AS JSON`
+exports in. W3C PROV was evaluated as a fallback but wasn't needed; the
+OpenLineage mapping was clean.
 
 - **`ProvenanceRecord`**: one event — `operation` (name), structured
   `parameters`, `inputs`/`outputs` (`Vec<ProvenanceEntity>`), `timestamp`,
@@ -754,6 +758,51 @@ JSON` exports in).
   column→tensor references resolve), not derivation history — see
   "Consistency & Auditing" below and `docs/DSL_REFERENCE.md`'s "Lineage &
   Provenance" subsection for the explicit disambiguation.
+
+---
+
+## Classical Linear Algebra
+
+`src/core/linalg.rs` implements `TRACE`/`DETERMINANT`/`RANK`/`INVERSE`/`SOLVE`/
+`EIGENVALUES`/`CHOLESKY`/`PCA`/`QR`/`LU`/`EIGEN`/`SVD` on top of `nalgebra`
+(pure Rust — matches the `realfft`/`rustfft` precedent this codebase already
+has for numerical crates over binding to a system LAPACK/BLAS). Kept
+separate from `engine/kernels.rs` (elementwise/reduction tensor math) and
+`core::signal` (frequency-domain), since this is a third, distinct
+numerical domain built on a third crate.
+
+- **Precision**: every operator promotes the `Tensor`'s native `f32` data to
+  `f64` for the actual computation, then narrows the result back to `f32` —
+  classical linear algebra (determinants, eigenvalues, LU pivoting)
+  accumulates error fast enough in `f32` that computing in `f64` throughout
+  meaningfully helps, even though `Tensor` storage stays `f32`-only.
+- **Error philosophy**: every fallible operator returns a real `Err` on a
+  singular/near-singular/non-square/non-symmetric input — never a silent
+  `NaN`/`Inf` in the output. `INVERSE`/`SOLVE` detect singularity via
+  `nalgebra`'s own LU-with-partial-pivoting failure, not a hand-rolled
+  threshold check.
+- **Symmetric-only, deliberately**: `EIGENVALUES` and `EIGEN` (full
+  eigendecomposition) only accept symmetric matrices, checked within a
+  relative numerical tolerance rather than assumed. A truly general
+  eigendecomposition can produce complex eigenvalues/eigenvectors, and this
+  engine has no `Value::Complex` — going "general" would silently
+  contradict that constraint, so both operators stay symmetric-only rather
+  than half-supporting the general case.
+- **Multi-output `LET a, b[, c] = <expr>`** (new `Statement::LetMulti` /
+  `LetMultiStmt`, `dsl/ast.rs` — the single-output `Let`/`LetStmt` is
+  untouched): the binding syntax `QR`/`LU`/`EIGEN`/`SVD` need, since they
+  have more than one natural output (`LU` returns `P`, `L`, `U` — including
+  the permutation `P`, not just `L`/`U`, specifically so `P @ a == L @ U`
+  actually holds for any input needing row pivoting). Arity (names given vs.
+  the bound operator's real output count) is checked at execution time in
+  `eval_let_multi`, not parse time — the parser doesn't know each
+  operator's arity. `CHOLESKY` stays single-output (`LET l = CHOLESKY a`) on
+  purpose: it only ever has one real output, so forcing the multi-output
+  syntax on it would add ceremony without value.
+- **Provenance from day one**: every operator emits a real `ProvenanceRecord`
+  through the same unified store described above — there was no separate
+  "add lineage later" step, since the provenance model existed before any of
+  these operators were built.
 
 ---
 
