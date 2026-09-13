@@ -296,7 +296,14 @@ pub enum WindowFunc {
 pub struct SelectStmt {
     pub ctes: Vec<(String, SelectStmt)>,
     pub distinct: bool,
-    pub source: DatasetSource,
+    /// `None` for a `SELECT` with no `FROM` clause at all (a "scalar"
+    /// select, e.g. `SELECT L2_NORM([3.0, 4.0]) AS five` — every DSL
+    /// example that doesn't reference a real dataset column). Evaluated by
+    /// the executor as one synthetic empty row, short-circuiting the rest
+    /// of this struct's fields (`joins`/`filter`/`group_by`/etc. are
+    /// meaningless without a data source and are simply not applied) —
+    /// see `execute_select`'s early-return branch.
+    pub source: Option<DatasetSource>,
     pub joins: Vec<JoinClause>,
     pub columns: SelectColumns,
     pub filter: Option<Expr>,
@@ -312,6 +319,12 @@ pub struct SelectStmt {
 pub struct JoinClause {
     pub kind: JoinKind,
     pub dataset: String,
+    /// `[AS] alias` given after the right-side dataset name, if any (e.g.
+    /// `JOIN users u ON ...` -> `Some("u")`). Kept (unlike the FROM-clause's
+    /// own alias, which is discarded) because a qualifier using this alias
+    /// must resolve the same way a qualifier using the literal dataset name
+    /// would -- see `dsl_expr_to_logical_expr`'s `Expr::Field` handling.
+    pub alias: Option<String>,
     /// For an equi-join: `left_col = right_col`. For a similarity join
     /// (`similarity_threshold` is `Some`): the two Vector columns compared
     /// via `COSINE_SIM(left_col, right_col) > threshold`.

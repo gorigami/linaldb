@@ -256,7 +256,7 @@ Any SQL expression can contain an inline vector literal. The syntax mirrors Pyth
 ```sql
 SELECT id, COSINE_SIM(embedding, [0.1, 0.2, 0.3]) AS score FROM docs
 SELECT id, VEC_ADD(v, [0.0, 0.0, 1.0]) AS shifted FROM vecs
-SELECT L2_NORM([3.0, 4.0]) AS five FROM dual
+SELECT L2_NORM([3.0, 4.0]) AS five  -- FROM is optional for a literal/computed-only SELECT
 ```
 
 ### Vector Scalar Functions
@@ -336,6 +336,7 @@ LIMIT 10
 - **Filtering**: `WHERE` or `FILTER` can be used interchangeably.
 - **`DISTINCT`**: `SELECT DISTINCT <cols> FROM ...` removes duplicate rows from the result.
 - **`LIMIT`/`OFFSET`**: `LIMIT <n>` caps the row count; `OFFSET <n>` skips the first `n` rows before applying `LIMIT` (both may be used together or independently).
+- **`FROM` is optional** for a `SELECT` list of only literal/computed expressions — no column, aggregate, or window reference, since there'd be no dataset to resolve one against: `SELECT L2_NORM([3.0, 4.0]) AS five` evaluates the list once and returns a single row. Any real column reference still requires `FROM`.
 
 **Predicate vocabulary** (usable in `WHERE`/`FILTER`/`HAVING`):
 

@@ -138,7 +138,7 @@ fn pipeline_step_to_select(step: PipelineStep, source: String) -> SelectStmt {
     let base = SelectStmt {
         ctes: vec![],
         distinct: false,
-        source: DatasetSource::Named(source),
+        source: Some(DatasetSource::Named(source)),
         joins: vec![],
         columns: SelectColumns::All,
         filter: None,

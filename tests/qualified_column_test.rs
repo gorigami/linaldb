@@ -146,3 +146,126 @@ fn test_bare_from_alias_no_as_keyword() {
     };
     assert_eq!(ds.rows[0].values[0], Value::Int(7));
 }
+
+// ── Bug #4: a qualified reference silently returned the WRONG table's
+//    value when both sides of a JOIN share a bare column name ────────────
+//
+// Found 2026-09-13 while building a real-data notebook outside this repo
+// (`linal-hub/notebooks/07_single_cell_pca_pipeline.ipynb`): a nearest-
+// centroid classification query joining two datasets that both had a
+// `cell_type` column reported a suspicious 100% accuracy -- the qualified
+// `centroids.cell_type` reference was silently returning `cells.cell_type`
+// instead, because `dsl_expr_to_logical_expr`'s `Expr::Field` arm dropped
+// the table qualifier entirely and resolved by bare column name into a
+// merged row where only the *left* side's field kept that bare name (the
+// right side's colliding field is renamed to `r_<name>` by
+// `LogicalPlan::Join::schema()`, a rename this conversion never consulted).
+// Root cause and blast radius (SELECT, WHERE, aggregates; not `ON`, which
+// resolves separately, pre-merge) verified directly in `src/dsl/executor/query.rs`
+// before this fix.
+
+#[test]
+fn test_join_colliding_column_name_select_resolves_correct_side() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET left_t COLUMNS (id: Int, tag: String)", 1);
+    exec(&mut db, "INSERT INTO left_t VALUES (1, \"LEFT-A\")", 2);
+    exec(&mut db, "INSERT INTO left_t VALUES (2, \"LEFT-B\")", 3);
+    exec(&mut db, "DATASET right_t COLUMNS (id: Int, tag: String)", 4);
+    exec(&mut db, "INSERT INTO right_t VALUES (1, \"RIGHT-X\")", 5);
+    exec(&mut db, "INSERT INTO right_t VALUES (2, \"RIGHT-Y\")", 6);
+
+    let out = exec(
+        &mut db,
+        "SELECT left_t.id AS id, left_t.tag AS a, right_t.tag AS b \
+         FROM left_t JOIN right_t ON left_t.id = right_t.id",
+        7,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.len(), 2);
+    for row in &ds.rows {
+        let Value::Int(id) = row.values[0] else {
+            panic!("expected int id")
+        };
+        assert_eq!(
+            row.values[1],
+            Value::String(format!("LEFT-{}", if id == 1 { "A" } else { "B" }))
+        );
+        assert_eq!(
+            row.values[2],
+            Value::String(format!("RIGHT-{}", if id == 1 { "X" } else { "Y" }))
+        );
+    }
+}
+
+#[test]
+fn test_join_colliding_column_name_select_resolves_correct_side_with_alias() {
+    // Same collision, but the qualifier is a JOIN alias rather than the
+    // literal dataset name -- the alias must be recognized as naming the
+    // right side too (`JoinClause::alias`), not just the dataset's real name.
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET left_t COLUMNS (id: Int, tag: String)", 1);
+    exec(&mut db, "INSERT INTO left_t VALUES (1, \"LEFT-A\")", 2);
+    exec(&mut db, "DATASET right_t COLUMNS (id: Int, tag: String)", 3);
+    exec(&mut db, "INSERT INTO right_t VALUES (1, \"RIGHT-X\")", 4);
+
+    let out = exec(
+        &mut db,
+        "SELECT l.id AS id, l.tag AS a, r.tag AS b FROM left_t l JOIN right_t r ON l.id = r.id",
+        5,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.rows[0].values[1], Value::String("LEFT-A".to_string()));
+    assert_eq!(ds.rows[0].values[2], Value::String("RIGHT-X".to_string()));
+}
+
+#[test]
+fn test_join_colliding_column_name_where_resolves_correct_side() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET left_t COLUMNS (id: Int, tag: String)", 1);
+    exec(&mut db, "INSERT INTO left_t VALUES (1, \"LEFT-A\")", 2);
+    exec(&mut db, "INSERT INTO left_t VALUES (2, \"LEFT-B\")", 3);
+    exec(&mut db, "DATASET right_t COLUMNS (id: Int, tag: String)", 4);
+    exec(&mut db, "INSERT INTO right_t VALUES (1, \"RIGHT-X\")", 5);
+    exec(&mut db, "INSERT INTO right_t VALUES (2, \"RIGHT-Y\")", 6);
+
+    let out = exec(
+        &mut db,
+        "SELECT left_t.id AS id, right_t.tag AS b FROM left_t JOIN right_t \
+         ON left_t.id = right_t.id WHERE right_t.tag = \"RIGHT-Y\"",
+        7,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds.rows[0].values[0], Value::Int(2));
+    assert_eq!(ds.rows[0].values[1], Value::String("RIGHT-Y".to_string()));
+}
+
+#[test]
+fn test_join_colliding_column_name_aggregate_resolves_correct_side() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET left_t COLUMNS (id: Int, grp: Int)", 1);
+    exec(&mut db, "INSERT INTO left_t VALUES (1, 1)", 2);
+    exec(&mut db, "INSERT INTO left_t VALUES (2, 1)", 3);
+    exec(&mut db, "DATASET right_t COLUMNS (id: Int, grp: Float)", 4);
+    exec(&mut db, "INSERT INTO right_t VALUES (1, 100.0)", 5);
+    exec(&mut db, "INSERT INTO right_t VALUES (2, 200.0)", 6);
+
+    let out = exec(
+        &mut db,
+        "SELECT grp, AVG(right_t.grp) AS avg_right FROM left_t JOIN right_t \
+         ON left_t.id = right_t.id GROUP BY grp",
+        7,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.len(), 1);
+    // If this silently averaged left_t.grp (1, 1) instead, it would read 1.0.
+    assert_eq!(ds.rows[0].values[1], Value::Float(150.0));
+}

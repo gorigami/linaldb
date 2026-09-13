@@ -6,6 +6,19 @@ use crate::query::planner::Planner;
 
 use super::query::{agg_func_to_logical, dsl_expr_to_logical_expr};
 
+// EXPLAIN previews a query's logical plan shape without evaluating any real
+// rows (and, unlike `execute_select`, doesn't even build a `LogicalPlan::Join`
+// node for `s.joins` here), so a qualified `table.col` reference is safe to
+// always resolve to its bare name -- the same empty-context fallback
+// `dsl_expr_to_logical_expr` already uses for every non-JOIN caller.
+fn explain_expr(e: &Expr) -> LogicalExpr {
+    dsl_expr_to_logical_expr(
+        e,
+        &crate::core::tuple::Schema::new(vec![]),
+        &std::collections::HashSet::new(),
+    )
+}
+
 pub fn execute_explain(
     db: &TensorDb,
     target: ExplainTarget,
@@ -58,7 +71,7 @@ pub fn execute_explain(
             if let Some(f) = from.filter {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
-                    predicate: dsl_expr_to_logical_expr(&f),
+                    predicate: explain_expr(&f),
                 };
             }
             if !from.group_by.is_empty() {
@@ -77,7 +90,7 @@ pub fn execute_explain(
                                 SelectExpr::Aggregate { func, expr, alias } => {
                                     Some(LogicalExpr::AggregateExpr {
                                         func: agg_func_to_logical(func),
-                                        expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                        expr: Box::new(explain_expr(expr)),
                                         alias: alias.clone(),
                                     })
                                 }
@@ -113,7 +126,7 @@ pub fn execute_explain(
             if let Some(f) = from.having {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
-                    predicate: dsl_expr_to_logical_expr(&f),
+                    predicate: explain_expr(&f),
                 };
             }
             if let Some(ord) = from.order_by {
@@ -171,8 +184,21 @@ pub fn execute_explain(
         }
 
         ExplainTarget::Select(s) => {
+            // A SELECT with no FROM clause (e.g. `SELECT L2_NORM([3.0, 4.0])
+            // AS five`) has no dataset to scan and no real query plan --
+            // `execute_select` itself just evaluates the SELECT list once
+            // against a synthetic empty row (see `SelectStmt::source`'s doc
+            // comment), so there's nothing plan-shaped for the rest of this
+            // function's Logical/Physical Plan formatting to describe.
+            let Some(select_source) = &s.source else {
+                return Ok(DslOutput::Message(
+                    "This SELECT has no FROM clause -- it evaluates a literal/computed \
+                     expression list directly, with no query plan to show."
+                        .to_string(),
+                ));
+            };
             // Resolve the FROM source for EXPLAIN
-            let source_name = match &s.source {
+            let source_name = match select_source {
                 DatasetSource::Named(n) => n.clone(),
                 DatasetSource::Subquery { alias, .. } => alias.clone(),
             };
@@ -190,7 +216,7 @@ pub fn execute_explain(
             if let Some(filter_expr) = &s.filter {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
-                    predicate: dsl_expr_to_logical_expr(filter_expr),
+                    predicate: explain_expr(filter_expr),
                 };
             }
 
@@ -207,7 +233,7 @@ pub fn execute_explain(
                             SelectExpr::Aggregate { func, expr, alias } => {
                                 Some(LogicalExpr::AggregateExpr {
                                     func: agg_func_to_logical(func),
-                                    expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                    expr: Box::new(explain_expr(expr)),
                                     alias: alias.clone(),
                                 })
                             }
@@ -226,14 +252,14 @@ pub fn execute_explain(
                 if let Some(having_expr) = &s.having {
                     plan = LogicalPlan::Filter {
                         input: Box::new(plan),
-                        predicate: dsl_expr_to_logical_expr(having_expr),
+                        predicate: explain_expr(having_expr),
                     };
                 }
             } else {
                 if let Some(having_expr) = &s.having {
                     plan = LogicalPlan::Filter {
                         input: Box::new(plan),
-                        predicate: dsl_expr_to_logical_expr(having_expr),
+                        predicate: explain_expr(having_expr),
                     };
                 }
                 if let Some(ord) = &s.order_by {

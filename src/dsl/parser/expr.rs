@@ -386,8 +386,19 @@ impl Parser {
             | Some(Token::MatchedFilter)
             | Some(Token::Scale)
             | Some(Token::Reshape)
-            | Some(Token::Stack)
-            | Some(Token::Trace)
+            | Some(Token::Stack) => return self.parse_call_expr(),
+            // The classical-linear-algebra operators (`TRACE`, `RANK`, ...)
+            // always need an operand immediately after (`parse_call_expr`'s
+            // arm for each calls `parse_simple_expr`, which only accepts an
+            // identifier/number/`-number`/parenthesized expr -- the same set
+            // `can_start_simple_expr` checks). Only commit to the operator
+            // form when one of those actually follows; otherwise this is a
+            // bare column/identifier reference that happens to share a
+            // keyword's spelling (e.g. a `rank`/`trace` column referenced in
+            // a `WHERE` clause or a computed `SELECT` expression) -- a real
+            // regression found 2026-09-13 (`x + RANK` and `WHERE RANK > 0`
+            // both failed to parse before this lookahead existed).
+            Some(Token::Trace)
             | Some(Token::Determinant)
             | Some(Token::Rank)
             | Some(Token::Inverse)
@@ -398,7 +409,25 @@ impl Parser {
             | Some(Token::Cholesky)
             | Some(Token::Eigen)
             | Some(Token::Svd)
-            | Some(Token::Pca) => return self.parse_call_expr(),
+            | Some(Token::Pca)
+                if self
+                    .peek_at(1)
+                    .is_some_and(Self::token_can_start_simple_expr) =>
+            {
+                return self.parse_call_expr();
+            }
+            Some(Token::Trace)
+            | Some(Token::Determinant)
+            | Some(Token::Rank)
+            | Some(Token::Inverse)
+            | Some(Token::Solve)
+            | Some(Token::Eigenvalues)
+            | Some(Token::Qr)
+            | Some(Token::Lu)
+            | Some(Token::Cholesky)
+            | Some(Token::Eigen)
+            | Some(Token::Svd)
+            | Some(Token::Pca) => return Ok(Expr::Ref(self.eat_ident()?)),
             Some(Token::Ident(_)) => {
                 let name = self.eat_ident()?;
                 if name == "true" {
@@ -802,13 +831,21 @@ impl Parser {
     }
 
     pub(super) fn can_start_simple_expr(&self) -> bool {
+        Self::token_can_start_simple_expr_opt(self.peek())
+    }
+
+    /// Same token set `can_start_simple_expr` checks (and `parse_simple_expr`
+    /// itself accepts) — factored out so a *lookahead* one token ahead of the
+    /// cursor (`peek_at(1)`) can use the identical rule, not just the token
+    /// at the cursor.
+    fn token_can_start_simple_expr(tok: &Token) -> bool {
         matches!(
-            self.peek(),
-            Some(Token::Ident(_))
-                | Some(Token::Int(_))
-                | Some(Token::Float(_))
-                | Some(Token::Minus)
-                | Some(Token::LParen)
+            tok,
+            Token::Ident(_) | Token::Int(_) | Token::Float(_) | Token::Minus | Token::LParen
         )
+    }
+
+    fn token_can_start_simple_expr_opt(tok: Option<&Token>) -> bool {
+        tok.is_some_and(Self::token_can_start_simple_expr)
     }
 }
