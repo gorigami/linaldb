@@ -423,12 +423,11 @@ impl ComputeBackend for SimdBackend {
         b: &Tensor,
         new_id: TensorId,
     ) -> Result<Tensor, String> {
-        if a.shape != b.shape {
-            return Err("Shape mismatch".into());
-        }
-
-        // SIMD only works correctly on physically contiguous tensors with matching layout
-        if a.is_contiguous() && b.is_contiguous() {
+        // SIMD only works correctly on physically contiguous tensors with matching
+        // layout AND matching shape -- anything else (including a legitimate
+        // scalar/shape broadcast) must fall through to the scalar backend below,
+        // which is the only path that actually implements broadcasting.
+        if a.shape == b.shape && a.is_contiguous() && b.is_contiguous() {
             let len = a.len();
             let mut data = self.alloc_output(ctx, len);
             self.add_simd(a.data_ref(), b.data_ref(), &mut data);
@@ -451,11 +450,7 @@ impl ComputeBackend for SimdBackend {
         b: &Tensor,
         new_id: TensorId,
     ) -> Result<Tensor, String> {
-        if a.shape != b.shape {
-            return Err("Shape mismatch".into());
-        }
-
-        if a.is_contiguous() && b.is_contiguous() {
+        if a.shape == b.shape && a.is_contiguous() && b.is_contiguous() {
             let len = a.len();
             let mut data = self.alloc_output(ctx, len);
             self.sub_simd(a.data_ref(), b.data_ref(), &mut data);
@@ -477,11 +472,7 @@ impl ComputeBackend for SimdBackend {
         b: &Tensor,
         new_id: TensorId,
     ) -> Result<Tensor, String> {
-        if a.shape != b.shape {
-            return Err("Shape mismatch".into());
-        }
-
-        if a.is_contiguous() && b.is_contiguous() {
+        if a.shape == b.shape && a.is_contiguous() && b.is_contiguous() {
             let len = a.len();
             let mut data = self.alloc_output(ctx, len);
             self.mul_simd(a.data_ref(), b.data_ref(), &mut data);
@@ -653,5 +644,83 @@ impl ComputeBackend for SimdBackend {
         new_id: TensorId,
     ) -> Result<Tensor, String> {
         self.scalar.stack(ctx, tensors, axis, new_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::{Shape, TensorMetadata};
+
+    // Regression tests for a real bug found building a production-network
+    // economics showcase (a 45x45 real-data matrix): `SimdBackend::add`/`sub`/
+    // `multiply` returned a bare "Shape mismatch" error for ANY shape mismatch,
+    // including a legitimate scalar broadcast (e.g. `matrix * 0.5`), as soon as
+    // the left operand crossed `CpuBackend`'s SIMD_THRESHOLD (1024 elements) --
+    // below that threshold `ScalarBackend` (which correctly broadcasts) was used
+    // instead, so the bug was invisible on small fixtures. These construct
+    // above-threshold tensors specifically to exercise the SIMD path.
+    const ABOVE_SIMD_THRESHOLD: usize = 1200;
+
+    fn big_vector(fill: f32) -> Tensor {
+        let id = TensorId::new();
+        let shape = Shape::new(vec![ABOVE_SIMD_THRESHOLD]);
+        let data = vec![fill; ABOVE_SIMD_THRESHOLD];
+        Tensor::new(id, shape, data, TensorMetadata::new(id, None)).unwrap()
+    }
+
+    fn scalar_tensor(v: f32) -> Tensor {
+        let id = TensorId::new();
+        Tensor::new(
+            id,
+            Shape::new(vec![]),
+            vec![v],
+            TensorMetadata::new(id, None),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn add_broadcasts_scalar_above_simd_threshold() {
+        let backend = SimdBackend::new();
+        let mut ctx = ExecutionContext::new();
+        let a = big_vector(2.0);
+        let b = scalar_tensor(3.0);
+        let result = backend.add(&mut ctx, &a, &b, TensorId::new()).unwrap();
+        assert_eq!(result.shape.dims, vec![ABOVE_SIMD_THRESHOLD]);
+        assert!(result.data_ref().iter().all(|&v| v == 5.0));
+    }
+
+    #[test]
+    fn sub_broadcasts_scalar_above_simd_threshold() {
+        let backend = SimdBackend::new();
+        let mut ctx = ExecutionContext::new();
+        let a = big_vector(5.0);
+        let b = scalar_tensor(3.0);
+        let result = backend.sub(&mut ctx, &a, &b, TensorId::new()).unwrap();
+        assert_eq!(result.shape.dims, vec![ABOVE_SIMD_THRESHOLD]);
+        assert!(result.data_ref().iter().all(|&v| v == 2.0));
+    }
+
+    #[test]
+    fn multiply_broadcasts_scalar_above_simd_threshold() {
+        let backend = SimdBackend::new();
+        let mut ctx = ExecutionContext::new();
+        let a = big_vector(4.0);
+        let b = scalar_tensor(0.5);
+        let result = backend.multiply(&mut ctx, &a, &b, TensorId::new()).unwrap();
+        assert_eq!(result.shape.dims, vec![ABOVE_SIMD_THRESHOLD]);
+        assert!(result.data_ref().iter().all(|&v| v == 2.0));
+    }
+
+    #[test]
+    fn multiply_still_uses_fast_path_for_matching_shapes_above_threshold() {
+        let backend = SimdBackend::new();
+        let mut ctx = ExecutionContext::new();
+        let a = big_vector(4.0);
+        let b = big_vector(2.0);
+        let result = backend.multiply(&mut ctx, &a, &b, TensorId::new()).unwrap();
+        assert_eq!(result.shape.dims, vec![ABOVE_SIMD_THRESHOLD]);
+        assert!(result.data_ref().iter().all(|&v| v == 8.0));
     }
 }
