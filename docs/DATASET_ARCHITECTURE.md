@@ -71,7 +71,7 @@ pub struct Dataset {
 | `graph.rs` | `DatasetGraph` — resolves references across a `DatasetRegistry`. Actually used by `ATTACH` (linking a tensor into a dataset column) and `AUDIT DATASET` (walking the graph to detect dangling references); **not** used by `BIND` (plain name/entry aliasing, no graph involved — `src/engine/db.rs:bind_resource`) or `DERIVE` (pure tensor-expression evaluation via `eval_let`, unrelated to this module) |
 | `schema.rs` | `DatasetSchema`, `ColumnSchema`, `ColumnRole` — column-level typing for the reference-graph model |
 | `schema_evolution.rs` | `SchemaVersion`, `Migration` — non-breaking schema versioning, backs `SHOW DATASET VERSIONS <name>` (aliased as `LIST DATASET VERSIONS <name>`; there is no bare `LIST VERSIONS` command) |
-| `lineage.rs` | `DatasetLineage`, `LineageNode` — a DAG of *data-import* provenance (dataset name, content hash, operation, parent nodes), populated by the scientific-ingestion connectors (CSV/HDF5/Numpy/Zarr) and `core/storage.rs`. **Not** what `SHOW LINEAGE <name>` displays — that command walks a different, tensor-computation `LineageNode` type defined in `src/engine/db.rs` (tracks how a tensor was derived via `ADD`/`MATMUL`/etc., not dataset import history) |
+| `lineage.rs` | `DatasetLineage`, `LineageNode` — the *pre-unification* per-package provenance format (dataset name, content hash, operation, parent nodes) written into each dataset package's `lineage.json`. **Superseded** by `core::provenance::ProvenanceStore` (see `ARCHITECTURE.md`'s "Lineage & Provenance" section) — kept only as a read-compatibility fallback for datasets saved before that model existed. `EXPLAIN LINEAGE <name>`/`SHOW LINEAGE <name>` both resolve through the unified store now, for a tensor *or* a dataset name alike, not through this type or a separate tensor-only `LineageNode` (that one, formerly in `src/engine/db.rs`, was removed entirely — real ancestry for both is one code path now) |
 | `manifest.rs` | `DatasetManifest` — the delivery contract for a portable LINAL dataset package (name, version, hash, entrypoints) |
 | `stats.rs` | `DatasetStats`, `ColumnStats` — row counts and per-column summaries |
 | `metadata.rs` | `DatasetMetadata`, `DatasetOrigin` — the `metadata` field on `Dataset` above; provenance and free-form metadata set via `SET DATASET METADATA` |
@@ -115,7 +115,11 @@ LINALDB uses a hybrid approach to balance performance and flexibility:
 2. **Semantic/Light Path** (`core/dataset/`):
     - Optimized for **Zero-Copy Views** and **Tensor Algebra**.
     - Allows linking independent tensors as virtual columns (`ATTACH`).
-    - Tracks complex lineage through the **Reference Graph**.
+    - Provenance for datasets built this way still goes through the same
+      unified `core::provenance::ProvenanceStore` as everything else (see
+      `ARCHITECTURE.md`) — this layer's own `DatasetGraph`/`ResourceReference`
+      track *structural* references (which tensor a column points to), not
+      derivation history, so don't conflate the two.
 
 ## Current Status
 

@@ -13,7 +13,8 @@ LINALDB is designed for developers and researchers who need the structure of a d
 - **Vector Aggregates**: `AVG_VEC` and `SUM_VEC` compute element-wise centroid or sum across row groups in a single GROUP BY query.
 - **Lazy Evaluation Engine**: Define computation graphs using `LAZY LET` and materialize them on-demand via `SHOW`.
 - **Numerical Aggregations**: Native `SUM`, `MEAN`, and `STDEV` operations for powerful statistical analysis.
-- **Semantic Transformations**: Build zero-copy views using Reference Graphs and Lineage tracking.
+- **Classical Linear Algebra**: `TRACE`, `DETERMINANT`, `RANK`, `INVERSE`, `SOLVE`, `EIGENVALUES`, `CHOLESKY`, `PCA`, and the decompositions `QR`/`LU`/`EIGEN`/`SVD` — real matrix math, natively in the DSL.
+- **Semantic Transformations**: Build zero-copy views using Reference Graphs, with real, persisted, restart-surviving lineage via `EXPLAIN LINEAGE`.
 - **Local-First & Portable**: Use it as an embedded library (like SQLite) or a multi-tenant managed server.
 - **High-Performance Ingestion**: Native zero-copy ingestion for scientific data (CSV, HDF5, Numpy, Zarr) via the new connector-based architecture.
 - **Dataset Delivery & Packages**: Standardized portable packages with Parquet data and JSON metadata (Schema, Stats, Lineage).
@@ -86,7 +87,7 @@ SELECT id, NORMALIZE(embedding) AS unit_vec FROM docs
 
 ### 3. Zero-Copy Reference Graphs
 
-Create semantic views without duplicating data. LINALDB tracks lineage and provenance automatically.
+Create semantic views without duplicating data. LINALDB tracks lineage and provenance automatically — every tensor op and dataset transformation (`IMPORT`, `DATASET ... FROM`, computed columns, `SAVE`, ...) is recorded into one restart-surviving provenance log, inspectable with `EXPLAIN LINEAGE`.
 
 ```sql
 -- Create a zero-copy alias
@@ -99,9 +100,36 @@ LAZY LET trend = STDEV (sensor_3d * 1.5)
 
 -- Derive new resources with full lineage
 DERIVE clean_data FROM sensor_3d[0:10, :, *]
+
+-- Inspect the real derivation history -- survives a restart, works for
+-- tensors and datasets alike
+EXPLAIN LINEAGE clean_data
+EXPLAIN LINEAGE clean_data AS JSON
 ```
 
-### 4. Named Pipelines with Persistence
+### 4. Classical Linear Algebra
+
+Real matrix decompositions, natively in the DSL — no separate numpy/scipy round trip. Every operator errors loudly (never a silent `NaN`) on a singular, non-square, or non-symmetric input, and emits real provenance the moment it runs.
+
+```sql
+MATRIX m = [[4, 7], [2, 6]]
+
+LET det = DETERMINANT m
+LET inv = INVERSE m
+VECTOR b = [4, 6]
+LET x = SOLVE m b            -- solves m @ x = b
+
+-- Multi-output LET for decompositions with more than one natural result
+LET q, r = QR m
+LET p, l, u = LU m
+MATRIX sym = [[2, 1], [1, 2]]
+LET vals, vecs = EIGEN sym    -- symmetric matrices: real eigenvalues guaranteed
+
+-- Dimensionality reduction, built on SVD
+LET projected = PCA m COMPONENTS 1
+```
+
+### 5. Named Pipelines with Persistence
 
 Define reusable transformation chains and persist them across sessions.
 
@@ -124,7 +152,7 @@ APPLY PIPELINE clean_rank ON new_products INTO results
 
 Pipelines are stored as human-readable JSON containing the original DSL source, making them portable and editable.
 
-### 5. High-Concurrency Analytics
+### 6. High-Concurrency Analytics
 
 Multi-platform server with parallel execution and background workload management.
 
@@ -143,7 +171,7 @@ linal schedule --url http://localhost:8080 create hourly-report "SHOW ALL DATASE
 linal server --port 8080 stop
 ```
 
-### 6. Python & R Clients
+### 7. Python & R Clients
 
 Two ways to reach LINALDB from Python or R — pick based on whether you
 want a server in the loop.

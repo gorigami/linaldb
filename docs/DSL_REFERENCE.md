@@ -332,6 +332,7 @@ LIMIT 10
 ```
 
 - **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `AVG_VEC`, `SUM_VEC`. A `SELECT` with an aggregate and no `GROUP BY` computes a single "global" aggregate row over the whole result set (e.g. `SELECT COUNT(*) FROM t`).
+- **`HAVING` on an aliased aggregate**: `HAVING` resolves an aggregate by alias too, not just by its bare call — `SELECT region, AVG(score) AS avg_score FROM diagnostics GROUP BY region HAVING avg_score > 0.5` matches rows the same as `HAVING AVG(score) > 0.5` would.
 - **Filtering**: `WHERE` or `FILTER` can be used interchangeably.
 - **`DISTINCT`**: `SELECT DISTINCT <cols> FROM ...` removes duplicate rows from the result.
 - **`LIMIT`/`OFFSET`**: `LIMIT <n>` caps the row count; `OFFSET <n>` skips the first `n` rows before applying `LIMIT` (both may be used together or independently).
