@@ -4,6 +4,18 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.4] - 2026-09-13
+
+Bumped for the engine fix below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- `EXPLAIN LINEAGE` could misattribute ancestry across a zero-copy `TRANSPOSE`
+  — a transposed matrix and its untransposed source could hash identically,
+  since `TRANSPOSE` shares the same underlying buffer as its input in this
+  engine's storage model.
+
+See the parent repository's `CHANGELOG.md` (`[0.1.81]`) for full detail.
+
 ## [0.1.3] - 2026-09-12
 
 Bumped for the engine features below (this crate has no code of its own beyond the
