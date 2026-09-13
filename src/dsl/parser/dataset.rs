@@ -423,34 +423,46 @@ impl Parser {
             SelectColumns::Named(cols)
         };
 
-        self.eat(&Token::From)?;
-
-        // FROM (SELECT ...) AS alias  OR  FROM dataset_name
-        let source = if self.at(&Token::LParen) {
+        // `FROM` is optional: a `SELECT` list containing only literal/
+        // scalar expressions (no real column reference) needs no data
+        // source at all -- e.g. `SELECT L2_NORM([3.0, 4.0]) AS five`, a
+        // real `DSL_REFERENCE.md` example that has no dataset to name.
+        // `source` stays `None` in that case; see `execute_select`'s
+        // early-return branch for how it's evaluated (and why every other
+        // field below is simply not applied when there's no source).
+        let source = if self.at(&Token::From) {
             self.advance();
-            let inner_stmt = self.parse_select()?;
-            self.eat(&Token::RParen)?;
-            self.eat(&Token::As)?;
-            let alias = self.eat_ident()?;
-            if let Statement::Select(inner) = inner_stmt {
-                DatasetSource::Subquery {
-                    query: Box::new(inner),
-                    alias,
+            // FROM (SELECT ...) AS alias  OR  FROM dataset_name
+            let src = if self.at(&Token::LParen) {
+                self.advance();
+                let inner_stmt = self.parse_select()?;
+                self.eat(&Token::RParen)?;
+                self.eat(&Token::As)?;
+                let alias = self.eat_ident()?;
+                if let Statement::Select(inner) = inner_stmt {
+                    DatasetSource::Subquery {
+                        query: Box::new(inner),
+                        alias,
+                    }
+                } else {
+                    return Err(self.error("Expected SELECT inside subquery"));
                 }
             } else {
-                return Err(self.error("Expected SELECT inside subquery"));
-            }
+                let name = self.eat_ident()?;
+                // Optional `[AS] alias` — accepted so `table.col`/`alias.col`
+                // parses in SELECT/ON. Discarded here (unlike the JOIN-clause
+                // call site, which keeps a right-side alias to resolve a
+                // same-named-column collision correctly): the FROM/left side
+                // of a JOIN is never renamed by a collision, so a left-side
+                // qualifier resolves correctly by bare column name
+                // regardless of whether it's the real dataset name or this
+                // alias.
+                let _ = self.parse_optional_table_alias();
+                DatasetSource::Named(name)
+            };
+            Some(src)
         } else {
-            let name = self.eat_ident()?;
-            // Optional `[AS] alias` — accepted so `table.col`/`alias.col`
-            // parses in SELECT/ON, but the alias itself isn't tracked:
-            // column resolution always uses the bare column name (see
-            // dsl_expr_to_logical_expr's Expr::Field handling), matching
-            // the existing JOIN ON-clause convention. Not sufficient to
-            // disambiguate a self-join's two sides beyond the built-in
-            // `r_`-prefix collision renaming.
-            self.parse_optional_table_alias();
-            DatasetSource::Named(name)
+            None
         };
 
         // Parse zero or more JOIN clauses
@@ -641,7 +653,7 @@ impl Parser {
         };
 
         let right_dataset = self.eat_ident()?;
-        self.parse_optional_table_alias();
+        let alias = self.parse_optional_table_alias();
         self.eat(&Token::On)?;
 
         // ON COSINE_SIM(<left_ref>, <right_ref>) > <threshold>  — similarity join
@@ -660,6 +672,7 @@ impl Parser {
             Ok(JoinClause {
                 kind,
                 dataset: right_dataset,
+                alias,
                 left_col,
                 right_col,
                 similarity_threshold: Some(threshold),
@@ -672,6 +685,7 @@ impl Parser {
             Ok(JoinClause {
                 kind,
                 dataset: right_dataset,
+                alias,
                 left_col,
                 right_col,
                 similarity_threshold: None,
@@ -690,15 +704,21 @@ impl Parser {
         }
     }
 
-    // Optional `[AS] <alias>` after a dataset name in FROM/JOIN. Consumes
-    // and discards the alias token(s) if present — see the FROM-clause
-    // call site for why the alias itself isn't tracked.
-    fn parse_optional_table_alias(&mut self) {
+    // Optional `[AS] <alias>` after a dataset name in FROM/JOIN. Returns the
+    // alias if present. The FROM-clause call site still discards it (see
+    // its own comment for why); the JOIN call site keeps it, since a JOIN's
+    // right-side alias is also a valid qualifier for its columns in
+    // SELECT/WHERE/aggregates and must be recognized as such wherever a
+    // same-named left-side column would otherwise shadow it (see
+    // `dsl_expr_to_logical_expr`'s `Expr::Field` handling).
+    fn parse_optional_table_alias(&mut self) -> Option<String> {
         if self.at(&Token::As) {
             self.advance();
-            let _ = self.eat_ident();
+            self.eat_ident().ok()
         } else if matches!(self.peek(), Some(Token::Ident(_))) {
-            let _ = self.eat_ident();
+            self.eat_ident().ok()
+        } else {
+            None
         }
     }
 
@@ -834,9 +854,21 @@ impl Parser {
         // entirely, the same class of keyword/SQL-identifier collision
         // `Token::Sum`/`Token::Distance` already have dedicated handling for
         // elsewhere in this parser.
+        //
+        // The `peek_at(1) == LParen` lookahead (matching that same
+        // `Sum`/`Distance` precedent) is required, not optional: without it,
+        // a bare column named `rank` in an ordinary SELECT list (e.g.
+        // `SELECT rank, storage_ratio FROM t`) got misread as the start of
+        // this ranking-function call and failed with "expected `(`, found
+        // `,`" -- a real regression found 2026-09-13 while building a
+        // real-data notebook outside this repo.
         let ranking_ident = match self.peek() {
-            Some(Token::Ident(s)) => Some(s.to_uppercase()),
-            Some(Token::Rank) => Some("RANK".to_string()),
+            Some(Token::Ident(s)) if self.peek_at(1) == Some(&Token::LParen) => {
+                Some(s.to_uppercase())
+            }
+            Some(Token::Rank) if self.peek_at(1) == Some(&Token::LParen) => {
+                Some("RANK".to_string())
+            }
             _ => None,
         };
         if let Some(upper) = ranking_ident {

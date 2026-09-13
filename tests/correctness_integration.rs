@@ -572,3 +572,60 @@ fn test_tensor_2d_column_maps_to_matrix() {
         weights_field.value_type
     );
 }
+
+// ─── Test 13: SELECT with no FROM clause at all ──────────────────────────────
+//
+// `DSL_REFERENCE.md`'s own example (`SELECT L2_NORM([3.0, 4.0]) AS five FROM
+// dual`) didn't actually work against the real engine -- `dual` was never a
+// registered pseudo-table anywhere in `src/`, found 2026-09-13 while building
+// a real-data notebook outside this repo. Fixed by making `FROM` optional
+// (like every other engine's `SELECT 1+1`) instead of adding a fake `dual`
+// table, and evaluating the SELECT list once against a synthetic empty row.
+
+#[test]
+fn test_select_with_no_from_evaluates_scalar_expressions() {
+    let mut db = TensorDb::new();
+    // The exact fixed doc example, minus `FROM dual`.
+    let out = exec(&mut db, "SELECT L2_NORM([3.0, 4.0]) AS five", 1);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds.schema.fields[0].name, "five");
+    assert_eq!(ds.rows[0].values[0], Value::Float(5.0));
+}
+
+#[test]
+fn test_select_with_no_from_multiple_columns_and_unaliased() {
+    let mut db = TensorDb::new();
+    let out = exec(&mut db, "SELECT 1 + 1 AS two, 3 * 3", 1);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.rows[0].values[0], Value::Int(2));
+    assert_eq!(ds.rows[0].values[1], Value::Int(9));
+}
+
+#[test]
+fn test_select_with_no_from_and_a_real_column_reference_errors_clearly() {
+    let mut db = TensorDb::new();
+    let err = execute_line(&mut db, "SELECT some_col", 1)
+        .expect_err("a bare column reference with no FROM must error, not return NULL");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("FROM"),
+        "error should explain a FROM clause is needed, got: {msg}"
+    );
+}
+
+#[test]
+fn test_normal_select_with_from_is_unaffected() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: Int)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (7)", 2);
+    let out = exec(&mut db, "SELECT id FROM t", 3);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.rows[0].values[0], Value::Int(7));
+}

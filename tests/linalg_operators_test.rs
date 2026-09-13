@@ -180,3 +180,112 @@ fn decomposition_result_has_real_provenance() {
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["operation"], "LU");
 }
+
+// ── The 12 linalg-operator keywords are non-reserved: usable as a plain
+//    identifier (column name, `AS` alias, ordinary reference) anywhere the
+//    grammar expects one -- not just as the operator they otherwise start.
+//
+// Found 2026-09-13 while building a real-data notebook outside this repo:
+// `SELECT rank, storage_ratio FROM t` failed to parse ("expected `(`,
+// found `,`"), because the ranking-window-function check in
+// `parse_select_expr` (added when `RANK` first became a keyword, to keep
+// `RANK() OVER (...)` parsing) had no lookahead for `(` before committing --
+// unlike the equivalent, correctly-gated `Sum`/`Distance` precedent
+// elsewhere in this parser. Investigating further found the same class of
+// gap in two more places: `eat_ident` (the ~100+ call sites for column
+// declarations, `AS` aliases, etc.) never accepted these keyword tokens at
+// all, and `parse_expr_atom`'s primary-expression dispatch routed every one
+// of them unconditionally into the operator parser even with no operand
+// following (so `WHERE RANK > 0` or `SELECT x + RANK` also failed). All
+// three fixed together; see `src/dsl/parser/mod.rs`'s `advance_if_ident`/
+// `keyword_token_as_ident`, `src/dsl/parser/expr.rs`'s operand-lookahead
+// guard, and `src/dsl/parser/dataset.rs`'s `parse_select_expr` fix.
+
+#[test]
+fn keyword_names_usable_as_ordinary_column_declarations_and_references() {
+    let mut db = TensorDb::new();
+    // Declaring columns literally named after every one of the 12 keywords
+    // (plus COMPONENTS, PCA's own keyword) used to fail at `eat_ident`.
+    run(
+        &mut db,
+        "DATASET t COLUMNS (trace: Int, determinant: Int, rank: Int, inverse: Int, \
+         solve: Int, eigenvalues: Int, qr: Int, lu: Int, cholesky: Int, eigen: Int, \
+         svd: Int, pca: Int, components: Int)",
+        1,
+    );
+    run(
+        &mut db,
+        "INSERT INTO t VALUES (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)",
+        2,
+    );
+
+    // Referencing them all back in a plain SELECT -- the originally
+    // reported regression's exact shape.
+    let out = run(
+        &mut db,
+        "SELECT trace, determinant, rank, inverse, solve, eigenvalues, qr, lu, \
+         cholesky, eigen, svd, pca, components FROM t",
+        3,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.len(), 1);
+    for (i, v) in ds.rows[0].values.iter().enumerate() {
+        assert_eq!(*v, linal::core::value::Value::Int(i as i64 + 1));
+    }
+}
+
+#[test]
+fn rank_keyword_usable_as_select_alias_and_in_where_and_arithmetic() {
+    let mut db = TensorDb::new();
+    run(&mut db, "DATASET t COLUMNS (id: Int, x: Float)", 1);
+    run(&mut db, "INSERT INTO t VALUES (1, 5.0)", 2);
+
+    // `AS RANK` -- an alias, not a declaration; a different `eat_ident` call
+    // site than the COLUMNS test above.
+    let out = run(&mut db, "SELECT id AS RANK FROM t", 3);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.schema.fields[0].name, "RANK");
+    assert_eq!(ds.rows[0].values[0], linal::core::value::Value::Int(1));
+
+    // A bare uppercase `RANK` reference in WHERE/arithmetic used to hit a
+    // parse error (`parse_expr_atom` committing to the operator parser with
+    // no valid operand following); it must at least *parse* now, resolving
+    // to a real value when a same-named column exists.
+    run(&mut db, "DATASET u COLUMNS (rank: Int, y: Int)", 4);
+    run(&mut db, "INSERT INTO u VALUES (10, 1)", 5);
+    let out = run(&mut db, "SELECT rank + y AS total FROM u WHERE rank > 5", 6);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds.rows[0].values[0], linal::core::value::Value::Int(11));
+}
+
+#[test]
+fn rank_operator_and_rank_over_window_function_still_work() {
+    // The two legitimate uses of the `RANK` keyword the fix above must not
+    // regress: the standalone linear-algebra operator, and the SQL window
+    // function it was originally added to disambiguate against.
+    let mut db = TensorDb::new();
+    run(&mut db, "MATRIX m = [[4, 7], [2, 6]]", 1);
+    run(&mut db, "LET r = RANK m", 2);
+    assert_eq!(tensor_data(&db, "r"), vec![2.0]);
+
+    run(&mut db, "DATASET scores COLUMNS (id: Int, score: Float)", 3);
+    run(&mut db, "INSERT INTO scores VALUES (1, 10.0)", 4);
+    run(&mut db, "INSERT INTO scores VALUES (2, 20.0)", 5);
+    let out = run(
+        &mut db,
+        "SELECT id, RANK() OVER (ORDER BY score DESC) AS r FROM scores",
+        6,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.rows[0].values[1], linal::core::value::Value::Int(2));
+    assert_eq!(ds.rows[1].values[1], linal::core::value::Value::Int(1));
+}

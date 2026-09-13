@@ -32,7 +32,7 @@ pub(super) fn execute_create_dataset_from(
     let select_stmt = SelectStmt {
         ctes: vec![],
         distinct: false,
-        source: DatasetSource::Named(clause.source),
+        source: Some(DatasetSource::Named(clause.source)),
         joins: vec![],
         columns: match clause.select {
             Some(exprs) => SelectColumns::Named(exprs),
@@ -137,8 +137,70 @@ pub(super) fn execute_select(
         }
     }
 
+    // A SELECT with no FROM clause at all: evaluate the SELECT list once
+    // against a synthetic empty row and return immediately -- everything
+    // else in this function (JOIN/WHERE/GROUP BY/ORDER BY/etc.) is
+    // meaningless without a real data source and is simply not applied.
+    // See `SelectStmt::source`'s doc comment for why this exists (a real
+    // `DSL_REFERENCE.md` example, `SELECT L2_NORM([3.0, 4.0]) AS five`, has
+    // no dataset to name).
+    let Some(source) = s.source else {
+        let SelectColumns::Named(exprs) = &s.columns else {
+            return Err(DslError::Parse {
+                line: line_no,
+                msg: "SELECT * requires a FROM clause".to_string(),
+            });
+        };
+        let empty_schema = std::sync::Arc::new(crate::core::tuple::Schema::new(vec![]));
+        let empty_right_tables = std::collections::HashSet::new();
+        let empty_row = Tuple::new(empty_schema.clone(), vec![]).map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: e,
+        })?;
+
+        let mut fields = Vec::with_capacity(exprs.len());
+        let mut values = Vec::with_capacity(exprs.len());
+        let mut computed_idx = 0usize;
+        for e in exprs {
+            let SelectExpr::Computed { expr, alias } = e else {
+                return Err(DslError::Parse {
+                    line: line_no,
+                    msg: "SELECT without FROM only supports literal/computed expressions \
+                          -- no column, aggregate, or window reference (there is no \
+                          dataset to resolve one against)"
+                        .to_string(),
+                });
+            };
+            let name = alias.clone().unwrap_or_else(|| {
+                let n = format!("__cmp_{computed_idx}");
+                computed_idx += 1;
+                n
+            });
+            let logical = dsl_expr_to_logical_expr(expr, &empty_schema, &empty_right_tables);
+            let val = crate::query::physical::evaluate_expression(&logical, &empty_row);
+            fields.push(crate::core::tuple::Field::new(&name, val.value_type()));
+            values.push(val);
+        }
+        let schema = std::sync::Arc::new(crate::core::tuple::Schema::new(fields));
+        let row = Tuple::new(schema.clone(), values).map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: e,
+        })?;
+        let ds = dataset_legacy::Dataset::with_rows(
+            dataset_legacy::DatasetId(0),
+            schema,
+            vec![row],
+            Some("Query Result".into()),
+        )
+        .map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: e,
+        })?;
+        return Ok(DslOutput::Table(ds));
+    };
+
     // Resolve the FROM source — either a named dataset or an executed subquery.
-    let mut plan = match s.source {
+    let mut plan = match source {
         DatasetSource::Named(ref name) => {
             let source_ds = db.get_dataset(name).map_err(|e| DslError::Engine {
                 line: line_no,
@@ -208,10 +270,26 @@ pub(super) fn execute_select(
         };
     }
 
+    // Names a qualifier can use to mean the right side of a JOIN -- the
+    // literal dataset name and, if given, its `[AS] alias` (either is a
+    // valid qualifier in SELECT/WHERE/aggregates, e.g. `JOIN users u ON
+    // ... SELECT u.name`). Needed to resolve a qualified `table.col`
+    // reference correctly wherever this query's expressions get lowered
+    // below (see `dsl_expr_to_logical_expr`'s `Expr::Field` arm). Empty for
+    // a query with no JOIN, which makes every qualifier resolution below a
+    // no-op fallback to the bare column name, identical to previous
+    // behavior.
+    let right_table_names: std::collections::HashSet<String> = s
+        .joins
+        .iter()
+        .flat_map(|j| std::iter::once(j.dataset.clone()).chain(j.alias.clone()))
+        .collect();
+
     if let Some(filter_expr) = &s.filter {
+        let schema_now = plan.schema();
         plan = LogicalPlan::Filter {
             input: Box::new(plan),
-            predicate: dsl_expr_to_logical_expr(filter_expr),
+            predicate: dsl_expr_to_logical_expr(filter_expr, &schema_now, &right_table_names),
         };
     }
 
@@ -239,6 +317,7 @@ pub(super) fn execute_select(
     let mut deferred_limit: Option<(usize, usize)> = None;
 
     if !s.group_by.is_empty() {
+        let pre_aggr_schema = plan.schema();
         let group_exprs: Vec<LogicalExpr> = s
             .group_by
             .iter()
@@ -251,7 +330,11 @@ pub(super) fn execute_select(
                     SelectExpr::Aggregate { func, expr, alias } => {
                         Some(LogicalExpr::AggregateExpr {
                             func: agg_func_to_logical(func),
-                            expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                            expr: Box::new(dsl_expr_to_logical_expr(
+                                expr,
+                                &pre_aggr_schema,
+                                &right_table_names,
+                            )),
                             alias: alias.clone(),
                         })
                     }
@@ -269,7 +352,13 @@ pub(super) fn execute_select(
         };
         if let Some(having_expr) = &s.having {
             let schema_now = plan.schema();
-            let predicate = resolve_having(having_expr, &aggr_exprs, &schema_now, line_no)?;
+            let predicate = resolve_having(
+                having_expr,
+                &aggr_exprs,
+                &schema_now,
+                &right_table_names,
+                line_no,
+            )?;
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate,
@@ -320,6 +409,7 @@ pub(super) fn execute_select(
         // case -- the same silent-failure gap applied there too before this
         // fix, since `resolve_having` handles an empty `aggr_exprs` fine.
         let aggr_exprs: Vec<LogicalExpr> = if has_aggr {
+            let pre_aggr_schema = plan.schema();
             match &s.columns {
                 SelectColumns::Named(exprs) => exprs
                     .iter()
@@ -327,7 +417,11 @@ pub(super) fn execute_select(
                         SelectExpr::Aggregate { func, expr, alias } => {
                             Some(LogicalExpr::AggregateExpr {
                                 func: agg_func_to_logical(func),
-                                expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                                expr: Box::new(dsl_expr_to_logical_expr(
+                                    expr,
+                                    &pre_aggr_schema,
+                                    &right_table_names,
+                                )),
                                 alias: alias.clone(),
                             })
                         }
@@ -351,7 +445,13 @@ pub(super) fn execute_select(
 
         if let Some(having_expr) = &s.having {
             let schema_now = plan.schema();
-            let predicate = resolve_having(having_expr, &aggr_exprs, &schema_now, line_no)?;
+            let predicate = resolve_having(
+                having_expr,
+                &aggr_exprs,
+                &schema_now,
+                &right_table_names,
+                line_no,
+            )?;
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate,
@@ -434,8 +534,13 @@ pub(super) fn execute_select(
 
     // Post-process window and computed columns
     let result_schema = if !window_exprs.is_empty() {
-        result_rows =
-            apply_window_and_computed_exprs(result_rows, &base_schema, &window_exprs, line_no)?;
+        result_rows = apply_window_and_computed_exprs(
+            result_rows,
+            &base_schema,
+            &right_table_names,
+            &window_exprs,
+            line_no,
+        )?;
 
         // Derive the extended schema from the first row (types are actual, not inferred)
         let extended_schema = if let Some(first_row) = result_rows.first() {
@@ -687,7 +792,8 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
 
 fn apply_window_and_computed_exprs(
     mut rows: Vec<Tuple>,
-    _base_schema: &std::sync::Arc<crate::core::tuple::Schema>,
+    base_schema: &std::sync::Arc<crate::core::tuple::Schema>,
+    right_tables: &std::collections::HashSet<String>,
     window_exprs: &[SelectExpr],
     line_no: usize,
 ) -> Result<Vec<Tuple>, DslError> {
@@ -701,7 +807,13 @@ fn apply_window_and_computed_exprs(
                     .clone()
                     .unwrap_or_else(|| format!("__cmp_{}", computed_idx));
                 computed_idx += 1;
-                let logical_expr = dsl_expr_to_logical_expr(expr);
+                // `base_schema` (the plan's schema before any computed
+                // columns were appended, i.e. still reflecting a JOIN's
+                // `r_`-collision-renaming if present) is correct for every
+                // iteration here: a qualified `table.col` inside `expr`
+                // always refers to a real source column, never to a
+                // previously-appended computed one.
+                let logical_expr = dsl_expr_to_logical_expr(expr, base_schema, right_tables);
                 let fallback_vtype = infer_expr_result_type(expr);
 
                 // Evaluate every row first so the whole column gets ONE
@@ -746,7 +858,7 @@ fn apply_window_and_computed_exprs(
                     .collect();
             }
             SelectExpr::Window { func, spec, alias } => {
-                rows = apply_window_func(rows, func, spec, alias, line_no)?;
+                rows = apply_window_func(rows, func, spec, alias, right_tables, line_no)?;
             }
             _ => {}
         }
@@ -759,9 +871,19 @@ fn apply_window_func(
     func: &WindowFunc,
     spec: &WindowSpec,
     alias: &str,
+    right_tables: &std::collections::HashSet<String>,
     line_no: usize,
 ) -> Result<Vec<Tuple>, DslError> {
     use crate::query::physical::evaluate_expression;
+
+    // Every row shares one schema at this point; used to resolve any
+    // qualified `table.col` reference inside a windowed aggregate's inner
+    // expression the same way `dsl_expr_to_logical_expr` resolves one
+    // anywhere else. Empty rows means nothing below evaluates it anyway.
+    let window_schema: std::sync::Arc<crate::core::tuple::Schema> = rows
+        .first()
+        .map(|r| r.schema.clone())
+        .unwrap_or_else(|| std::sync::Arc::new(crate::core::tuple::Schema::new(vec![])));
 
     if let Some(row) = rows.first() {
         for (col, _) in &spec.order_by {
@@ -894,7 +1016,7 @@ fn apply_window_func(
                     // at parse time (parser/dataset.rs), so this must handle
                     // Vector/Matrix element-wise, not just Int/Float — otherwise
                     // vector window aggregates silently zero out.
-                    let logical = dsl_expr_to_logical_expr(inner);
+                    let logical = dsl_expr_to_logical_expr(inner, &window_schema, right_tables);
                     let vals: Vec<Value> = sorted_indices[..=rank_0]
                         .iter()
                         .map(|&i| evaluate_expression(&logical, &rows[i]))
@@ -902,7 +1024,7 @@ fn apply_window_func(
                     window_running_sum(&vals, line_no)?
                 }
                 WindowFunc::Avg(inner) => {
-                    let logical = dsl_expr_to_logical_expr(inner);
+                    let logical = dsl_expr_to_logical_expr(inner, &window_schema, right_tables);
                     let vals: Vec<Value> = sorted_indices[..=rank_0]
                         .iter()
                         .map(|&i| evaluate_expression(&logical, &rows[i]))
@@ -921,7 +1043,7 @@ fn apply_window_func(
                     }
                 }
                 WindowFunc::Count(inner) => {
-                    let logical = dsl_expr_to_logical_expr(inner);
+                    let logical = dsl_expr_to_logical_expr(inner, &window_schema, right_tables);
                     let cnt = sorted_indices[..=rank_0]
                         .iter()
                         .filter(|&&i| {
@@ -931,7 +1053,7 @@ fn apply_window_func(
                     Value::Int(cnt as i64)
                 }
                 WindowFunc::Min(inner) => {
-                    let logical = dsl_expr_to_logical_expr(inner);
+                    let logical = dsl_expr_to_logical_expr(inner, &window_schema, right_tables);
                     sorted_indices[..=rank_0]
                         .iter()
                         .map(|&i| evaluate_expression(&logical, &rows[i]))
@@ -940,7 +1062,7 @@ fn apply_window_func(
                         .unwrap_or(Value::Null)
                 }
                 WindowFunc::Max(inner) => {
-                    let logical = dsl_expr_to_logical_expr(inner);
+                    let logical = dsl_expr_to_logical_expr(inner, &window_schema, right_tables);
                     sorted_indices[..=rank_0]
                         .iter()
                         .map(|&i| evaluate_expression(&logical, &rows[i]))
@@ -1074,7 +1196,10 @@ pub(super) fn execute_add_computed_column(
     }
 
     let before_hash = ds.content_hash();
-    let logical_expr = dsl_expr_to_logical_expr(expr);
+    // Single dataset, no JOIN -- an empty right-table set makes any
+    // `Expr::Field` qualifier resolve to its bare name, as before.
+    let logical_expr =
+        dsl_expr_to_logical_expr(expr, &ds.schema, &std::collections::HashSet::new());
 
     if lazy {
         let first_row = ds.rows.first().ok_or_else(|| DslError::Parse {
@@ -1379,6 +1504,7 @@ fn resolve_having(
     having_expr: &Expr,
     aggr_exprs: &[LogicalExpr],
     schema_now: &crate::core::tuple::Schema,
+    right_tables: &std::collections::HashSet<String>,
     line: usize,
 ) -> Result<LogicalExpr, DslError> {
     let mut rename = std::collections::HashMap::new();
@@ -1397,7 +1523,7 @@ fn resolve_having(
     }
 
     let rewritten = rewrite_ref_names(having_expr, &rename);
-    let predicate = dsl_expr_to_logical_expr(&rewritten);
+    let predicate = dsl_expr_to_logical_expr(&rewritten, schema_now, right_tables);
 
     let mut referenced = Vec::new();
     collect_referenced_columns(&predicate, &mut referenced);
@@ -1418,14 +1544,39 @@ fn resolve_having(
     Ok(predicate)
 }
 
-pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
+/// Convert a parsed DSL `Expr` into a `LogicalExpr` the physical evaluator
+/// understands. `schema` is the schema of the row(s) this expression will
+/// actually be evaluated against, and `right_tables` is the set of dataset
+/// names that sit on the right side of a `JOIN` in the current query (empty
+/// outside `execute_select`, where no join/qualifier-collision is possible)
+/// — both exist solely to resolve `Expr::Field` (a qualified `table.col`
+/// reference) correctly; see that arm below.
+pub(super) fn dsl_expr_to_logical_expr(
+    e: &Expr,
+    schema: &crate::core::tuple::Schema,
+    right_tables: &std::collections::HashSet<String>,
+) -> LogicalExpr {
     match e {
         Expr::Ref(name) => LogicalExpr::Column(name.clone()),
-        // `table.col` — the table qualifier is only meaningful for JOIN's
-        // ON clause (which also strips it, see parse_join_col_ref); a
-        // single row here is already the merged output of the JOIN, so
-        // resolve by the bare column name, same as an unqualified Ref.
-        Expr::Field { field, .. } => LogicalExpr::Column(field.clone()),
+        // `table.col` — a JOIN whose two sides share a bare column name
+        // gets its right-side field renamed to `r_<name>` in the merged
+        // schema (see `LogicalPlan::Join::schema()`); resolve to that
+        // renamed field when `base` names a table on the join's right side
+        // and the collision actually happened (a colliding field really is
+        // named `r_<field>` here), otherwise fall back to the bare name —
+        // correct for the left side, for a right-side field with no
+        // collision, and for every non-JOIN context (`right_tables` empty).
+        Expr::Field { base, field } => {
+            if let Expr::Ref(qualifier) = base.as_ref() {
+                if right_tables.contains(qualifier) {
+                    let renamed = format!("r_{field}");
+                    if schema.get_field_index(&renamed).is_some() {
+                        return LogicalExpr::Column(renamed);
+                    }
+                }
+            }
+            LogicalExpr::Column(field.clone())
+        }
         Expr::Int(n) => LogicalExpr::Literal(Value::Int(*n)),
         Expr::Scalar(f) => LogicalExpr::Literal(Value::Float(*f as f32)),
         Expr::StringLit(s) => LogicalExpr::Literal(Value::String(s.clone())),
@@ -1444,30 +1595,45 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 InfixOp::LtEq => "<=",
             };
             LogicalExpr::BinaryExpr {
-                left: Box::new(dsl_expr_to_logical_expr(lhs)),
+                left: Box::new(dsl_expr_to_logical_expr(lhs, schema, right_tables)),
                 op: sym.to_string(),
-                right: Box::new(dsl_expr_to_logical_expr(rhs)),
+                right: Box::new(dsl_expr_to_logical_expr(rhs, schema, right_tables)),
             }
         }
         Expr::And(lhs, rhs) => LogicalExpr::And(
-            Box::new(dsl_expr_to_logical_expr(lhs)),
-            Box::new(dsl_expr_to_logical_expr(rhs)),
+            Box::new(dsl_expr_to_logical_expr(lhs, schema, right_tables)),
+            Box::new(dsl_expr_to_logical_expr(rhs, schema, right_tables)),
         ),
         Expr::Or(lhs, rhs) => LogicalExpr::Or(
-            Box::new(dsl_expr_to_logical_expr(lhs)),
-            Box::new(dsl_expr_to_logical_expr(rhs)),
+            Box::new(dsl_expr_to_logical_expr(lhs, schema, right_tables)),
+            Box::new(dsl_expr_to_logical_expr(rhs, schema, right_tables)),
         ),
-        Expr::Not(inner) => LogicalExpr::Not(Box::new(dsl_expr_to_logical_expr(inner))),
-        Expr::IsNull(inner) => LogicalExpr::IsNull(Box::new(dsl_expr_to_logical_expr(inner))),
-        Expr::IsNotNull(inner) => LogicalExpr::IsNotNull(Box::new(dsl_expr_to_logical_expr(inner))),
+        Expr::Not(inner) => LogicalExpr::Not(Box::new(dsl_expr_to_logical_expr(
+            inner,
+            schema,
+            right_tables,
+        ))),
+        Expr::IsNull(inner) => LogicalExpr::IsNull(Box::new(dsl_expr_to_logical_expr(
+            inner,
+            schema,
+            right_tables,
+        ))),
+        Expr::IsNotNull(inner) => LogicalExpr::IsNotNull(Box::new(dsl_expr_to_logical_expr(
+            inner,
+            schema,
+            right_tables,
+        ))),
         Expr::In { expr, list } => LogicalExpr::In {
-            expr: Box::new(dsl_expr_to_logical_expr(expr)),
-            list: list.iter().map(dsl_expr_to_logical_expr).collect(),
+            expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
+            list: list
+                .iter()
+                .map(|e| dsl_expr_to_logical_expr(e, schema, right_tables))
+                .collect(),
         },
         Expr::Between { expr, low, high } => LogicalExpr::Between {
-            expr: Box::new(dsl_expr_to_logical_expr(expr)),
-            low: Box::new(dsl_expr_to_logical_expr(low)),
-            high: Box::new(dsl_expr_to_logical_expr(high)),
+            expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
+            low: Box::new(dsl_expr_to_logical_expr(low, schema, right_tables)),
+            high: Box::new(dsl_expr_to_logical_expr(high, schema, right_tables)),
         },
         Expr::Case {
             operand,
@@ -1476,21 +1642,28 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
         } => LogicalExpr::Case {
             operand: operand
                 .as_ref()
-                .map(|e| Box::new(dsl_expr_to_logical_expr(e))),
+                .map(|e| Box::new(dsl_expr_to_logical_expr(e, schema, right_tables))),
             branches: branches
                 .iter()
-                .map(|(c, r)| (dsl_expr_to_logical_expr(c), dsl_expr_to_logical_expr(r)))
+                .map(|(c, r)| {
+                    (
+                        dsl_expr_to_logical_expr(c, schema, right_tables),
+                        dsl_expr_to_logical_expr(r, schema, right_tables),
+                    )
+                })
                 .collect(),
             else_expr: else_expr
                 .as_ref()
-                .map(|e| Box::new(dsl_expr_to_logical_expr(e))),
+                .map(|e| Box::new(dsl_expr_to_logical_expr(e, schema, right_tables))),
         },
-        Expr::Coalesce(args) => {
-            LogicalExpr::Coalesce(args.iter().map(dsl_expr_to_logical_expr).collect())
-        }
+        Expr::Coalesce(args) => LogicalExpr::Coalesce(
+            args.iter()
+                .map(|e| dsl_expr_to_logical_expr(e, schema, right_tables))
+                .collect(),
+        ),
         Expr::Nullif(a, b) => LogicalExpr::Nullif(
-            Box::new(dsl_expr_to_logical_expr(a)),
-            Box::new(dsl_expr_to_logical_expr(b)),
+            Box::new(dsl_expr_to_logical_expr(a, schema, right_tables)),
+            Box::new(dsl_expr_to_logical_expr(b, schema, right_tables)),
         ),
         Expr::ScalarFn { func, args } => {
             use crate::query::logical::ScalarFnKind as LFnKind;
@@ -1504,7 +1677,10 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
             };
             LogicalExpr::ScalarFn {
                 func: lfunc,
-                args: args.iter().map(dsl_expr_to_logical_expr).collect(),
+                args: args
+                    .iter()
+                    .map(|e| dsl_expr_to_logical_expr(e, schema, right_tables))
+                    .collect(),
             }
         }
         Expr::Cast { expr, to } => {
@@ -1531,7 +1707,7 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
                 CastTarget::Matrix(r, c) => LCast::Matrix(*r, *c),
             };
             LogicalExpr::Cast {
-                expr: Box::new(dsl_expr_to_logical_expr(expr)),
+                expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
                 to: lto,
             }
         }
@@ -1560,7 +1736,10 @@ pub(super) fn dsl_expr_to_logical_expr(e: &Expr) -> LogicalExpr {
             };
             LogicalExpr::VectorFn {
                 func: lfunc,
-                args: args.iter().map(dsl_expr_to_logical_expr).collect(),
+                args: args
+                    .iter()
+                    .map(|e| dsl_expr_to_logical_expr(e, schema, right_tables))
+                    .collect(),
             }
         }
         _ => LogicalExpr::Literal(Value::Null),
@@ -1577,7 +1756,7 @@ pub(super) fn execute_transform(
     let select_stmt = SelectStmt {
         ctes: vec![],
         distinct: false,
-        source: DatasetSource::Named(s.source.clone()),
+        source: Some(DatasetSource::Named(s.source.clone())),
         joins: vec![],
         columns: s.columns,
         filter: s.filter,
@@ -1639,9 +1818,15 @@ pub(super) fn execute_update(
     s: UpdateStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    // Build a filter predicate (if any) using the same physical evaluator
+    // Build a filter predicate (if any) using the same physical evaluator.
+    // Single dataset, no JOIN -- an empty right-table set/schema makes any
+    // `Expr::Field` qualifier resolve to its bare name, as before.
     let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
-        let logical = dsl_expr_to_logical_expr(f);
+        let logical = dsl_expr_to_logical_expr(
+            f,
+            &crate::core::tuple::Schema::new(vec![]),
+            &std::collections::HashSet::new(),
+        );
         Box::new(move |row| {
             use crate::query::planner::evaluate_predicate;
             evaluate_predicate(&logical, row)
@@ -1691,8 +1876,14 @@ pub(super) fn execute_delete(
     s: DeleteStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
+    // Single dataset, no JOIN -- an empty right-table set/schema makes any
+    // `Expr::Field` qualifier resolve to its bare name, as before.
     let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
-        let logical = dsl_expr_to_logical_expr(f);
+        let logical = dsl_expr_to_logical_expr(
+            f,
+            &crate::core::tuple::Schema::new(vec![]),
+            &std::collections::HashSet::new(),
+        );
         Box::new(move |row| {
             use crate::query::planner::evaluate_predicate;
             evaluate_predicate(&logical, row)

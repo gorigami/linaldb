@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.82] - 2026-09-13
+
+### Fixed — `JOIN` silently returned the wrong table's value for a colliding qualified column (severe)
+
+Found while building a real-data `linal-hub` notebook (nearest-centroid classification joining
+two datasets that both had a `cell_type` column) — the query reported a suspicious 100%
+accuracy. Root cause: `dsl_expr_to_logical_expr`'s `Expr::Field` arm dropped the table qualifier
+entirely and resolved a `table.col` reference by bare column name, based on an incorrect comment
+claiming the qualifier was "only meaningful for JOIN's ON clause." When both sides of a `JOIN`
+share a bare column name, the merged row keeps the *left* side's field under that bare name and
+renames the *right* side's colliding field to `r_<name>` (`LogicalPlan::Join::schema()`) — a
+rename this conversion never consulted, so `right_t.tag` silently returned `left_t.tag`'s value
+instead of erroring. Affected `SELECT`, `WHERE`, and aggregate expressions; `JOIN`'s own `ON`
+clause was unaffected (resolved separately, pre-merge). Fixed by making the conversion
+schema/join-aware, recognizing both a JOIN's literal right-side dataset name and its `[AS]`
+alias as valid qualifiers for the renamed column. New regression tests in
+`tests/qualified_column_test.rs` cover the collision in `SELECT`, `WHERE`, aggregates, and with
+a JOIN alias.
+
+### Fixed — the 12 classical-linear-algebra keywords (`RANK`, `TRACE`, ...) collided with ordinary identifier usage
+
+`RANK`/`TRACE`/`DETERMINANT`/`INVERSE`/`SOLVE`/`EIGENVALUES`/`QR`/`LU`/`CHOLESKY`/`EIGEN`/`SVD`/`PCA`
+(plus `COMPONENTS`) are non-reserved now: usable as a column name, `AS` alias, or ordinary
+reference anywhere the grammar expects an identifier, not just as the linear-algebra operator
+they otherwise start. Found while building a real-data notebook: `SELECT rank, storage_ratio
+FROM t` failed to parse (a prior fix for `RANK() OVER (...)` only patched that one call site, not
+general identifier usage). Three related gaps fixed together: `eat_ident`/`advance_if_ident` (the
+~100+ call sites for column declarations, `AS` aliases, `INSERT` column lists, etc.) now accept
+these keyword tokens; `parse_select_expr`'s ranking-window-function check now requires a `(`
+lookahead before committing (matching the existing `Sum`/`Distance` precedent); and
+`parse_expr_atom`'s primary-expression dispatch now only routes into the operator parser when a
+valid operand actually follows, falling back to a plain identifier reference otherwise (fixing
+e.g. `WHERE RANK > 0` and `SELECT x + RANK` on a real `rank`/`trace`-named column). The genuine
+operator forms (`LET r = RANK m`) and the SQL window function (`RANK() OVER (...)`) are
+unaffected — see new regression tests in `tests/linalg_operators_test.rs`.
+
+### Fixed — `FROM` is now optional for a literal/computed-only `SELECT`
+
+`DSL_REFERENCE.md`'s own example (`SELECT L2_NORM([3.0, 4.0]) AS five FROM dual`) didn't actually
+work against the real engine — `dual` was never a registered pseudo-table anywhere in `src/`,
+just an unregistered name in that doc's example. Rather than adding a fake `dual` table (which
+would need special-casing across `SHOW DATASETS`/`DROP DATASET`/persistence to avoid leaking a
+phantom dataset), `FROM` is now simply optional when the `SELECT` list contains only
+literal/computed expressions (no column, aggregate, or window reference) — matching how every
+other SQL engine treats `SELECT 1+1` with no `FROM`. The list is evaluated once against a
+synthetic empty row; a real column reference with no `FROM` still errors clearly. Doc example
+fixed to drop `FROM dual`. New tests in `tests/correctness_integration.rs`.
+
+All three found and root-caused via three parallel research passes (not fixed on discovery, per
+explicit user instruction to first produce a plan) while building `linal-hub` notebooks 06/07,
+then implemented, tested, and released together.
+
 ## [0.1.81] - 2026-09-13
 
 ### Fixed — `EXPLAIN LINEAGE` could misattribute ancestry across a zero-copy `TRANSPOSE`

@@ -417,7 +417,9 @@ mod tests {
     #[test]
     fn numeric_literals() {
         assert_eq!(tok("42"), vec![Token::Int(42)]);
-        assert_eq!(tok("3.14"), vec![Token::Float(3.14)]);
+        // Not pi (clippy::approx_constant) -- any float literal exercises
+        // the same lexer path just as well.
+        assert_eq!(tok("3.25"), vec![Token::Float(3.25)]);
     }
 
     #[test]

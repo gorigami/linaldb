@@ -35,6 +35,32 @@ impl ParseError {
     }
 }
 
+// The classical-linear-algebra operator keywords, as non-reserved
+// identifiers: the canonical uppercase spelling `advance_if_ident` returns
+// when one of these tokens appears somewhere only a plain identifier is
+// grammatically valid (see its doc comment). `Token::Ident`'s own case is
+// preserved as typed; these, having no independent string payload, always
+// come back canonically uppercase -- matching how these keywords are
+// written in every example in `DSL_REFERENCE.md`.
+fn keyword_token_as_ident(tok: &Token) -> Option<&'static str> {
+    Some(match tok {
+        Token::Trace => "TRACE",
+        Token::Determinant => "DETERMINANT",
+        Token::Rank => "RANK",
+        Token::Inverse => "INVERSE",
+        Token::Solve => "SOLVE",
+        Token::Eigenvalues => "EIGENVALUES",
+        Token::Qr => "QR",
+        Token::Lu => "LU",
+        Token::Cholesky => "CHOLESKY",
+        Token::Eigen => "EIGEN",
+        Token::Svd => "SVD",
+        Token::Pca => "PCA",
+        Token::Components => "COMPONENTS",
+        _ => return None,
+    })
+}
+
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
 struct Parser {
@@ -121,6 +147,25 @@ impl Parser {
             if let Some(Token::Ident(s)) = self.advance() {
                 return Some(s);
             }
+        }
+        // The classical-linear-algebra operator keywords (`TRACE`, `RANK`,
+        // etc.; Phase 8, LINEAGE_AND_LINALG_PLAN.md) are non-reserved: valid
+        // as a plain identifier (column name, `AS` alias, ...) anywhere the
+        // grammar expects one, exactly like `Token::Ident`. Safe to do
+        // unconditionally here -- unlike `parse_expr_atom`'s primary-
+        // expression dispatch (where these tokens can *also* legitimately
+        // start the real `KEYWORD <operand>` operator syntax, requiring a
+        // lookahead to disambiguate), every caller of `eat_ident`/
+        // `advance_if_ident` is already in a position where only a plain
+        // identifier is grammatically possible (a `DATASET ... COLUMNS
+        // (...)` declaration, an `AS <alias>`, an `INSERT INTO (...)`
+        // column list, ...), never the start of an operator expression.
+        // Without this, a column literally named `rank`/`trace`/etc. could
+        // never be declared, aliased, or referenced through any of these
+        // paths -- a real regression found 2026-09-13.
+        if let Some(canonical) = self.peek().and_then(keyword_token_as_ident) {
+            self.advance();
+            return Some(canonical.to_string());
         }
         None
     }
@@ -1213,12 +1258,30 @@ mod tests {
     fn select_basic() {
         let stmt = parse_ok("SELECT col1, col2 FROM my_ds");
         let Statement::Select(s) = stmt else { panic!() };
-        assert!(matches!(&s.source, DatasetSource::Named(n) if n == "my_ds"));
+        assert!(matches!(&s.source, Some(DatasetSource::Named(n)) if n == "my_ds"));
         let SelectColumns::Named(cols) = s.columns else {
             panic!()
         };
         assert!(matches!(&cols[0], SelectExpr::Column(c) if c == "col1"));
         assert!(matches!(&cols[1], SelectExpr::Column(c) if c == "col2"));
+    }
+
+    #[test]
+    fn select_with_no_from_clause_parses() {
+        // A `SELECT` list of only literal/scalar expressions needs no data
+        // source -- `FROM` is optional, matching every other engine's
+        // `SELECT 1+1`-with-no-FROM support and fixing a real doc/engine
+        // mismatch (`DSL_REFERENCE.md`'s own `SELECT L2_NORM(...) AS five
+        // FROM dual` example didn't work, since `dual` was never a real
+        // registered pseudo-table -- see `execute_select`'s early-return
+        // branch for how this parses into and is evaluated).
+        let stmt = parse_ok("SELECT 1 + 1 AS two");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert!(s.source.is_none());
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert_eq!(cols.len(), 1);
     }
 
     #[test]
@@ -1601,7 +1664,7 @@ mod tests {
         let Statement::Select(s) = stmt else {
             panic!("expected Select")
         };
-        assert!(matches!(&s.source, DatasetSource::Named(n) if n == "orders"));
+        assert!(matches!(&s.source, Some(DatasetSource::Named(n)) if n == "orders"));
         assert_eq!(s.joins.len(), 1);
         assert_eq!(s.joins[0].kind, JoinKind::Inner);
         assert_eq!(s.joins[0].dataset, "users");
@@ -1755,7 +1818,7 @@ mod tests {
             panic!("expected Select")
         };
         match s.source {
-            DatasetSource::Subquery { alias, .. } => assert_eq!(alias, "sub"),
+            Some(DatasetSource::Subquery { alias, .. }) => assert_eq!(alias, "sub"),
             _ => panic!("expected Subquery source"),
         }
     }
@@ -1829,7 +1892,7 @@ mod tests {
         let Statement::Select(s) = stmt else { panic!() };
         assert_eq!(s.ctes.len(), 1);
         assert_eq!(s.ctes[0].0, "cte");
-        assert!(matches!(&s.source, DatasetSource::Named(n) if n == "cte"));
+        assert!(matches!(&s.source, Some(DatasetSource::Named(n)) if n == "cte"));
     }
 
     #[test]
