@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.81] - 2026-09-13
+
 ### Fixed — `EXPLAIN LINEAGE` could misattribute ancestry across a zero-copy `TRANSPOSE`
 
 Found while building a real `linal-hub` showcase notebook for `EXPLAIN LINEAGE`/the linear
