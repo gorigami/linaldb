@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `SimdBackend` rejected legitimate scalar/shape broadcasts above the SIMD threshold
+
+Found while building a real `linal-hub` economics notebook (a 45x45 real OECD input-output
+matrix — 2025 elements, just over `CpuBackend`'s 1024-element SIMD threshold): `Matrix * 0.5`
+(and the equivalent `+`/`-` forms) failed with a bare `"Shape mismatch"` error, even though the
+identical DSL line works on any tensor below that threshold. Root cause: `SimdBackend::add`/
+`sub`/`multiply` (`src/core/backend/simd.rs`) hard-errored on any shape mismatch *before* ever
+reaching their own `self.scalar.*` fallback — a fallback that already existed (and is what
+correctly handles scalar/shape broadcasting via `ScalarBackend`/`engine::kernels`) but was
+unreachable dead code for any tensor at or above the SIMD threshold. `CpuBackend` dispatches to
+`SimdBackend` purely by element count, with no regard for whether the operands' shapes actually
+match, so this silently broke broadcasting for any real-sized (>=1024-element) tensor. Fixed by
+requiring an exact shape match (in addition to contiguity) before taking the SIMD fast path;
+otherwise falls through to the scalar backend, matching the behavior tensors below the threshold
+already had. New regression tests in `src/core/backend/simd.rs` (`add`/`sub`/`multiply`
+broadcasting a scalar against a >=1024-element tensor, plus one confirming the SIMD fast path is
+still taken for matching same-shape tensors above the threshold).
+
 ## [0.1.82] - 2026-09-13
 
 ### Fixed — `JOIN` silently returned the wrong table's value for a colliding qualified column (severe)
