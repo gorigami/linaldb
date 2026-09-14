@@ -4,6 +4,25 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.6] - 2026-09-14
+
+Bumped for the engine fixes below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- `SimdBackend` rejected a legitimate scalar/shape broadcast (e.g. `matrix * 0.5`)
+  with a bare `"Shape mismatch"` error for any tensor at or above the 1024-element
+  SIMD threshold, even though the identical operation worked fine below it.
+- An un-aliased qualified `SELECT` column (`SELECT t.col FROM t`, no `AS`) was
+  labeled `__cmp_0` in the output instead of its real name — the underlying data
+  was always correct, only the column label was wrong.
+- A qualified column (`t.col`) failed to parse at all in `GROUP BY`, plain
+  `ORDER BY`, window `PARTITION BY`/`ORDER BY`, and `LAG`/`LEAD`'s column
+  argument, even though the identical qualified column already worked in
+  `SELECT`/`WHERE`.
+
+See the parent repository's `CHANGELOG.md` (`[Unreleased]`, three entries) for
+full detail.
+
 ## [0.1.5] - 2026-09-13
 
 Bumped for the engine fixes below (this crate has no code of its own beyond the
