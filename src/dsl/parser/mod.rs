@@ -142,6 +142,28 @@ impl Parser {
         }
     }
 
+    /// Parses a column reference for clauses that only ever need a final
+    /// field name (`GROUP BY`, `ORDER BY`, window `PARTITION BY`/
+    /// `ORDER BY`): a bare identifier, or a qualified `table.column` -- in
+    /// which case the qualifier is parsed and discarded. None of these
+    /// clauses' downstream resolution (`Schema::get_field_index`, a flat
+    /// exact-string lookup) is qualifier-aware, and every other qualified-
+    /// column reference in this engine already resolves by final field
+    /// name only (no true table disambiguation) -- so dropping the
+    /// qualifier here doesn't change behavior, it only accepts syntax that
+    /// previously failed to parse at all. A real regression found
+    /// 2026-09-13: `GROUP BY t.col`/`ORDER BY t.col` (plain or inside a
+    /// window `OVER (...)`) all failed to parse, even though the identical
+    /// qualified column already works fine in `SELECT`/`WHERE`.
+    fn eat_qualified_column_name(&mut self) -> Result<String, ParseError> {
+        let mut name = self.eat_ident()?;
+        if self.at(&Token::Dot) {
+            self.advance();
+            name = self.eat_ident()?;
+        }
+        Ok(name)
+    }
+
     fn advance_if_ident(&mut self) -> Option<String> {
         if matches!(self.peek(), Some(Token::Ident(_))) {
             if let Some(Token::Ident(s)) = self.advance() {
@@ -2040,6 +2062,52 @@ mod tests {
                 func: WindowFunc::Rank,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn window_rank_accepts_qualified_partition_and_order_columns() {
+        // Regression: PARTITION BY/ORDER BY inside a window spec used to
+        // fail to parse a qualified `t.col` reference at all (raw
+        // `eat_ident()`, no `.` handling) -- the qualifier is discarded,
+        // matching how these clauses already only resolve by bare field
+        // name (never true table disambiguation).
+        let stmt = parse_ok(
+            "SELECT RANK() OVER (PARTITION BY t.dept ORDER BY t.salary DESC) AS rnk FROM t",
+        );
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        let SelectExpr::Window { spec, .. } = &cols[0] else {
+            panic!()
+        };
+        assert_eq!(spec.partition_by, vec!["dept".to_string()]);
+        assert_eq!(spec.order_by, vec![("salary".to_string(), false)]);
+    }
+
+    #[test]
+    fn group_by_and_order_by_accept_qualified_columns() {
+        let stmt = parse_ok("SELECT cat, AVG(val) FROM t GROUP BY t.cat ORDER BY t.cat");
+        let Statement::Select(s) = stmt else { panic!() };
+        assert_eq!(s.group_by, vec!["cat".to_string()]);
+        let order_by = s.order_by.expect("order by clause");
+        assert_eq!(order_by.columns, vec![("cat".to_string(), true)]);
+    }
+
+    #[test]
+    fn lag_accepts_qualified_column() {
+        let stmt = parse_ok("SELECT LAG(t.val) OVER (ORDER BY t.id) AS prev FROM t");
+        let Statement::Select(s) = stmt else { panic!() };
+        let SelectColumns::Named(cols) = s.columns else {
+            panic!()
+        };
+        assert!(matches!(
+            &cols[0],
+            SelectExpr::Window {
+                func: WindowFunc::Lag { col, .. },
+                ..
+            } if col == "val"
         ));
     }
 

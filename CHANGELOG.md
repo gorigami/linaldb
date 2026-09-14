@@ -25,6 +25,42 @@ already had. New regression tests in `src/core/backend/simd.rs` (`add`/`sub`/`mu
 broadcasting a scalar against a >=1024-element tensor, plus one confirming the SIMD fast path is
 still taken for matching same-shape tensors above the threshold).
 
+### Fixed — un-aliased qualified `SELECT` column labeled `__cmp_0` instead of its real name
+
+Found while building a real `linal-hub` economics notebook: `SELECT t.col FROM t` (no `AS`)
+returned the correct value but reported the output column as `__cmp_0` — the SELECT-list
+classifier (`parse_select_expr`, `src/dsl/parser/dataset.rs`) only special-cased a *bare*
+`Expr::Ref` as a plain `SelectExpr::Column`; a qualified reference parses to `Expr::Field {
+base: Ref(_), field }` via the general expression parser, which fell into the generic
+`SelectExpr::Computed` catch-all — whose unaliased-naming fallback (`__cmp_{idx}`, meant for a
+genuine expression like `price * 2`) fired even though this is just a plain column reference.
+Data was always correct; only the schema/output column label was wrong. Fixed by recognizing a
+qualified reference with no alias as `SelectExpr::Column(field)` too (bare field name, matching
+how every other qualified-column reference in this engine already resolves — by final field
+name only, not full table-qualified disambiguation). New regression tests in
+`tests/qualified_column_test.rs` cover a plain qualified `SELECT`, one across a `JOIN`, and a
+guard confirming an explicit `AS` alias still wins.
+
+### Fixed — a qualified column failed to parse in `GROUP BY`/`ORDER BY`/window `PARTITION BY`/`LAG`/`LEAD`
+
+Found investigating the bug above: `GROUP BY t.col`, plain `ORDER BY t.col`, window
+`PARTITION BY t.col`/`ORDER BY t.col`, and `LAG(t.col)`/`LEAD(t.col)`'s column argument all
+failed to parse at all (`expected ')', found '.'` or similar), even though the identical
+qualified column already works fine in `SELECT`/`WHERE`. Root cause: unlike the general
+expression parser (which handles `t.col` naturally via `Expr::Field`), each of these
+clauses (`src/dsl/parser/dataset.rs`) parsed its column name via a single raw `eat_ident()`
+that never checked for a following `.` — an oversight, not a deliberate restriction (no
+existing test exercised a qualified column in any of these clauses before this fix), present
+in **two independently duplicated** copies of the `GROUP BY`/`ORDER BY` grammar (`parse_select`
+and `parse_dataset_from_clause`). Fixed with one new shared parser helper,
+`eat_qualified_column_name` (`src/dsl/parser/mod.rs`), that parses an optional `.ident`
+qualifier and discards it — this doesn't change any resolution behavior (`Schema::get_field_index`
+is a flat exact-string lookup with no qualifier awareness, and every qualified-column reference
+in this engine already resolves by final field name only, never true table disambiguation), it
+only accepts syntax that previously failed to parse. Swapped in at all 7 affected call sites.
+New regression tests in `tests/qualified_column_test.rs` (DSL-level, real data) and
+`src/dsl/parser/mod.rs` (parser unit tests) cover every affected clause.
+
 ## [0.1.82] - 2026-09-13
 
 ### Fixed — `JOIN` silently returned the wrong table's value for a colliding qualified column (severe)

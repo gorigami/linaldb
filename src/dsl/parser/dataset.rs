@@ -40,7 +40,7 @@ impl Parser {
                     self.eat(&Token::By)?;
                     let mut cols = vec![];
                     loop {
-                        cols.push(self.eat_ident()?);
+                        cols.push(self.eat_qualified_column_name()?);
                         if self.at(&Token::Comma) {
                             self.advance();
                         } else {
@@ -58,7 +58,7 @@ impl Parser {
                     self.eat(&Token::By)?;
                     let mut columns = vec![];
                     loop {
-                        let col = self.eat_ident()?;
+                        let col = self.eat_qualified_column_name()?;
                         let ascending = if self.at_ident("DESC") {
                             self.advance();
                             false
@@ -496,10 +496,10 @@ impl Parser {
                     if self.at(&Token::By) {
                         self.advance();
                     }
-                    group_by.push(self.eat_ident()?);
+                    group_by.push(self.eat_qualified_column_name()?);
                     while self.at(&Token::Comma) {
                         self.advance();
-                        group_by.push(self.eat_ident()?);
+                        group_by.push(self.eat_qualified_column_name()?);
                     }
                 }
                 Some(Token::Having) => {
@@ -513,7 +513,7 @@ impl Parser {
                     }
                     let mut columns = vec![];
                     loop {
-                        let col = self.eat_ident()?;
+                        let col = self.eat_qualified_column_name()?;
                         let ascending = if self.at_ident("DESC") {
                             self.advance();
                             false
@@ -878,7 +878,7 @@ impl Parser {
                     self.advance();
                     self.eat(&Token::LParen)?;
                     let (col, offset) = if fname == "LAG" || fname == "LEAD" {
-                        let col = self.eat_ident()?;
+                        let col = self.eat_qualified_column_name()?;
                         let off = if self.at(&Token::Comma) {
                             self.advance();
                             self.eat_usize()?
@@ -979,6 +979,17 @@ impl Parser {
         match (expr, alias) {
             // Simple column reference with no alias → Column
             (Expr::Ref(name), None) => Ok(SelectExpr::Column(name)),
+            // A qualified column reference (`t.col`) with no alias is still just
+            // a plain column, not a genuinely computed expression -- treat it as
+            // `Column` too (bare name, matching how this engine already resolves
+            // every other qualified-column reference: it doesn't disambiguate
+            // by table, only by the final field name). Without this arm it fell
+            // into the generic `Computed` catch-all below, which names an
+            // un-aliased result `__cmp_{idx}` -- a fallback meant for genuine
+            // expressions like `price * 2`, not a plain column reference.
+            (Expr::Field { base, field }, None) if matches!(*base, Expr::Ref(_)) => {
+                Ok(SelectExpr::Column(field))
+            }
             // Everything else → Computed
             (expr, alias) => Ok(SelectExpr::Computed {
                 expr: Box::new(expr),
@@ -996,7 +1007,7 @@ impl Parser {
             self.advance();
             self.eat(&Token::By)?;
             loop {
-                partition_by.push(self.eat_ident()?);
+                partition_by.push(self.eat_qualified_column_name()?);
                 if self.at(&Token::Comma) {
                     self.advance();
                 } else {
@@ -1008,7 +1019,7 @@ impl Parser {
             self.advance();
             self.eat(&Token::By)?;
             loop {
-                let col = self.eat_ident()?;
+                let col = self.eat_qualified_column_name()?;
                 let asc = if self.at_ident("DESC") {
                     self.advance();
                     false

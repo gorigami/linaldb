@@ -269,3 +269,168 @@ fn test_join_colliding_column_name_aggregate_resolves_correct_side() {
     // If this silently averaged left_t.grp (1, 1) instead, it would read 1.0.
     assert_eq!(ds.rows[0].values[1], Value::Float(150.0));
 }
+
+// ── Bug #5: an un-aliased qualified SELECT column was labeled `__cmp_0`
+//    instead of its real name ─────────────────────────────────────────────
+//
+// Found 2026-09-13 building a real-data notebook outside this repo
+// (`linal-hub/notebooks/08_production_network_systemic_risk.ipynb`):
+// `SELECT t.col FROM t` (no `AS`) returned the correct value but reported
+// the output column as `__cmp_0` -- the SELECT-list classifier only treated
+// a *bare* `Expr::Ref` as a plain `Column`; a qualified `Expr::Field`
+// reference with no alias fell into the generic `Computed` catch-all, whose
+// unaliased-naming fallback (`__cmp_{idx}`, meant for a genuine expression
+// like `price * 2`) fired even though this is just a column reference.
+
+#[test]
+fn test_unaliased_qualified_select_column_keeps_its_real_name() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int, b: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, 2.0)", 2);
+
+    let out = exec(&mut db, "SELECT t.a, t.b FROM t", 3);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let names: Vec<&str> = ds.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["a", "b"]);
+    assert_eq!(ds.rows[0].values[0], Value::Int(1));
+    assert_eq!(ds.rows[0].values[1], Value::Float(2.0));
+}
+
+#[test]
+fn test_unaliased_qualified_select_column_keeps_its_real_name_across_join() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET orders COLUMNS (id: Int, user_id: Int)", 1);
+    exec(&mut db, "INSERT INTO orders VALUES (1, 5)", 2);
+    exec(&mut db, "DATASET users COLUMNS (uid: Int, name: String)", 3);
+    exec(&mut db, "INSERT INTO users VALUES (5, \"bob\")", 4);
+
+    let out = exec(
+        &mut db,
+        "SELECT orders.id, users.name FROM orders JOIN users ON orders.user_id = users.uid",
+        5,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let names: Vec<&str> = ds.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["id", "name"]);
+}
+
+#[test]
+fn test_qualified_select_column_with_alias_still_uses_the_alias() {
+    // Guard against over-broadening the new Column-classification arm: an
+    // explicit `AS` alias must still win, exactly as it already does for a
+    // bare (unqualified) column reference.
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1)", 2);
+
+    let out = exec(&mut db, "SELECT t.a AS renamed FROM t", 3);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let names: Vec<&str> = ds.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["renamed"]);
+}
+
+// ── Bug #6: a qualified column failed to parse at all in GROUP BY,
+//    ORDER BY (plain or windowed), window PARTITION BY, and LAG/LEAD's
+//    column argument ────────────────────────────────────────────────────
+//
+// Found 2026-09-13, same real economics notebook as bug #5. Root cause:
+// unlike the general expression parser (used by SELECT/WHERE, which
+// handles `t.col` naturally via `Expr::Field`), each of these clauses
+// parsed its column name via a raw single `eat_ident()` that never checked
+// for a following `.` -- an oversight, not a deliberate restriction (no
+// existing test exercised a qualified column in any of these clauses
+// before this fix). The qualifier is parsed and discarded (not threaded
+// through), matching how every qualified-column reference in this engine
+// already resolves -- by final field name only, never true table
+// disambiguation (`Schema::get_field_index` is a flat exact-string
+// lookup) -- so this changes zero existing behavior, it only accepts
+// syntax that previously failed to parse.
+
+#[test]
+fn test_qualified_column_in_plain_order_by() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (a: Int, b: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, 2.0)", 2);
+    exec(&mut db, "INSERT INTO t VALUES (2, 1.0)", 3);
+
+    let out = exec(&mut db, "SELECT a, b FROM t ORDER BY t.b ASC", 4);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.rows[0].values[0], Value::Int(2));
+    assert_eq!(ds.rows[1].values[0], Value::Int(1));
+}
+
+#[test]
+fn test_qualified_column_in_group_by() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (cat: String, val: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (\"x\", 1.0)", 2);
+    exec(&mut db, "INSERT INTO t VALUES (\"x\", 3.0)", 3);
+    exec(&mut db, "INSERT INTO t VALUES (\"y\", 10.0)", 4);
+
+    let out = exec(
+        &mut db,
+        "SELECT cat, AVG(val) AS m FROM t GROUP BY t.cat",
+        5,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.len(), 2);
+    let row_x = ds
+        .rows
+        .iter()
+        .find(|r| r.values[0] == Value::String("x".to_string()))
+        .expect("group for cat=x");
+    assert_eq!(row_x.values[1], Value::Float(2.0));
+}
+
+#[test]
+fn test_qualified_column_in_window_partition_by_and_order_by() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (cat: String, val: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (\"x\", 1.0)", 2);
+    exec(&mut db, "INSERT INTO t VALUES (\"x\", 3.0)", 3);
+    exec(&mut db, "INSERT INTO t VALUES (\"y\", 10.0)", 4);
+
+    let out = exec(
+        &mut db,
+        "SELECT cat, val, RANK() OVER (PARTITION BY t.cat ORDER BY t.val DESC) AS r FROM t",
+        5,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let row = ds
+        .rows
+        .iter()
+        .find(|r| r.values[0] == Value::String("x".to_string()) && r.values[1] == Value::Float(3.0))
+        .expect("x/3.0 row");
+    assert_eq!(row.values[2], Value::Int(1));
+}
+
+#[test]
+fn test_qualified_column_in_lag() {
+    let mut db = TensorDb::new();
+    exec(&mut db, "DATASET t COLUMNS (id: Int, val: Float)", 1);
+    exec(&mut db, "INSERT INTO t VALUES (1, 10.0)", 2);
+    exec(&mut db, "INSERT INTO t VALUES (2, 20.0)", 3);
+
+    let out = exec(
+        &mut db,
+        "SELECT id, LAG(t.val) OVER (ORDER BY t.id) AS prev FROM t",
+        4,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    assert_eq!(ds.rows[0].values[1], Value::Null);
+    assert_eq!(ds.rows[1].values[1], Value::Float(10.0));
+}
