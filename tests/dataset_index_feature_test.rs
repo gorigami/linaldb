@@ -48,6 +48,63 @@ fn test_indexing_workflow() {
 }
 
 #[test]
+fn test_search_without_into_returns_inline_table() {
+    // DSL_REFERENCE.md §7: "INTO <target> materializes the results as a new
+    // dataset instead of returning them inline" -- meaning SEARCH without
+    // INTO should return the top-k rows directly. Previously it always
+    // materialized into a `search_results` dataset (or the named target) and
+    // returned only a status Message, even with no INTO clause, contradicting
+    // the documented default. Found while building a real recommender-system
+    // notebook that queried SEARCH without INTO and expected an inline table.
+    let mut db = TensorDb::new();
+    let script = r#"
+    DATASET items COLUMNS (id: Int, embedding: Vector(3))
+    CREATE VECTOR INDEX ON items(embedding)
+    INSERT INTO items VALUES (1, [1.0, 0.0, 0.0])
+    INSERT INTO items VALUES (2, [0.0, 1.0, 0.0])
+    INSERT INTO items VALUES (3, [0.9, 0.1, 0.0])
+    "#;
+    linal::dsl::execute_script(&mut db, script).expect("setup script failed");
+
+    // No INTO: must come back as an inline Table, not a Message, and must
+    // NOT create a `search_results` dataset as a side effect.
+    let output = linal::dsl::execute_line(
+        &mut db,
+        "SEARCH items ON embedding QUERY [1.0, 0.0, 0.0] LIMIT 2",
+        1,
+    )
+    .expect("search failed");
+    match output {
+        linal::dsl::DslOutput::Table(ds) => {
+            assert_eq!(ds.len(), 2, "expected top-2 rows inline");
+        }
+        other => panic!("expected an inline Table result, got {:?}", other),
+    }
+    assert!(
+        db.get_dataset("search_results").is_err(),
+        "SEARCH without INTO should not materialize a `search_results` dataset"
+    );
+
+    // With INTO: unchanged behavior -- a status Message, and the named
+    // dataset is materialized and queryable afterward.
+    let output = linal::dsl::execute_line(
+        &mut db,
+        "SEARCH items ON embedding QUERY [1.0, 0.0, 0.0] LIMIT 2 INTO nearest",
+        2,
+    )
+    .expect("search into failed");
+    match output {
+        linal::dsl::DslOutput::Message(_) => {}
+        other => panic!(
+            "expected a Message result for SEARCH...INTO, got {:?}",
+            other
+        ),
+    }
+    let nearest = db.get_dataset("nearest").expect("`nearest` should exist");
+    assert_eq!(nearest.len(), 2);
+}
+
+#[test]
 fn test_index_definitions_survive_save_and_load() {
     let mut db = TensorDb::new();
 

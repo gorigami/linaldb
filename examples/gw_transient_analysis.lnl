@@ -91,7 +91,9 @@ CREATE VECTOR INDEX ON gw_params(params)
 SHOW INDEXES gw_params
 
 # Index-accelerated top-4 nearest neighbors to GW150914 by mass-vector.
-SEARCH gw_params ON params QUERY [35.6, 30.6, 28.6] LIMIT 4
+# INTO is required here to name+persist the result as a queryable dataset --
+# without it, SEARCH returns the top-k rows inline instead (DSL_REFERENCE.md §7).
+SEARCH gw_params ON params QUERY [35.6, 30.6, 28.6] LIMIT 4 INTO search_results
 SELECT * FROM search_results
 
 # Honest finding: cosine similarity is scale-invariant (angle only), and
