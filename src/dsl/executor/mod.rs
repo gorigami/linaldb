@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::core::dataset_legacy;
 use crate::core::storage::ParquetStorage;
 use crate::core::tensor::Shape;
 use crate::core::tuple::{Field, Schema, Tuple};
@@ -542,27 +543,49 @@ pub fn execute_statement(
             })?;
             let result_schema = physical_plan.schema();
             let row_count = result_rows.len();
-            let target = s.target.unwrap_or_else(|| "search_results".to_string());
-            if let Ok(ds) = db.get_dataset_mut(&target) {
-                ds.rows = result_rows;
-                ds.metadata.update_stats(&ds.schema, &ds.rows);
-            } else {
-                db.create_dataset(target.clone(), result_schema.clone())
-                    .map_err(|e| DslError::Engine {
+            match s.target {
+                // No `INTO <target>`: return the top-k rows inline, matching
+                // DSL_REFERENCE.md §7 ("INTO <target> materializes the results
+                // as a new dataset instead of returning them inline") — this
+                // used to always materialize into a `search_results` dataset
+                // and return a message even without INTO, contradicting the
+                // documented default.
+                None => {
+                    let ds = dataset_legacy::Dataset::with_rows(
+                        dataset_legacy::DatasetId(0),
+                        result_schema,
+                        result_rows,
+                        Some("Search Result".into()),
+                    )
+                    .map_err(|e| DslError::Parse {
                         line: line_no,
-                        source: e,
+                        msg: e,
                     })?;
-                let ds = db.get_dataset_mut(&target).map_err(|e| DslError::Engine {
-                    line: line_no,
-                    source: e,
-                })?;
-                ds.rows = result_rows;
-                ds.metadata.update_stats(&ds.schema, &ds.rows);
+                    Ok(DslOutput::Table(ds))
+                }
+                Some(target) => {
+                    if let Ok(ds) = db.get_dataset_mut(&target) {
+                        ds.rows = result_rows;
+                        ds.metadata.update_stats(&ds.schema, &ds.rows);
+                    } else {
+                        db.create_dataset(target.clone(), result_schema.clone())
+                            .map_err(|e| DslError::Engine {
+                                line: line_no,
+                                source: e,
+                            })?;
+                        let ds = db.get_dataset_mut(&target).map_err(|e| DslError::Engine {
+                            line: line_no,
+                            source: e,
+                        })?;
+                        ds.rows = result_rows;
+                        ds.metadata.update_stats(&ds.schema, &ds.rows);
+                    }
+                    Ok(DslOutput::Message(format!(
+                        "Search completed. Found {} results in '{}'.",
+                        row_count, target
+                    )))
+                }
             }
-            Ok(DslOutput::Message(format!(
-                "Search completed. Found {} results in '{}'.",
-                row_count, target
-            )))
         }
 
         // ── Transform ────────────────────────────────────────────────────────

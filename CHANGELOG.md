@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `SEARCH` without `INTO` never returned results inline, contradicting its own docs
+
+Found while building a real `linal-hub` recommender-systems notebook (MovieLens collaborative
+filtering, exercising `CREATE VECTOR INDEX`'s IVF clustering and a real similarity `JOIN` at
+scale for the first time). `DSL_REFERENCE.md` §7 documents `SEARCH ... LIMIT k` (no `INTO`) as
+returning the top-`k` rows inline, with `INTO <target>` as what instead materializes them into a
+named dataset — but the executor (`Statement::Search` in `src/dsl/executor/mod.rs`) always
+materialized into a dataset (defaulting the target to `search_results` when `INTO` was omitted)
+and returned only a status `Message`, never an inline `Table`, regardless of `INTO`. No existing
+test exercised the no-`INTO` path's actual output shape (only the `INTO`/legacy-target forms and
+the "no index" error path were covered), so this went uncaught. Fixed: `SEARCH` without `INTO`
+now returns the top-`k` rows as an inline `Table`, matching the docs; `SEARCH ... INTO <target>`
+is unchanged. One existing example, `examples/gw_transient_analysis.lnl`, relied on the old
+implicit `search_results` materialization without `INTO` — updated to use `INTO search_results`
+explicitly. New regression test `test_search_without_into_returns_inline_table` in
+`tests/dataset_index_feature_test.rs`.
+
 ### Fixed — `SimdBackend` rejected legitimate scalar/shape broadcasts above the SIMD threshold
 
 Found while building a real `linal-hub` economics notebook (a 45x45 real OECD input-output
