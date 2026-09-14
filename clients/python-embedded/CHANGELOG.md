@@ -4,6 +4,21 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.7] - 2026-09-14
+
+Bumped for the engine fix below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- `SEARCH ... LIMIT k` without `INTO` always materialized results into a
+  `search_results` dataset and returned only a status message, contradicting
+  the documented default of returning the top-k rows inline. Found while
+  building a real MovieLens collaborative-filtering notebook in `linal-hub`
+  (the first workload to exercise `CREATE VECTOR INDEX`'s IVF clustering and
+  a real similarity `JOIN` at scale). `SEARCH ... INTO <target>` is
+  unchanged.
+
+See the parent repository's `CHANGELOG.md` (`[Unreleased]`) for full detail.
+
 ## [0.1.6] - 2026-09-14
 
 Bumped for the engine fixes below (this crate has no code of its own beyond the

@@ -30,7 +30,7 @@ from pathlib import Path
 from ._native import Db as _NativeDb
 from ._native import LinalError
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 __all__ = [
     "Db",
