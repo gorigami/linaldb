@@ -512,7 +512,8 @@ SELECT SUBSTR(name, 1, 3) AS prefix, UPPER(TRIM(email)) AS clean_email FROM user
 
 - `BIND alias TO resource`: Create a semantic link (alias) to a tensor or dataset.
 - `ATTACH tensor TO ds.col`: Link an independent tensor into a dataset column.
-- `DERIVE target FROM expr`: Create a new resource with full automated lineage tracking.
+- `DERIVE target FROM expr`: Create a new resource with full automated lineage tracking. `expr` must be a real computed expression — `DERIVE b FROM a` (a bare identifier, nothing to derive) is a clear error pointing at `BIND`/`LET` instead, since aliasing creates no new lineage node to track.
+- `LET name = <bare identifier>` is also a zero-copy alias, equivalent to `BIND name TO <bare identifier>` — both accept a plain tensor name, or a `dataset()`-constructed tensor-first dataset variable. `LAZY LET name = <bare identifier>` is a clear error (there is nothing to defer in a plain alias).
 
 ### Schema Evolution
 
@@ -533,7 +534,7 @@ Load and save data across different formats.
 - `IMPORT DATASET FROM "path" [AS name] [FIELDS (name1, name2, ...)]`: Load and normalize external data into a persistent LINAL Dataset Package.
   - Supports CSV, HDF5, Numpy, and Zarr. `FIELDS (...)` works the same way as for `USE DATASET FROM` above.
 - `IMPORT CSV FROM "path" AS name`: (Legacy) Auto-infer schema and load CSV into a relational dataset.
-- `EXPORT [CSV] name TO "path"`: Save dataset to CSV. The `CSV` keyword is optional — `EXPORT name TO "path"` behaves identically.
+- `EXPORT [CSV] name TO "path"`: Save dataset to CSV. The `CSV` keyword is optional — `EXPORT name TO "path"` behaves identically. A `Vector`/`Matrix` column is written as a JSON string per cell (e.g. `{"Vector":[1.0,2.0,3.0]}`), the same encoding `SAVE DATASET`'s legacy fallback uses — CSV has no native representation for nested/list data. Use `SAVE DATASET` instead for a native binary (Parquet `FixedSizeList`) encoding of vector/matrix data.
 - `SAVE DATASET name [TO "path"]`: Persist to Parquet (includes metadata/lineage).
 - `LOAD DATASET name [FROM "path"]`: Restore a persisted dataset.
 - `SAVE TENSOR name [TO "path"]`: Persist a tensor to JSON.

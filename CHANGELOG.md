@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `LET`/`DERIVE` with a bare-identifier RHS silently failed to bind, misreporting success
+
+Found while building a real `linal-hub` manufacturing-quality-control notebook. `LET y = x`
+(the RHS being a plain existing tensor name, not a real expression) parsed to `Expr::Ref("x")`;
+`eval_expr_to_name`'s `Expr::Ref` arm (`src/dsl/executor/eval.rs`) simply echoed the existing
+name back with no write — correct when reached recursively as an operand-resolution helper (its
+~7 other call sites), but wrong as the *outermost* dispatch for `LET`/`DERIVE`, where nothing
+then bound the user's requested new name to anything. The success message compounded this,
+printing the *old* name (`"Defined variable: x"` instead of `"Defined variable: y"`) since it was
+built from the value `eval_expr_to_name` returned rather than the name the user actually
+requested. `DERIVE` shares the same `eval_let` function and had the identical bug.
+
+Fixed: `eval_let` now intercepts a bare-`Ref` top-level expression before delegating, aliasing via
+the existing `bind_resource` primitive (the same one `BIND alias TO resource` already uses) —
+`LET y = x` is now a true zero-copy alias, and the success message always reflects the real
+requested name. `LAZY LET y = x` is a clear error (nothing to defer in a plain alias). `DERIVE
+b FROM a` (bare identifier) is also a clear error, not the alias treatment — `DERIVE`'s documented
+contract is "full automated lineage tracking," and an alias creates no new provenance node, so
+silently treating it as an alias would misrepresent `EXPLAIN LINEAGE b` as `a`'s own history. The
+error points the user at `BIND`/`LET` for a true alias, or a real expression if lineage tracking
+is wanted. While fixing this, also found and closed a related, previously-unnoticed gap in
+`bind_resource` itself (`src/engine/db.rs`): it never checked `dataset_vars`, the indirection
+layer behind `LET x = dataset("foo")`, so `BIND y TO x` (and the new `LET y = x`) failed with a
+loud `NameNotFound` for that pattern — now a real, working alias, closing a latent gap in `BIND`
+too, not just the new `LET` behavior. New tests in `tests/dsl_semantics_test.rs`.
+
+### Fixed — `EXPORT` crashed on a dataset with a populated `Vector`/`Matrix` column
+
+Found while building the same notebook (which needed to hand off a flagged-run report as CSV).
+`dataset_to_record_batch` (`src/core/storage.rs`, shared by both `SAVE DATASET`/Parquet and
+`EXPORT`/CSV) prefers a native Arrow `FixedSizeList` encoding for `Vector`/`Matrix` columns
+whenever the column is uniform with no `NULL`s — the common case (dense embeddings), and correct
+for Parquet, which supports nested types. `arrow::csv::Writer` has no support at all for
+`FixedSizeList`, so exactly that common, well-populated case crashed `EXPORT` with `Csv error:
+Nested type FixedSizeList(...) is not supported in CSV` — ironically, a column that already had a
+`NULL` (and so already fell back to the legacy JSON-string `Utf8` encoding) did not hit this bug.
+No test exercised `EXPORT` with a Vector/Matrix column before this. Fixed: CSV export now always
+uses the JSON-string fallback encoding for Vector/Matrix columns (e.g. `{"Vector":[1.0,2.0,3.0]}`,
+same format the existing null-column fallback already produced), regardless of nulls/uniformity —
+Parquet's existing, hard-won (v0.1.72/v0.1.73) null/uniformity-based native encoding is completely
+untouched, since `ParquetStorage::save_dataset`'s call site is unchanged. New tests in
+`tests/csv_io_test.rs`. `docs/DSL_REFERENCE.md` §5 now documents the JSON-string CSV encoding.
+
 ### Fixed — `SEARCH` without `INTO` never returned results inline, contradicting its own docs
 
 Found while building a real `linal-hub` recommender-systems notebook (MovieLens collaborative

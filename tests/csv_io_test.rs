@@ -54,6 +54,104 @@ fn test_csv_import_export() {
     let _ = fs::remove_file(export_path);
 }
 
+/// A fully-populated, uniform `Vector` column is the common case (dense
+/// embeddings) -- previously the exact case that crashed `EXPORT`, since
+/// `dataset_to_record_batch` prefers the native `FixedSizeList` Arrow
+/// encoding here, which `arrow::csv::Writer` cannot serialize at all.
+#[test]
+fn test_csv_export_dense_vector_column() {
+    let mut db = TensorDb::new();
+    execute_line(
+        &mut db,
+        "DATASET docs COLUMNS (id: Int, embedding: Vector(3))",
+        1,
+    )
+    .unwrap();
+    execute_line(&mut db, "INSERT INTO docs VALUES (1, [1.0, 2.0, 3.0])", 2).unwrap();
+    execute_line(&mut db, "INSERT INTO docs VALUES (2, [4.0, 5.0, 6.0])", 3).unwrap();
+
+    let temp_dir = std::env::temp_dir();
+    let export_path_buf = temp_dir.join("test_export_vector.csv");
+    let export_path = export_path_buf.to_str().unwrap();
+    let export_cmd = format!("EXPORT docs TO \"{}\"", export_path);
+    execute_line(&mut db, &export_cmd, 4)
+        .expect("EXPORT with a populated Vector column should succeed");
+
+    let exported_content = fs::read_to_string(export_path).unwrap();
+    assert!(
+        exported_content.contains(r#"{""Vector"":[1.0,2.0,3.0]}"#)
+            || exported_content.contains(r#"{"Vector":[1.0,2.0,3.0]}"#),
+        "expected a JSON-encoded Vector cell, got:\n{exported_content}"
+    );
+
+    let _ = fs::remove_file(export_path);
+}
+
+/// Matrix counterpart of `test_csv_export_dense_vector_column` -- confirms
+/// the fix isn't Vector-only.
+#[test]
+fn test_csv_export_matrix_column() {
+    let mut db = TensorDb::new();
+    execute_line(
+        &mut db,
+        "DATASET grids COLUMNS (id: Int, m: Matrix(2, 2))",
+        1,
+    )
+    .unwrap();
+    execute_line(
+        &mut db,
+        "INSERT INTO grids VALUES (1, [[1.0, 2.0], [3.0, 4.0]])",
+        2,
+    )
+    .unwrap();
+
+    let temp_dir = std::env::temp_dir();
+    let export_path_buf = temp_dir.join("test_export_matrix.csv");
+    let export_path = export_path_buf.to_str().unwrap();
+    let export_cmd = format!("EXPORT grids TO \"{}\"", export_path);
+    execute_line(&mut db, &export_cmd, 3)
+        .expect("EXPORT with a populated Matrix column should succeed");
+
+    let exported_content = fs::read_to_string(export_path).unwrap();
+    assert!(
+        exported_content.contains("Matrix"),
+        "expected a JSON-encoded Matrix cell, got:\n{exported_content}"
+    );
+
+    let _ = fs::remove_file(export_path);
+}
+
+/// A Vector column with a real NULL already took the JSON-string fallback
+/// path before this fix (Parquet's null/uniformity rule) -- confirms that
+/// case still exports, unchanged, now that CSV always uses that path.
+#[test]
+fn test_csv_export_vector_column_with_nulls_unchanged() {
+    let mut db = TensorDb::new();
+    execute_line(
+        &mut db,
+        "DATASET docs COLUMNS (id: Int, embedding: Vector(3)?)",
+        1,
+    )
+    .unwrap();
+    execute_line(&mut db, "INSERT INTO docs VALUES (1, [1.0, 2.0, 3.0])", 2).unwrap();
+    execute_line(&mut db, "INSERT INTO docs VALUES (2, NULL)", 3).unwrap();
+
+    let temp_dir = std::env::temp_dir();
+    let export_path_buf = temp_dir.join("test_export_vector_nulls.csv");
+    let export_path = export_path_buf.to_str().unwrap();
+    let export_cmd = format!("EXPORT docs TO \"{}\"", export_path);
+    execute_line(&mut db, &export_cmd, 4)
+        .expect("EXPORT with a nullable Vector column should succeed");
+
+    let exported_content = fs::read_to_string(export_path).unwrap();
+    assert!(
+        exported_content.contains("Vector"),
+        "expected a JSON-encoded Vector cell, got:\n{exported_content}"
+    );
+
+    let _ = fs::remove_file(export_path);
+}
+
 #[test]
 fn test_session_reset() {
     let mut db = TensorDb::new();

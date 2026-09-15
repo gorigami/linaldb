@@ -79,10 +79,12 @@ pub fn execute_statement(
         }
 
         // ── Assignment / computation ────────────────────────────────────────
-        Statement::Let(s) => eval::eval_let(db, ctx, &s.name, s.lazy, &s.expr, line_no),
+        Statement::Let(s) => eval::eval_let(db, ctx, &s.name, s.lazy, &s.expr, line_no, false),
         Statement::LetMulti(s) => eval::eval_let_multi(db, ctx, &s.names, s.lazy, &s.expr, line_no),
 
-        Statement::Derive(s) => eval::eval_let(db, ctx, &s.name, false, &s.source_expr, line_no),
+        Statement::Derive(s) => {
+            eval::eval_let(db, ctx, &s.name, false, &s.source_expr, line_no, true)
+        }
 
         // ── Zero-copy semantics ─────────────────────────────────────────────
         Statement::Bind(s) => {
