@@ -4,6 +4,28 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.8] - 2026-09-15
+
+Bumped for the engine fixes below (this crate has no code of its own beyond the
+PyO3 bindings, so it just picks up the new `linal` engine behavior):
+
+- `LET y = x` / `DERIVE b FROM a` (the RHS a plain existing tensor/dataset-var
+  name, not a real expression) silently failed to bind the new name, and even
+  misreported which variable it had defined. Found while building a real
+  manufacturing-quality-control notebook in `linal-hub`. `LET`/`BIND` now
+  create a true zero-copy alias in this case (also accepting a
+  `dataset()`-constructed variable, closing a related latent gap in `BIND`
+  itself); `LAZY LET`/`DERIVE` with a bare identifier are now clear errors
+  instead of silent wrong successes.
+- `EXPORT <dataset> TO "*.csv"` crashed whenever the dataset had a populated
+  `Vector`/`Matrix` column (Arrow's CSV writer can't serialize the native
+  `FixedSizeList` encoding Parquet prefers for that common case). CSV export
+  now always uses the existing JSON-string fallback encoding for those
+  columns; `SAVE DATASET`/Parquet is unaffected.
+
+See the parent repository's `CHANGELOG.md` (`[Unreleased]`, two entries) for
+full detail.
+
 ## [0.1.7] - 2026-09-14
 
 Bumped for the engine fix below (this crate has no code of its own beyond the
