@@ -15,12 +15,48 @@ pub(super) fn eval_let(
     lazy: bool,
     expr: &Expr,
     line_no: usize,
+    via_derive: bool,
 ) -> Result<DslOutput, DslError> {
-    let result = eval_expr_to_name(db, ctx, output_name, expr, lazy, line_no)?;
+    // A bare identifier RHS (`LET y = x` / `DERIVE y FROM x`) is not a real
+    // expression to evaluate — `eval_expr_to_name`'s `Expr::Ref` arm is only
+    // correct when reached *recursively*, resolving an operand to a name for
+    // an enclosing op (where echoing the existing name back, with no write,
+    // is exactly right). Reached here, at the top level, there is no
+    // enclosing op to perform the write, so it must be handled directly.
+    if let Expr::Ref(source_name) = expr {
+        if lazy {
+            return Err(DslError::Parse {
+                line: line_no,
+                msg: format!(
+                    "LAZY LET does not apply to a plain alias -- '{output_name} = {source_name}' has nothing to defer; use LET {output_name} = {source_name} or BIND {output_name} TO {source_name}"
+                ),
+            });
+        }
+        if via_derive {
+            return Err(DslError::Parse {
+                line: line_no,
+                msg: format!(
+                    "DERIVE requires a computed expression -- '{output_name} FROM {source_name}' has nothing to derive; use BIND {output_name} TO {source_name} or LET {output_name} = {source_name} for a zero-copy alias with no lineage node, or a real expression (e.g. DERIVE {output_name} FROM {source_name} + 0) if you want DERIVE's lineage tracking"
+                ),
+            });
+        }
+        db.active_instance_mut()
+            .bind_resource(output_name, source_name)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+        return Ok(DslOutput::Message(format!(
+            "Defined variable: {}",
+            output_name
+        )));
+    }
+
+    eval_expr_to_name(db, ctx, output_name, expr, lazy, line_no)?;
     Ok(DslOutput::Message(if lazy {
-        format!("Defined lazy variable: {}", result)
+        format!("Defined lazy variable: {}", output_name)
     } else {
-        format!("Defined variable: {}", result)
+        format!("Defined variable: {}", output_name)
     }))
 }
 

@@ -1,5 +1,5 @@
 use linal::core::tensor::Shape;
-use linal::dsl::execute_script;
+use linal::dsl::{execute_line, execute_script, DslOutput};
 use linal::engine::TensorDb;
 
 #[test]
@@ -25,6 +25,97 @@ fn test_dsl_bind_tensor() {
     execute_script(&mut db, "LET result = alias * 2.0").unwrap();
     let result = db.get("result").unwrap();
     assert_eq!(result.data[0], 2.0);
+}
+
+#[test]
+fn test_dsl_let_bare_ref_alias() {
+    let mut db = TensorDb::new();
+
+    // 1. Create tensor
+    db.insert_named("original", Shape::new(vec![2]), vec![1.0, 2.0])
+        .unwrap();
+    let original_id = db.active_instance().get_tensor_id("original").unwrap();
+
+    // 2. Alias via a bare-identifier LET
+    let out = execute_line(&mut db, "LET renamed = original", 1).unwrap();
+    match out {
+        DslOutput::Message(msg) => assert_eq!(msg, "Defined variable: renamed"),
+        other => panic!("expected a Message output, got {:?}", other),
+    }
+
+    // 3. Verify the new name is a true zero-copy alias (same TensorId)
+    let renamed_id = db
+        .active_instance()
+        .get_tensor_id("renamed")
+        .expect("renamed should exist");
+    assert_eq!(renamed_id, original_id);
+
+    // 4. Use the alias in a real computation
+    execute_script(&mut db, "LET result = renamed * 2.0").unwrap();
+    let result = db.get("result").unwrap();
+    assert_eq!(result.data[0], 2.0);
+}
+
+#[test]
+fn test_dsl_lazy_let_bare_ref_is_rejected() {
+    let mut db = TensorDb::new();
+    db.insert_named("original", Shape::new(vec![2]), vec![1.0, 2.0])
+        .unwrap();
+
+    let err = execute_line(&mut db, "LAZY LET renamed = original", 1).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("LAZY") && msg.contains("alias"),
+        "unexpected error message: {msg}"
+    );
+    assert!(db.active_instance().get_tensor_id("renamed").is_none());
+}
+
+#[test]
+fn test_dsl_derive_bare_ref_is_rejected() {
+    let mut db = TensorDb::new();
+    db.insert_named("a", Shape::new(vec![1]), vec![10.0])
+        .unwrap();
+
+    let err = execute_line(&mut db, "DERIVE b FROM a", 1).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("DERIVE") && (msg.contains("BIND") || msg.contains("LET")),
+        "unexpected error message: {msg}"
+    );
+    assert!(db.active_instance().get_tensor_id("b").is_none());
+}
+
+#[test]
+fn test_dsl_let_bare_ref_alias_of_dataset_var() {
+    let mut db = TensorDb::new();
+
+    execute_script(&mut db, "LET x = dataset(\"foo\")").unwrap();
+    execute_line(&mut db, "LET y = x", 1).unwrap();
+
+    assert_eq!(
+        db.active_instance()
+            .dataset_vars
+            .get("y")
+            .map(String::as_str),
+        Some("foo")
+    );
+}
+
+#[test]
+fn test_dsl_bind_dataset_var() {
+    let mut db = TensorDb::new();
+
+    execute_script(&mut db, "LET x = dataset(\"foo\")").unwrap();
+    execute_script(&mut db, "BIND y TO x").unwrap();
+
+    assert_eq!(
+        db.active_instance()
+            .dataset_vars
+            .get("y")
+            .map(String::as_str),
+        Some("foo")
+    );
 }
 
 #[test]

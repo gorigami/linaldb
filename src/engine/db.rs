@@ -1220,6 +1220,15 @@ impl DatabaseInstance {
 
     /// Vincular un nuevo nombre a un recurso existente (alias)
     pub fn bind_resource(&mut self, alias: &str, source: &str) -> Result<(), EngineError> {
+        // Intentar resolver como variable de dataset tensor-first (p.ej. `LET x = dataset("foo")`)
+        // -- es simplemente una capa de indirección (`dataset_vars[var] = real_name`), así que
+        // un alias aquí es una segunda entrada apuntando al mismo `real_name`, sin clonar nada.
+        if let Some(real_name) = self.dataset_vars.get(source) {
+            let real_name = real_name.clone();
+            self.dataset_vars.insert(alias.to_string(), real_name);
+            return Ok(());
+        }
+
         // Intentar resolver como tensor
         if let Some(entry) = self.names.get(source) {
             let id = entry.id;
