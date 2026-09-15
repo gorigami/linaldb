@@ -901,8 +901,28 @@ pub fn record_batch_to_tensors(batch: &RecordBatch) -> Result<Vec<(String, Tenso
     Ok(tensors)
 }
 
-/// Convert Dataset to Arrow RecordBatch
+/// How a `Vector`/`Matrix` column should be encoded when converting a
+/// `Dataset` to an Arrow `RecordBatch`. Parquet supports nested Arrow types,
+/// so it can use the real, native encoding whenever possible (see
+/// `build_vector_column`/`build_matrix_column`'s doc comments); `arrow::csv::
+/// Writer` has no support at all for `FixedSizeList`, so CSV export must
+/// always take the flattened JSON-string fallback regardless of nulls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VectorEncoding {
+    PreferNative,
+    AlwaysJsonFallback,
+}
+
+/// Convert Dataset to Arrow RecordBatch, preferring the native `FixedSizeList`
+/// encoding for `Vector`/`Matrix` columns wherever possible (Parquet's needs).
 pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, StorageError> {
+    dataset_to_record_batch_with_options(dataset, VectorEncoding::PreferNative)
+}
+
+fn dataset_to_record_batch_with_options(
+    dataset: &Dataset,
+    encoding: VectorEncoding,
+) -> Result<RecordBatch, StorageError> {
     let mut arrow_fields: Vec<ArrowField> = Vec::with_capacity(dataset.schema.fields.len());
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(dataset.schema.fields.len());
 
@@ -979,10 +999,16 @@ pub fn dataset_to_record_batch(dataset: &Dataset) -> Result<RecordBatch, Storage
                     .collect();
                 (DataType::Boolean, Arc::new(BooleanArray::from(values)))
             }
-            ValueType::Vector(declared_dim) => build_vector_column(&column_data, *declared_dim),
-            ValueType::Matrix(declared_rows, declared_cols) => {
-                build_matrix_column(&column_data, *declared_rows, *declared_cols)
-            }
+            ValueType::Vector(declared_dim) => match encoding {
+                VectorEncoding::PreferNative => build_vector_column(&column_data, *declared_dim),
+                VectorEncoding::AlwaysJsonFallback => build_legacy_json_column(&column_data),
+            },
+            ValueType::Matrix(declared_rows, declared_cols) => match encoding {
+                VectorEncoding::PreferNative => {
+                    build_matrix_column(&column_data, *declared_rows, *declared_cols)
+                }
+                VectorEncoding::AlwaysJsonFallback => build_legacy_json_column(&column_data),
+            },
             ValueType::Null => build_legacy_json_column(&column_data),
         };
 
@@ -1354,7 +1380,11 @@ impl CsvStorage {
     }
 
     pub fn export_dataset(&self, dataset: &Dataset, path: &str) -> Result<(), StorageError> {
-        let batch = dataset_to_record_batch(dataset)?;
+        // `arrow::csv::Writer` cannot serialize a nested `FixedSizeList` type at
+        // all, unlike Parquet -- always flatten Vector/Matrix columns to the
+        // legacy JSON-string encoding for CSV, regardless of null/uniformity.
+        let batch =
+            dataset_to_record_batch_with_options(dataset, VectorEncoding::AlwaysJsonFallback)?;
         let file = fs::File::create(path)?;
         let mut writer = arrow::csv::Writer::new(file);
         writer.write(&batch)?;
