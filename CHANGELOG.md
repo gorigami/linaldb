@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.83] - 2026-09-16
+
 ### Fixed — `Bool` column predicates silently matched zero rows instead of comparing correctly
 
 Found via a deep audit of `docs/DSL_REFERENCE.md` against a real build of the engine, done
