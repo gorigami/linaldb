@@ -4,12 +4,15 @@ build-backend = "maturin"
 
 [project]
 name = "linaldb"
-version = "0.1.8"
+version = "0.1.9"
 description = "Embedded native Python bindings for LINALDB — in-process TensorDb via PyO3, no server required"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "LinalDB Community License v1.0" }
-authors = [{ name = "gorigami", email = "gorigamidev@gmail.com" }]
+authors = [
+    { name = "gorigami", email = "develop@gorigami.xyz" },
+    { name = "Nicolás Balaguera" },
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -35,7 +38,7 @@ Issues = "https://github.com/gorigami/linaldb/issues"
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]
-dev = ["pytest>=7.0", "pandas>=1.5"]
+dev = ["pytest>=7.0", "pandas>=1.5", "numpy>=1.20"]
 
 [tool.maturin]
 module-name = "linaldb._native"

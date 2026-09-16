@@ -4,6 +4,23 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.9] - 2026-09-16
+
+Documentation-only release, no functional changes:
+
+- Added a `## Status` section to `README.md` (none existed before)
+  summarizing the real bug-fix history across all 9 releases.
+- Added an `## About` section crediting Gorigami and Nicolás Balaguera.
+- Standardized the `authors` contact email to `develop@gorigami.xyz`
+  (matching `LICENSE`/root `README.md`/`SECURITY.md`/the R client
+  packages, which all already used this address — the Python packages
+  were the outlier at `gorigamidev@gmail.com`) and added Nicolás
+  Balaguera as a named author.
+- Added `numpy` to the `dev` extra (already an implicit dependency of the
+  README's own Usage example and `examples/digit_classification_embedded.py`
+  via pandas, but not declared explicitly — `clients/python`'s `dev`
+  extra already listed it).
+
 ## [0.1.8] - 2026-09-15
 
 Bumped for the engine fixes below (this crate has no code of its own beyond the

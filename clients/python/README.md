@@ -3,11 +3,19 @@
 Python client for [LINALDB](../../README.md) — a SQL-inspired analytical
 engine treating vectors, matrices, and tensors as first-class citizens.
 
-**Status**: functional through checkpoint 5 of
-[`PYTHON_R_INTEROP_PLAN.md`](../../PYTHON_R_INTEROP_PLAN.md) — `/execute`
-and `/delivery` are both implemented and tested against a real server (22
-passing `pytest` tests, plus a real end-to-end example, see below).
-Published on PyPI as [`linaldb-server`](https://pypi.org/project/linaldb-server/):
+**Status**: two releases on PyPI. `0.1.0` (2026-09-09) was the initial
+HTTP client — `/execute` and `/delivery` both implemented and tested
+against a real server, plus a real end-to-end example (see below). `0.1.1`
+(2026-09-16) fixed a real, silent data-corruption bug found via
+real-world testing in the `linal-hub` sibling project:
+`TensorResult.to_numpy()` ignored the wire payload's own `strides`/
+`offset` fields, so a non-contiguous tensor result (e.g. `SHOW` of a
+zero-copy `TRANSPOSE`) came back with plausible-looking but wrong values,
+no exception — `to_numpy()` now reconstructs correctly, and a
+`UserWarning` was added for the concurrent-session footgun described
+below. See [`CHANGELOG.md`](CHANGELOG.md) for full detail. Verified
+against engine `0.1.82`. Published on PyPI as
+[`linaldb-server`](https://pypi.org/project/linaldb-server/):
 
 ```bash
 pip install linaldb-server
@@ -49,6 +57,13 @@ replays a real UCI handwritten-digits classification workflow through
 this client, queries the result via `/execute`, exports the same data via
 `/delivery`, and independently recomputes the classification from the raw
 exported vectors to confirm both paths agree exactly.
+
+## About
+
+[LINALDB](https://github.com/gorigami/linaldb) is built by
+[Gorigami](https://gorigami.xyz), a software company based in Colombia, and
+maintained by Nicolás Balaguera. See the [project README](../../README.md)
+and [LICENSE](../../LICENSE) for the full picture and licensing terms.
 
 ## Development
 

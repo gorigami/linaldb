@@ -5,6 +5,25 @@ here. See the parent repository's `CHANGELOG.md` for the engine's own
 changelog and `PYTHON_R_INTEROP_PLAN.md` (repo root, until all its
 checkpoints land) for the full build history.
 
+## [0.1.2] - 2026-09-16
+
+Documentation-only release, no functional changes:
+
+- Replaced the stale "functional through checkpoint 5" status paragraph
+  in `README.md` with a summary of the real `0.1.0`/`0.1.1` releases.
+- Added an `## About` section crediting Gorigami and Nicolás Balaguera.
+- Fixed `examples/README.md`, which still described
+  `digit_classification.py` as not-yet-written scaffolding ("Empty as of
+  checkpoint 0") even though it's been a real, working example since
+  `0.1.0`.
+- Standardized the `authors` contact email to `develop@gorigami.xyz`
+  (matching `LICENSE`/root `README.md`/`SECURITY.md`/the R client
+  packages, which all already used this address — the Python packages
+  were the outlier at `gorigamidev@gmail.com`) and added Nicolás
+  Balaguera as a named author.
+
+Requires engine `>= 0.1.74` (unchanged).
+
 ## [0.1.1] - 2026-09-16
 
 Two issues found via real-world testing in `linal-hub` (a sibling project

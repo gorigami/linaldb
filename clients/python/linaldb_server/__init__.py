@@ -10,7 +10,7 @@ from .dataset import Dataset
 from .errors import LinalError
 from .wire import TableResult, TensorResult
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "connect",

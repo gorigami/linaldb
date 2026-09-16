@@ -4,12 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "linaldb-server"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python client for LINALDB, a SQL-inspired analytical engine for vectors, matrices, and tensors"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "LinalDB Community License v1.0" }
-authors = [{ name = "gorigami", email = "gorigamidev@gmail.com" }]
+authors = [
+    { name = "gorigami", email = "develop@gorigami.xyz" },
+    { name = "Nicolás Balaguera" },
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
