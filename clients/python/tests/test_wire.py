@@ -97,3 +97,73 @@ def test_unwrap_result_rejects_unknown_variant():
         unwrap_result({"NotARealVariant": {}})
     with pytest.raises(LinalError):
         unwrap_result({"Message": "a", "extra": "b"})
+
+
+# --- TensorResult.to_numpy(): strides/offset-aware reconstruction ---------
+#
+# Regression coverage for a real, shipped bug (linaldb-server 0.1.0):
+# to_numpy() used to do a plain `reshape(self.shape)` on the raw `data`
+# buffer, ignoring `strides`/`offset` entirely -- silently wrong for any
+# non-contiguous tensor (e.g. a zero-copy TRANSPOSE). See CHANGELOG.md's
+# 0.1.1 entry and clients/CONTRACT.md's Tensor/LazyTensor wire shape note.
+
+
+def test_to_numpy_contiguous_unchanged():
+    pytest.importorskip("numpy")
+    import numpy as np
+
+    result = TensorResult(shape=[2, 3], data=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], strides=[3, 1], offset=0)
+    np.testing.assert_array_equal(result.to_numpy(), np.array([[1, 2, 3], [4, 5, 6]], dtype="float32"))
+
+
+def test_to_numpy_respects_strides_and_offset_transposed():
+    pytest.importorskip("numpy")
+
+    # Real payload confirmed live against a v0.1.82 server:
+    # MATRIX m = [[1, 2, 3], [4, 5, 6]]; LET mt = TRANSPOSE m; SHOW mt.
+    # The buggy code returned [[1, 2], [3, 4], [5, 6]] (a plain reshape
+    # of the untransposed buffer) instead of the correct transpose below.
+    result = TensorResult(shape=[3, 2], data=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], strides=[1, 3], offset=0)
+    assert result.to_numpy().tolist() == [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+
+
+def test_to_numpy_missing_strides_defaults_to_contiguous():
+    pytest.importorskip("numpy")
+
+    result = TensorResult(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])  # strides=None, offset=0 (defaults)
+    assert result.to_numpy().tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_to_numpy_scalar_rank_zero():
+    pytest.importorskip("numpy")
+
+    result = TensorResult(shape=[], data=[7.0])
+    arr = result.to_numpy()
+    assert arr.shape == ()
+    assert float(arr) == 7.0
+
+
+def test_to_numpy_offset_nonzero():
+    pytest.importorskip("numpy")
+
+    # Simulates a sliced view: two leading elements skipped via offset.
+    result = TensorResult(shape=[2, 2], data=[0.0, 0.0, 1.0, 2.0, 3.0, 4.0], strides=[2, 1], offset=2)
+    assert result.to_numpy().tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_to_numpy_returns_owned_copy():
+    pytest.importorskip("numpy")
+
+    result = TensorResult(shape=[2], data=[1.0, 2.0])
+    arr = result.to_numpy()
+    arr[0] = 999.0
+    assert result.data == [1.0, 2.0]
+
+
+def test_to_numpy_rejects_out_of_bounds():
+    pytest.importorskip("numpy")
+
+    # shape/strides/offset claim 3 elements; data only has 1.
+    result = TensorResult(shape=[3], data=[1.0], strides=[1], offset=0)
+    with pytest.raises(LinalError):
+        result.to_numpy()
