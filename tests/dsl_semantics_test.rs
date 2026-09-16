@@ -1,6 +1,14 @@
 use linal::core::tensor::Shape;
+use linal::core::value::Value;
 use linal::dsl::{execute_line, execute_script, DslOutput};
 use linal::engine::TensorDb;
+
+fn table_row_count(out: DslOutput) -> usize {
+    match out {
+        DslOutput::Table(ds) => ds.rows.len(),
+        other => panic!("expected Table, got {:?}", other),
+    }
+}
 
 #[test]
 fn test_dsl_bind_tensor() {
@@ -174,4 +182,86 @@ fn test_dsl_retrocompatibility() {
 
     let b = db.get("b").unwrap();
     assert_eq!(b.data[0], 10.0);
+}
+
+// ─── Bool column predicates ────────────────────────────────────────────────
+//
+// Regression tests found via linal-hub's DSL_REFERENCE.md audit (2026-09-16):
+// `WHERE <bool_col> = 1` (the exact form the docs' own Pipeline Lifecycle
+// example uses) and a bare `WHERE <bool_col>` both silently matched zero
+// rows -- `Value::compare` had no (Bool, Int) arm (incomparable -> the `=`
+// predicate never matched), and a bare `Expr::Column` predicate fell through
+// evaluate_expr's final `_ => false` arm entirely, since only `IsNull`/
+// `BinaryExpr`/etc were handled, never a plain column reference.
+
+fn setup_bool_dataset(db: &mut TensorDb) {
+    execute_script(
+        db,
+        r#"
+        DATASET products COLUMNS (id: Int, active: Bool)
+        INSERT INTO products VALUES (1, true)
+        INSERT INTO products VALUES (2, true)
+        INSERT INTO products VALUES (3, false)
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn bool_column_compares_against_int_literal() {
+    let mut db = TensorDb::new();
+    setup_bool_dataset(&mut db);
+
+    let true_rows = execute_line(&mut db, "SELECT * FROM products WHERE active = 1", 1).unwrap();
+    assert_eq!(table_row_count(true_rows), 2);
+
+    let false_rows = execute_line(&mut db, "SELECT * FROM products WHERE active = 0", 1).unwrap();
+    assert_eq!(table_row_count(false_rows), 1);
+
+    // An int with no boolean meaning stays incomparable rather than
+    // guessing a truthiness rule for it -- 0/1 only.
+    let out = execute_line(&mut db, "SELECT * FROM products WHERE active = 2", 1).unwrap();
+    assert_eq!(table_row_count(out), 0);
+}
+
+#[test]
+fn bool_column_still_compares_against_bool_literal() {
+    let mut db = TensorDb::new();
+    setup_bool_dataset(&mut db);
+
+    let out = execute_line(&mut db, "SELECT * FROM products WHERE active = true", 1).unwrap();
+    assert_eq!(table_row_count(out), 2);
+}
+
+#[test]
+fn bare_bool_column_is_a_valid_predicate() {
+    let mut db = TensorDb::new();
+    setup_bool_dataset(&mut db);
+
+    let out = execute_line(&mut db, "SELECT * FROM products WHERE active", 1).unwrap();
+    let DslOutput::Table(ds) = out else {
+        panic!("expected Table");
+    };
+    assert_eq!(ds.rows.len(), 2);
+    for row in &ds.rows {
+        assert_eq!(row.get("active"), Some(&Value::Bool(true)));
+    }
+}
+
+#[test]
+fn pipeline_where_equals_one_matches_docs_example() {
+    // The exact pattern from docs/DSL_REFERENCE.md's Pipeline Lifecycle
+    // example (`DEFINE PIPELINE clean AS WHERE active = 1 THEN ...`).
+    let mut db = TensorDb::new();
+    setup_bool_dataset(&mut db);
+
+    execute_script(
+        &mut db,
+        "DEFINE PIPELINE clean AS WHERE active = 1 THEN LIMIT 10",
+    )
+    .unwrap();
+    execute_line(&mut db, "APPLY PIPELINE clean ON products INTO top", 1).unwrap();
+
+    let out = execute_line(&mut db, "SELECT * FROM top", 1).unwrap();
+    assert_eq!(table_row_count(out), 2);
 }

@@ -413,26 +413,19 @@ SELECT aid, bid FROM a JOIN b ON COSINE_SIM(a.v, b.v) > 0.8
 ### Common Table Expressions (CTEs) & UNION
 
 ```sql
-WITH recent AS (
-    SELECT * FROM events WHERE ts > 100
-)
-SELECT * FROM recent WHERE user_id = 1
+WITH recent AS (SELECT * FROM events WHERE ts > 100) SELECT * FROM recent WHERE user_id = 1
 
 -- Multiple CTEs
-WITH cte_a AS (SELECT * FROM t1), cte_b AS (SELECT * FROM t2)
-SELECT * FROM cte_a
+WITH cte_a AS (SELECT * FROM t1), cte_b AS (SELECT * FROM t2) SELECT * FROM cte_a
 
-SELECT id FROM users_a
-UNION
-SELECT id FROM users_b
+SELECT id FROM users_a UNION SELECT id FROM users_b
 
-SELECT id FROM users_a
-UNION ALL
-SELECT id FROM users_b
+SELECT id FROM users_a UNION ALL SELECT id FROM users_b
 ```
 
 - `WITH <name> AS (<SELECT>), ...` materializes each CTE as a temporary dataset (by that name) before the main query runs, then removes it once the statement completes — the name is not available in later statements. Avoid reusing the name of an existing real dataset for a CTE, since the CTE temporarily creates a dataset under that name for the duration of the statement.
 - `UNION` deduplicates matching rows; `UNION ALL` keeps duplicates. `UNION`/`UNION ALL` clauses can be chained (`A UNION B UNION C`, three-way and beyond) — each right-hand side is itself a full `SELECT`, so chaining just recurses.
+- **A `WITH` clause's trailing `SELECT` must be part of the same statement** — in `.lnl` files and the CLI/REPL, keep the whole `WITH ... SELECT ...` on one line. Splitting it across lines the way this section's examples are formatted above for readability (`WITH recent AS (\n ...\n)\nSELECT ...`) does *not* work when actually pasted into a `.lnl` file: `linal run`'s line joiner only tracks paren balance, and the `WITH` clause's own parens close before the file reaches the trailing `SELECT`, so the joiner treats the `WITH ... AS (...)` part as a complete (and invalid) statement on its own. This is a real gap in the file-runner's statement-joining heuristic, not a DSL limitation — the parser itself accepts the full multi-line form fine when given as one string (e.g. over `/execute`).
 
 ### Window Functions
 
@@ -732,8 +725,8 @@ SHOW "--- Begin training phase ---"
 - `EXPLAIN LINEAGE <name>`: Show the real, persisted derivation ancestry for a tensor or dataset — a genuinely different thing from `EXPLAIN <target>` above (that shows a *query plan*; this shows *how the data actually got here*: every `IMPORT`, `DATASET ... FROM`, `ADD COMPUTED COLUMN`, tensor op, and `SAVE`, in order). Resolves `<name>` against tensor names first, then dataset names. Survives a restart: ancestry is read from a persisted, content-hash-addressed provenance log (`{data_dir}/{db}/provenance.jsonl`), not just the current session's in-memory state, so it still works on a dataset you just `LOAD`ed fresh. A name with no recorded history (e.g. one that predates this feature) resolves as a single `ROOT` node rather than erroring.
   - `EXPLAIN LINEAGE <name> AS JSON`: same ancestry, as JSON, for programmatic or compliance consumption.
   - `SHOW LINEAGE <name>` is a working, documented-as-superseded alias for the text-tree form.
-- `AUDIT DATASET <name>`: Perform a deep **referential-integrity** health check — detects dangling tensor references in a dataset's columns. This is unrelated to derivation history despite the naming similarity: `AUDIT DATASET` answers "do this dataset's column references still resolve?"; `EXPLAIN LINEAGE` answers "how was this data derived?". Use `EXPLAIN LINEAGE`, not `AUDIT DATASET`, to inspect provenance.
-- `DELIVER <dataset> [TO '<path>']`: Check whether a dataset is deliverable over the `/delivery` HTTP routes (§10). Errors if the dataset doesn't exist. If it exists but hasn't been persisted yet, reports that and points to `SAVE DATASET`; if a delivery manifest is found (default path `<data_dir>/<db>/datasets/<name>/manifest.json`, or the directory given by `TO`), confirms it's ready to serve.
+- `AUDIT DATASET <name>`: Perform a deep **referential-integrity** health check — detects dangling tensor references in a dataset's columns. This is unrelated to derivation history despite the naming similarity: `AUDIT DATASET` answers "do this dataset's column references still resolve?"; `EXPLAIN LINEAGE` answers "how was this data derived?". Use `EXPLAIN LINEAGE`, not `AUDIT DATASET`, to inspect provenance. **Only works on tensor-first datasets** (built via the `dataset()` constructor, §2) — it errors `Tensor dataset '<name>' not found` against an ordinary `DATASET <name> COLUMNS (...)` (legacy relational) dataset, even one that exists and works fine with `SHOW`/`SELECT`/etc. Almost every other example in this reference uses the legacy form, so this is easy to hit by surprise.
+- `DELIVER <dataset> [TO '<path>']`: Check whether a dataset is deliverable over the `/delivery` HTTP routes (§10). Errors if the dataset doesn't exist. If it exists but hasn't been persisted yet, reports that and points to `SAVE DATASET`; if a delivery manifest is found (default path `<data_dir>/<db>/datasets/<name>/manifest.json`, or the directory given by `TO`), confirms it's ready to serve. **"Doesn't exist" means "not in the current in-memory session"**, not "not on disk" — a dataset saved in an earlier process (e.g. a previous `linal run`) needs an explicit `LOAD DATASET <name>` first, even though it's already persisted; `DELIVER` itself doesn't check disk for a dataset that hasn't been loaded.
 
 ---
 
@@ -741,11 +734,22 @@ SHOW "--- Begin training phase ---"
 
 For remote execution and production workloads.
 
+### Request format
+
+`/execute` and `/jobs` (`POST`) both take the raw DSL command as the request body with
+`Content-Type: text/plain` — not JSON. `/execute` additionally accepts a legacy
+`{"command": "..."}` JSON body, but it's deprecated (the server logs a deprecation
+warning on every use); prefer `text/plain`. Append `?format=json` to `/execute` for a
+JSON response — the default response format is a plain-text "toon" encoding, not JSON.
+**`/schedule` (`POST`) is the exception**: it takes a real JSON body (`{"name": ...,
+"command": ..., "interval_secs": ..., "target_db": ...}`), since it's registering a task
+definition, not executing a command directly.
+
 ### Background Jobs
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/jobs` | `POST` | Submit a DSL command for background execution. Returns `job_id`. |
+| `/jobs` | `POST` | Submit a DSL command for background execution (`text/plain` body — see above). Returns `job_id`. |
 | `/jobs` | `GET` | List all jobs and their statuses. |
 | `/jobs/:id` | `GET` | Poll a specific job — returns `Pending`, `Running`, `Completed`, or `Failed`. |
 | `/jobs/:id/result` | `GET` | Retrieve structured `DslOutput` for a completed job. |
@@ -766,13 +770,13 @@ Submit recurring DSL commands that execute on a fixed interval:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | `GET` | Server health check. |
-| `/execute` | `POST` | Execute a DSL command synchronously. |
+| `/execute` | `POST` | Execute a DSL command synchronously (`text/plain` body, one statement per request — see "Request format" above). |
 | `/databases` | `GET` | List database instances. |
 | `/databases/:name` | `POST` | Create a database instance. |
 | `/databases/:name` | `DELETE` | Drop a database instance. |
 | `/delivery/...` | `GET` | Read-only dataset delivery endpoints. |
 
-Multi-tenant isolation is provided via the `X-Linal-Database: <db_name>` request header. Each request restores the previous active database after execution, so concurrent requests with different headers do not interfere.
+Multi-tenant isolation is provided via the `X-Linal-Database: <db_name>` request header. Each request restores the previous active database after execution, so concurrent requests with different headers do not interfere. **The target database must already exist before you address it with this header** — `CREATE DATABASE <name>` itself has to run *without* the header (or with it pointed at an existing database), since the header resolves its target before the statement runs, and the database you're trying to create doesn't exist yet.
 
 - **Graceful Shutdown**: Server handles `SIGINT`/`SIGTERM` to safely close connections.
 

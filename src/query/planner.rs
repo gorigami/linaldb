@@ -456,6 +456,14 @@ pub fn evaluate_predicate(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool 
 
 fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
     match expr {
+        // A bare column reference used as a whole predicate (`WHERE active`,
+        // no explicit `= true`) is only meaningful for a Bool column -- any
+        // other type has no defined truthiness, so it never matches (same
+        // "never silently wrong, just doesn't match" stance as an
+        // incomparable BinaryExpr below).
+        Expr::Column(name) => {
+            matches!(row.get(name), Some(crate::core::value::Value::Bool(true)))
+        }
         Expr::And(left, right) => evaluate_expr(left, row) && evaluate_expr(right, row),
         Expr::Or(left, right) => evaluate_expr(left, row) || evaluate_expr(right, row),
         Expr::Not(inner) => !evaluate_expr(inner, row),
