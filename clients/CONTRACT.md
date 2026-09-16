@@ -93,11 +93,25 @@ server.
   simplest) rather than per-row.
 - `{"Tensor": {...}}` / `{"LazyTensor": {...}}` — a standalone tensor
   result (not a table), from tensor-DSL statements like `LET spectrum =
-  FFT signal`. Structural shape (from `core::tensor::Tensor`'s derived
-  `Serialize`, not independently re-verified against a live response —
-  do that before building tensor-result support in a client): `{"id":
-  ..., "shape": {"dims": [...]}, "data": [<flat f32 array, row-major>],
-  "metadata": {...}, "strides": [...], "offset": <int>}`.
+  FFT signal`. Shape (from `core::tensor::Tensor`'s derived `Serialize`):
+  `{"id": ..., "shape": {"dims": [...]}, "data": [<f32 array>],
+  "metadata": {...}, "strides": [...], "offset": <int>}`. **`data` is the
+  tensor's raw underlying buffer, not necessarily its logical values in
+  row-major order** — a zero-copy op like `TRANSPOSE` swaps `strides`
+  (and adjusts `offset`) without copying `data`, so `data` can be longer
+  than the logical element count and/or in a different order than `shape`
+  implies on its own. `strides`/`offset` are element counts (not bytes),
+  row-major convention: the logical element at multi-index `(i, j, ...)`
+  is `data[offset + i*strides[0] + j*strides[1] + ...]` — the same model
+  `numpy.lib.stride_tricks.as_strided` uses. A client MUST reconstruct
+  logical values via `strides`/`offset`, not via a plain reshape of
+  `data` — confirmed by a real, shipped bug: `clients/python`'s
+  `TensorResult.to_numpy()` originally did a plain reshape and silently
+  returned wrong values for any transposed/strided result (fixed in
+  `linaldb-server` 0.1.1). Verified against a live server for `shape`/
+  `strides`/`offset`/`data` together (a real `TRANSPOSE` over HTTP,
+  reconstructed correctly) — see `clients/python/tests/
+  test_client_integration.py::test_transpose_over_http_to_numpy_end_to_end`.
 
 A client's `execute()` MUST raise/throw on `status: error`, surfacing the
 server's real `error` string — never synthesize a generic "request

@@ -57,16 +57,33 @@ class TableResult:
         return cls(columns, rows)
 
 
-class TensorResult:
-    """A standalone `Tensor`/`LazyTensor` result. Structural shape only
-    — see CONTRACT.md's caveat that this wasn't independently verified
-    against a live response the way `TableResult`'s shape was.
+def _default_strides(shape):
+    """Row-major (C-order) contiguous strides for `shape`, in element
+    counts -- matching the engine's `Tensor::compute_default_strides`
+    (src/core/tensor.rs): the last dimension has stride 1, accumulating
+    right-to-left. Used when the wire payload omits `strides` (the
+    assume-contiguous case).
+    """
+    strides = [0] * len(shape)
+    stride = 1
+    for i in reversed(range(len(shape))):
+        strides[i] = stride
+        stride *= shape[i]
+    return strides
 
-    `.to_numpy()` assumes a contiguous, zero-offset tensor (the common
-    case for a freshly computed `LET`/`SHOW` result); if the source is a
-    non-trivial stride/offset view, the reshape may not reflect the
-    logical data correctly — verify against a live server before relying
-    on this for sliced/transposed tensor results.
+
+class TensorResult:
+    """A standalone `Tensor`/`LazyTensor` result. Structural shape
+    verified against a live server for `shape`/`strides`/`offset`/`data`
+    (see `test_transpose_over_http_to_numpy_end_to_end` in
+    `test_client_integration.py`) -- CONTRACT.md's original caveat about
+    this not being independently verified applied to `TableResult` only
+    by the time this was checked.
+
+    `.to_numpy()` honors `strides`/`offset` exactly as the engine defines
+    them (element counts, row-major -- see `src/core/tensor.rs`), so a
+    zero-copy result like `TRANSPOSE` (which swaps strides and reuses its
+    input's buffer as-is, never copying data) reconstructs correctly.
     """
 
     def __init__(self, shape, data, strides=None, offset=0):
@@ -88,12 +105,50 @@ class TensorResult:
         )
 
     def to_numpy(self):
+        """Reconstruct this tensor's logical values as an owned
+        `numpy.ndarray`. Needed because a zero-copy engine op like
+        `TRANSPOSE` (src/engine/kernels.rs) swaps `strides` and reuses
+        the pre-transpose buffer as-is -- a plain `reshape` of `data`
+        would silently reinterpret the raw buffer in the wrong order
+        instead of raising, since it never looks at `strides`/`offset`
+        at all.
+        """
         import numpy as np
 
-        arr = np.asarray(self.data, dtype="float32")
-        if self.shape:
-            arr = arr.reshape(self.shape)
-        return arr
+        flat = np.asarray(self.data, dtype="float32")
+        shape = tuple(self.shape)
+        strides = self.strides if self.strides is not None else _default_strides(shape)
+
+        if len(strides) != len(shape):
+            raise LinalError(
+                f"Tensor wire payload shape/strides rank mismatch: "
+                f"shape={shape!r} strides={strides!r}"
+            )
+
+        offset = self.offset or 0
+        # Fail loudly instead of letting as_strided silently read past
+        # the buffer on a malformed/mismatched payload.
+        max_index = offset
+        for dim, stride in zip(shape, strides):
+            if dim > 0:
+                max_index += (dim - 1) * stride
+        if flat.size and max_index >= flat.size:
+            raise LinalError(
+                f"Tensor wire payload out of bounds: shape={shape!r} "
+                f"strides={strides!r} offset={offset!r} but data has "
+                f"only {flat.size} element(s)"
+            )
+
+        itemsize = flat.itemsize
+        view = np.lib.stride_tricks.as_strided(
+            flat[offset:],
+            shape=shape,
+            strides=tuple(s * itemsize for s in strides),
+            writeable=False,
+        )
+        # Detach from the raw/possibly-oversized/shared buffer -- callers
+        # get a normal, fully-owned array.
+        return view.copy()
 
 
 def unwrap_result(result):

@@ -6,8 +6,12 @@ engine treating vectors, matrices, and tensors as first-class citizens.
 **Status**: functional through checkpoint 5 of
 [`PYTHON_R_INTEROP_PLAN.md`](../../PYTHON_R_INTEROP_PLAN.md) — `/execute`
 and `/delivery` are both implemented and tested against a real server (22
-passing `pytest` tests, plus a real end-to-end example, see below). Not
-yet published to PyPI.
+passing `pytest` tests, plus a real end-to-end example, see below).
+Published on PyPI as [`linaldb-server`](https://pypi.org/project/linaldb-server/):
+
+```bash
+pip install linaldb-server
+```
 
 Talks to a running `linal serve` instance over its HTTP API
 (`POST /execute` for ad-hoc DSL, `/delivery/*` for real Parquet dataset
@@ -29,6 +33,15 @@ dataset = client.dataset("my_dataset")
 df = dataset.to_pandas()          # requires the `pandas` extra
 table = dataset.to_arrow()        # pyarrow.Table, no extra required
 ```
+
+A `Client`/`connect()` call with no `database=` operates on the server's
+*shared*, process-wide active database — matching the embedded CLI/REPL,
+where `USE <db>` persists for the whole session. Pass `database="..."` for
+an isolated session instead (every request then carries `X-Linal-Database`
+and is fully scoped, regardless of what any other client does concurrently).
+A bare `USE <db>` sent by a `Client` with no `database=` raises a
+`UserWarning`, since that statement mutates state shared with every other
+client connected to the same server.
 
 See [`examples/digit_classification.py`](examples/digit_classification.py)
 for a complete real-data walkthrough: it starts a real `linal serve`,
