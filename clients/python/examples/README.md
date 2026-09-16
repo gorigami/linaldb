@@ -1,9 +1,15 @@
 # Examples
 
-Real end-to-end example scripts land here in checkpoint 5 of
-`../../../PYTHON_R_INTEROP_PLAN.md` — a real `linal serve` instance,
-a real dataset (reusing an existing fixture from `examples/data/` rather
-than synthetic data), queried via `/execute` and exported via
-`/delivery`, with results cross-checked between the two paths.
+Real end-to-end example scripts against a real, running `linal serve`.
 
-Empty as of checkpoint 0 (scaffolding only).
+- **`digit_classification.py`** — starts a real `linal serve` subprocess,
+  replays the real UCI handwritten-digits classification workflow (the
+  same one `../../../examples/hdf5_digit_classification.lnl` defines)
+  through this client's `/execute`, exports the resulting datasets
+  through `/delivery`, and independently recomputes the classification in
+  plain Python/numpy from the raw exported vectors to confirm both paths
+  agree exactly. Requires `cargo build --bin linal` to have been run in
+  the repo root first (skipped, not failed, if the binary is missing).
+
+Run it with `python examples/digit_classification.py` from
+`clients/python/` (after `pip install -e ".[dev]"`).
