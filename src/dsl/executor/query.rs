@@ -1787,6 +1787,12 @@ pub(super) fn execute_transform(
                 line: line_no,
                 source: e,
             })?;
+        // The projection can change the column set (e.g. `TRANSFORM ...
+        // SELECT id, UPPER(name) AS name_upper`), so the dataset's schema
+        // has to move with its rows -- leaving the old schema in place
+        // here left the dataset permanently broken (any later read failed
+        // with a value-count mismatch against the stale schema).
+        ds.schema = schema.clone();
         ds.rows = rows;
         ds.metadata.update_stats(&ds.schema, &ds.rows);
     } else {

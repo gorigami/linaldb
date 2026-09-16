@@ -180,6 +180,47 @@ fn transform_in_place_replaces_source() {
 }
 
 #[test]
+fn transform_in_place_with_changed_schema_stays_readable() {
+    // Regression test: an in-place TRANSFORM (no INTO) whose projection
+    // changes the column set used to overwrite the dataset's rows without
+    // updating its schema, leaving it permanently broken -- any later read
+    // failed with a value-count mismatch against the stale schema. Found
+    // via linal-hub's DSL_REFERENCE.md audit (2026-09-16): the existing
+    // `transform_in_place_replaces_source` test above only uses `SELECT *`,
+    // which never changes the schema, so it never exercised this path.
+    let mut db = db();
+    exec(
+        &mut db,
+        "DATASET docs COLUMNS (id: Int, category: String, note: String)",
+    );
+    exec(&mut db, "INSERT INTO docs VALUES (1, \"x\", \"first\")");
+    exec(&mut db, "INSERT INTO docs VALUES (2, \"y\", \"second\")");
+
+    exec(
+        &mut db,
+        "TRANSFORM docs SELECT id, UPPER(category) AS category_upper WHERE id = 1",
+    );
+
+    // The dataset's own schema must reflect the new, narrower column set...
+    let schema_out = execute_line_with_context(&mut db, "SHOW SCHEMA docs", 1, None).unwrap();
+    let DslOutput::Message(schema_msg) = schema_out else {
+        panic!("expected Message from SHOW SCHEMA");
+    };
+    assert!(schema_msg.contains("category_upper"));
+    assert!(!schema_msg.contains("note"));
+
+    // ...and a later read must succeed against that same schema, not the
+    // stale 3-column one.
+    let out = execute_line_with_context(&mut db, "SELECT * FROM docs", 1, None).unwrap();
+    let table = as_table(out);
+    assert_eq!(table.rows.len(), 1);
+    assert_eq!(
+        table.rows[0].get("category_upper").unwrap(),
+        &linal::core::value::Value::String("X".to_string())
+    );
+}
+
+#[test]
 fn transform_select_star() {
     let mut db = db();
     exec(&mut db, "DATASET src COLUMNS (x: Int, y: Float)");

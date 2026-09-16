@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `Bool` column predicates silently matched zero rows instead of comparing correctly
+
+Found via a deep audit of `docs/DSL_REFERENCE.md` against a real build of the engine, done
+while building `linal-hub`'s public documentation site. `WHERE <bool_col> = 1` — the exact
+pattern this reference's own Pipeline Lifecycle example uses (`WHERE active = 1`) — and a bare
+`WHERE <bool_col>` (no explicit `= true`) both silently returned zero rows instead of matching,
+on every dataset/pipeline/`TRANSFORM` path (they all route through the same query planner).
+
+Root cause, two independent gaps in `evaluate_expr` (`src/query/planner.rs`) and
+`Value::compare` (`src/core/value.rs`): `Value::compare` had no `(Bool, Int)` arm, so `active = 1`
+compared as incomparable (`None`) rather than equal, and `evaluate_expr`'s predicate evaluator had
+no arm at all for a bare `Expr::Column` — falling through its final `_ => false` catch-all
+regardless of the column's real value.
+
+Fixed: `Value::compare` now treats `0`/`1` as `false`/`true` when comparing a `Bool` against an
+`Int` (any other integer stays incomparable, matching the existing "never guess, just don't match"
+stance for genuinely unrelated types); `evaluate_expr` now evaluates a bare `Expr::Column`
+predicate as true iff the column holds `Bool(true)`. New regression tests in
+`tests/dsl_semantics_test.rs` (`bool_column_compares_against_int_literal`,
+`bool_column_still_compares_against_bool_literal`, `bare_bool_column_is_a_valid_predicate`,
+`pipeline_where_equals_one_matches_docs_example` — the last one replaying this reference's own
+Pipeline example verbatim).
+
+### Fixed — in-place `TRANSFORM` (no `INTO`) corrupted the dataset when the projection changed columns
+
+Found in the same documentation audit as the `Bool` predicate fix above. `TRANSFORM <source>
+SELECT ... [WHERE ...]` without `INTO` overwrites `<source>` in place, per its documented
+contract — but when the projection changed the column set (e.g. selecting a subset, or an
+aliased computed column like `UPPER(category) AS category_upper`), `execute_transform`
+(`src/dsl/executor/query.rs`) overwrote the dataset's *rows* with the new, narrower shape but
+never updated its *schema* to match, leaving the dataset permanently broken — any later read
+(`SELECT *`, `SHOW`, ...) failed with `Value count mismatch: expected N, got M` against the
+stale schema. The existing `transform_in_place_replaces_source` test
+(`tests/v0132_features_test.rs`) only used `SELECT *`, which never changes the schema, so it
+never exercised this path.
+
+Fixed: the in-place branch now assigns `ds.schema` from the projection's real output schema
+before updating stats, the same way the create-new-target branch already did. New regression
+test `transform_in_place_with_changed_schema_stays_readable`.
+
 ### Fixed — `LET`/`DERIVE` with a bare-identifier RHS silently failed to bind, misreporting success
 
 Found while building a real `linal-hub` manufacturing-quality-control notebook. `LET y = x`

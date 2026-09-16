@@ -211,6 +211,12 @@ impl Value {
             (Value::Float(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
             (Value::Float64(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
             (Value::Int(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
+            // Bool vs Int: only 0/1 are treated as false/true (the common
+            // "boolean-as-integer" SQL idiom, and what `DSL_REFERENCE.md`'s
+            // own `WHERE active = 1` example assumes) -- any other integer
+            // is incomparable rather than guessing a truthiness rule for it.
+            (Value::Bool(a), Value::Int(b)) if *b == 0 || *b == 1 => Some((*a as i64).cmp(b)),
+            (Value::Int(a), Value::Bool(b)) if *a == 0 || *a == 1 => Some(a.cmp(&(*b as i64))),
             _ => None, // Vectors and Matrices not comparable for sorting currently
         }
     }
