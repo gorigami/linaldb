@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.84] - 2026-09-17
+
 ### Added — scalar `Complex` value type, `EIGENVALUES_GENERAL`/`EIGEN_GENERAL`
 
 Phase 3 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`. A new scalar `Value::Complex` (DSL type
