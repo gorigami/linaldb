@@ -135,6 +135,10 @@ pub enum AggregateFunction {
     AvgVec,
     /// Element-wise vector sum across group rows
     SumVec,
+    /// Population variance of a scalar (Int/Float/Float64) column
+    Variance,
+    /// Median of a scalar (Int/Float/Float64) column
+    Median,
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +311,14 @@ impl LogicalPlan {
                                     _ => crate::core::value::ValueType::Vector(0),
                                 };
                             }
+                            super::logical::AggregateFunction::Variance
+                            | super::logical::AggregateFunction::Median => {
+                                // Always Float64 -- both are computed in f64
+                                // throughout (Welford's algorithm / sorted
+                                // interpolation in `physical.rs`), regardless
+                                // of the input column's own numeric type.
+                                typ = crate::core::value::ValueType::Float64;
+                            }
                             _ => {}
                         }
 
@@ -367,6 +379,7 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                     _ => ValueType::Vector(0),
                 }
             }
+            AggregateFunction::Variance | AggregateFunction::Median => ValueType::Float64,
             _ => ValueType::Int,
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),

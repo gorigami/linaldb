@@ -229,6 +229,16 @@ pub enum Token {
     Mean,
     #[token("STDEV")]
     Stdev,
+    #[token("VARIANCE")]
+    Variance,
+    #[token("MEDIAN")]
+    Median,
+    #[token("QUANTILE")]
+    Quantile,
+    #[token("COVARIANCE")]
+    Covariance,
+    #[token("AT")]
+    At,
     #[token("FFT")]
     Fft,
     #[token("IFFT")]
@@ -257,6 +267,8 @@ pub enum Token {
     Inverse,
     #[token("SOLVE")]
     Solve,
+    #[token("LSTSQ")]
+    Lstsq,
     #[token("EIGENVALUES")]
     Eigenvalues,
     #[token("QR")]

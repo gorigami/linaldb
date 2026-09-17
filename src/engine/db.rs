@@ -779,9 +779,10 @@ impl TensorDb {
         ctx: &mut ExecutionContext,
         output_name: impl Into<String>,
         input_name: &str,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         self.active_instance_mut()
-            .eval_fft(ctx, output_name, input_name)
+            .eval_fft(ctx, output_name, input_name, window_fn)
     }
 
     pub fn eval_trace(
@@ -833,6 +834,17 @@ impl TensorDb {
     ) -> Result<(), EngineError> {
         self.active_instance_mut()
             .eval_solve(ctx, output_name, a_name, b_name)
+    }
+
+    pub fn eval_lstsq(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        a_name: &str,
+        b_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_lstsq(ctx, output_name, a_name, b_name)
     }
 
     pub fn eval_eigenvalues(
@@ -906,6 +918,16 @@ impl TensorDb {
             .eval_pca(ctx, output_name, input_name, components)
     }
 
+    pub fn eval_covariance_matrix(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_covariance_matrix(ctx, output_name, input_name)
+    }
+
     pub fn eval_ifft(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -932,9 +954,10 @@ impl TensorDb {
         output_name: impl Into<String>,
         input_name: &str,
         window: usize,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         self.active_instance_mut()
-            .eval_psd(ctx, output_name, input_name, window)
+            .eval_psd(ctx, output_name, input_name, window, window_fn)
     }
 
     pub fn eval_whiten(
@@ -1426,6 +1449,18 @@ impl DatabaseInstance {
                 .backend
                 .stdev(ctx, &in_tensor, new_id)
                 .map_err(EngineError::InvalidOp)?,
+            UnaryOp::Variance => self
+                .backend
+                .variance(ctx, &in_tensor, new_id)
+                .map_err(EngineError::InvalidOp)?,
+            UnaryOp::Median => self
+                .backend
+                .median(ctx, &in_tensor, new_id)
+                .map_err(EngineError::InvalidOp)?,
+            UnaryOp::Quantile(p) => self
+                .backend
+                .quantile(ctx, &in_tensor, p, new_id)
+                .map_err(EngineError::InvalidOp)?,
         };
 
         // Attach lineage
@@ -1520,6 +1555,16 @@ impl DatabaseInstance {
                 };
                 let metadata =
                     crate::core::tensor::TensorMetadata::new(new_id, None).with_lineage(lineage);
+                Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?
+            }
+            BinaryOp::Covariance => {
+                let value = self
+                    .backend
+                    .covariance(ctx, &a, &b)
+                    .map_err(EngineError::InvalidOp)?;
+                let shape = Shape::new(Vec::<usize>::new());
+                let data = vec![value];
+                let metadata = crate::core::tensor::TensorMetadata::new(new_id, None);
                 Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?
             }
         };
@@ -1811,6 +1856,45 @@ impl DatabaseInstance {
         Ok(())
     }
 
+    /// `LSTSQ a b` -- least-squares/minimum-norm solve of `a x = b` for any
+    /// shape of `a`. Never errors on a non-square or singular `a`, unlike
+    /// `SOLVE` -- see `core::linalg::lstsq`.
+    pub fn eval_lstsq(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        a_name: &str,
+        b_name: &str,
+    ) -> Result<(), EngineError> {
+        let (a_ref, kind_a) = self.get_with_kind(a_name)?;
+        let (b_ref, _kind_b) = self.get_with_kind(b_name)?;
+        let a_tensor = a_ref.clone();
+        let b_tensor = b_ref.clone();
+        let x = crate::core::linalg::lstsq(&a_tensor, &b_tensor).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let n = x.len();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "LSTSQ".to_string(),
+            inputs: vec![a_tensor.id, b_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, Shape::new(vec![n]), x, metadata)
+            .map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: kind_a,
+            },
+        );
+        Ok(())
+    }
+
     /// `EIGENVALUES a` -- real eigenvalues of a **symmetric** matrix only
     /// (Phase 8.3: guarantees real eigenvalues, no complex `Value` support
     /// needed). Vector result.
@@ -2054,6 +2138,41 @@ impl DatabaseInstance {
         Ok(())
     }
 
+    /// `COVARIANCE MATRIX a` -- feature covariance matrix. See
+    /// `core::linalg::covariance_matrix`'s doc comment for the sample
+    /// (`n - 1`) normalization convention.
+    pub fn eval_covariance_matrix(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let (data, shape) =
+            crate::core::linalg::covariance_matrix(&in_tensor).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "COVARIANCE MATRIX".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
     /// `FFT a` — real-to-complex forward FFT. Bypasses the `ComputeBackend`
     /// trait/`UnaryOp` entirely (unlike every other unary op above): FFT is
     /// a distinct algorithm from a separate crate (`realfft`), not an
@@ -2065,6 +2184,7 @@ impl DatabaseInstance {
         ctx: &mut ExecutionContext,
         output_name: impl Into<String>,
         input_name: &str,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
         let in_tensor = in_tensor_ref.clone();
@@ -2077,7 +2197,7 @@ impl DatabaseInstance {
         }
 
         let signal = in_tensor.to_logical_vec();
-        let (re, im) = crate::core::signal::fft_forward(&signal);
+        let (re, im) = crate::core::signal::fft_forward_windowed(&signal, window_fn);
         let m = re.len();
         let mut data = re;
         data.extend(im);
@@ -2086,7 +2206,10 @@ impl DatabaseInstance {
         let shape = Shape::new(vec![2, m]);
         let lineage = Lineage {
             execution_id: ctx.execution_id(),
-            operation: "FFT".to_string(),
+            operation: match window_fn {
+                crate::core::signal::WindowFunction::Rectangular => "FFT".to_string(),
+                w => format!("FFT(window={w:?})"),
+            },
             inputs: vec![in_tensor.id],
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
@@ -2215,6 +2338,7 @@ impl DatabaseInstance {
         output_name: impl Into<String>,
         input_name: &str,
         window: usize,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
         let in_tensor = in_tensor_ref.clone();
@@ -2238,14 +2362,19 @@ impl DatabaseInstance {
         }
 
         let signal = in_tensor.to_logical_vec();
-        let spectrum = crate::core::signal::psd(&signal, window);
+        let spectrum = crate::core::signal::psd(&signal, window, window_fn);
         let bins = spectrum.len();
 
         let new_id = self.store.gen_id();
         let shape = Shape::new(vec![bins]);
         let lineage = Lineage {
             execution_id: ctx.execution_id(),
-            operation: format!("PSD(window={})", window),
+            operation: match window_fn {
+                crate::core::signal::WindowFunction::Rectangular => {
+                    format!("PSD(window={})", window)
+                }
+                w => format!("PSD(window={window}, window_fn={w:?})"),
+            },
             inputs: vec![in_tensor.id],
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
@@ -2887,6 +3016,7 @@ impl DatabaseInstance {
             UnaryOp::Sum => crate::core::tensor::Expression::Sum(Box::new(inner_expr)),
             UnaryOp::Mean => crate::core::tensor::Expression::Mean(Box::new(inner_expr)),
             UnaryOp::Stdev => crate::core::tensor::Expression::Stdev(Box::new(inner_expr)),
+            UnaryOp::Variance => crate::core::tensor::Expression::Variance(Box::new(inner_expr)),
             _ => return Err(EngineError::InvalidOp(format!("Lazy {} not supported", op))),
         };
 

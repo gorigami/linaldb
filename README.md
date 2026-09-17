@@ -12,11 +12,11 @@ LINALDB is designed for developers and researchers who need the structure of a d
 - **Tensor-SQL Bridge**: Inline vector literals and SQL vector functions (`COSINE_SIM`, `L2_NORM`, `NORMALIZE`, `DOT`, `VEC_ADD`, `VEC_SCALE`) usable directly inside SELECT, WHERE, and ORDER BY clauses.
 - **Vector Aggregates**: `AVG_VEC` and `SUM_VEC` compute element-wise centroid or sum across row groups in a single GROUP BY query.
 - **Lazy Evaluation Engine**: Define computation graphs using `LAZY LET` and materialize them on-demand via `SHOW`.
-- **Numerical Aggregations**: Native `SUM`, `MEAN`, and `STDEV` operations for powerful statistical analysis.
-- **Classical Linear Algebra**: `TRACE`, `DETERMINANT`, `RANK`, `INVERSE`, `SOLVE`, `EIGENVALUES`, `CHOLESKY`, `PCA`, and the decompositions `QR`/`LU`/`EIGEN`/`SVD` — real matrix math, natively in the DSL.
+- **Numerical Aggregations**: Native `SUM`, `MEAN`, `STDEV`, `VARIANCE`, `MEDIAN`, `QUANTILE`, and `COVARIANCE`/`COVARIANCE MATRIX` operations for powerful statistical analysis.
+- **Classical Linear Algebra**: `TRACE`, `DETERMINANT`, `RANK`, `INVERSE`, `SOLVE`, `LSTSQ`, `EIGENVALUES`, `CHOLESKY`, `PCA`, and the decompositions `QR`/`LU`/`EIGEN`/`SVD` — real matrix math, natively in the DSL.
 - **Semantic Transformations**: Build zero-copy views using Reference Graphs, with real, persisted, restart-surviving lineage via `EXPLAIN LINEAGE`.
 - **Local-First & Portable**: Use it as an embedded library (like SQLite) or a multi-tenant managed server.
-- **High-Performance Ingestion**: Native zero-copy ingestion for scientific data (CSV, HDF5, Numpy, Zarr) via the new connector-based architecture.
+- **High-Performance Ingestion**: Native zero-copy ingestion for scientific data (CSV, HDF5, NetCDF, NumPy, Parquet, Zarr) via the connector-based architecture — including real CF-convention semantics for NetCDF, not just opaque bytes.
 - **Dataset Delivery & Packages**: Standardized portable packages with Parquet data and JSON metadata (Schema, Stats, Lineage).
 - **High Performance**: 2.5x speedup via SIMD, Rayon parallelization, and intelligent tensor pooling.
 
@@ -118,6 +118,10 @@ LET det = DETERMINANT m
 LET inv = INVERSE m
 VECTOR b = [4, 6]
 LET x = SOLVE m b            -- solves m @ x = b
+
+MATRIX overdetermined = [[1, 1], [2, 1], [3, 1]]
+VECTOR y = [2.1, 3.9, 6.05]
+LET fit = LSTSQ overdetermined y   -- least-squares fit; never errors on non-square/singular input
 
 -- Multi-output LET for decompositions with more than one natural result
 LET q, r = QR m

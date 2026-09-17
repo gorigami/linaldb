@@ -1329,6 +1329,8 @@ pub(super) fn agg_func_to_logical(f: &AggFuncAst) -> AggregateFunction {
         AggFuncAst::Max => AggregateFunction::Max,
         AggFuncAst::AvgVec => AggregateFunction::AvgVec,
         AggFuncAst::SumVec => AggregateFunction::SumVec,
+        AggFuncAst::Variance => AggregateFunction::Variance,
+        AggFuncAst::Median => AggregateFunction::Median,
     }
 }
 

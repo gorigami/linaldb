@@ -377,6 +377,10 @@ impl Parser {
             | Some(Token::Sum)
             | Some(Token::Mean)
             | Some(Token::Stdev)
+            | Some(Token::Variance)
+            | Some(Token::Median)
+            | Some(Token::Quantile)
+            | Some(Token::Covariance)
             | Some(Token::Fft)
             | Some(Token::Ifft)
             | Some(Token::Magnitude)
@@ -403,6 +407,7 @@ impl Parser {
             | Some(Token::Rank)
             | Some(Token::Inverse)
             | Some(Token::Solve)
+            | Some(Token::Lstsq)
             | Some(Token::Eigenvalues)
             | Some(Token::Qr)
             | Some(Token::Lu)
@@ -421,6 +426,7 @@ impl Parser {
             | Some(Token::Rank)
             | Some(Token::Inverse)
             | Some(Token::Solve)
+            | Some(Token::Lstsq)
             | Some(Token::Eigenvalues)
             | Some(Token::Qr)
             | Some(Token::Lu)
@@ -643,16 +649,53 @@ impl Parser {
             Some(Token::Sum) => CallExpr::Sum(Box::new(self.parse_simple_expr()?)),
             Some(Token::Mean) => CallExpr::Mean(Box::new(self.parse_simple_expr()?)),
             Some(Token::Stdev) => CallExpr::Stdev(Box::new(self.parse_simple_expr()?)),
-            Some(Token::Fft) => CallExpr::Fft(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Variance) => CallExpr::Variance(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Median) => CallExpr::Median(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Quantile) => {
+                let input = self.parse_simple_expr()?;
+                self.eat(&Token::At)?;
+                let p = self.eat_number()?;
+                CallExpr::Quantile {
+                    input: Box::new(input),
+                    p,
+                }
+            }
+            Some(Token::Covariance) => {
+                if self.at(&Token::Matrix) {
+                    self.advance();
+                    let input = self.parse_simple_expr()?;
+                    CallExpr::CovarianceMatrix(Box::new(input))
+                } else {
+                    let a = self.parse_simple_expr()?;
+                    self.eat(&Token::With)?;
+                    let b = self.parse_simple_expr()?;
+                    CallExpr::Covariance(Box::new(a), Box::new(b))
+                }
+            }
+            Some(Token::Fft) => {
+                let input = self.parse_simple_expr()?;
+                let window = if self.at(&Token::Window) {
+                    self.advance();
+                    Some(self.parse_window_fn_name()?)
+                } else {
+                    None
+                };
+                CallExpr::Fft {
+                    input: Box::new(input),
+                    window,
+                }
+            }
             Some(Token::Ifft) => CallExpr::Ifft(Box::new(self.parse_simple_expr()?)),
             Some(Token::Magnitude) => CallExpr::Magnitude(Box::new(self.parse_simple_expr()?)),
             Some(Token::Psd) => {
                 let input = self.parse_simple_expr()?;
                 self.eat(&Token::Window)?;
                 let window = self.eat_usize()?;
+                let window_fn = self.parse_optional_window_fn_name();
                 CallExpr::Psd {
                     input: Box::new(input),
                     window,
+                    window_fn,
                 }
             }
             Some(Token::Whiten) => {
@@ -725,6 +768,11 @@ impl Parser {
                 let a = self.parse_simple_expr()?;
                 let b = self.parse_simple_expr()?;
                 CallExpr::Solve(Box::new(a), Box::new(b))
+            }
+            Some(Token::Lstsq) => {
+                let a = self.parse_simple_expr()?;
+                let b = self.parse_simple_expr()?;
+                CallExpr::Lstsq(Box::new(a), Box::new(b))
             }
             Some(Token::Eigenvalues) => CallExpr::Eigenvalues(Box::new(self.parse_simple_expr()?)),
             Some(Token::Qr) => CallExpr::Qr(Box::new(self.parse_simple_expr()?)),
@@ -847,5 +895,43 @@ impl Parser {
 
     fn token_can_start_simple_expr_opt(tok: Option<&Token>) -> bool {
         tok.is_some_and(Self::token_can_start_simple_expr)
+    }
+
+    /// Consumes and returns a window function name (`HANN`/`HAMMING`) --
+    /// required position, used right after `FFT a WINDOW`. `HANN`/
+    /// `HAMMING` are plain identifiers, not reserved keywords (matching
+    /// how `AVG`/`COUNT`/`MIN`/`MAX` are recognized by text in SQL
+    /// aggregate parsing), so there's no dedicated `Token` variant for
+    /// either.
+    fn parse_window_fn_name(&mut self) -> Result<WindowFnAst, ParseError> {
+        match self.peek() {
+            Some(Token::Ident(s)) if s == "HANN" => {
+                self.advance();
+                Ok(WindowFnAst::Hann)
+            }
+            Some(Token::Ident(s)) if s == "HAMMING" => {
+                self.advance();
+                Ok(WindowFnAst::Hamming)
+            }
+            _ => Err(self.error("expected a window function name (HANN or HAMMING) after WINDOW")),
+        }
+    }
+
+    /// Same as `parse_window_fn_name`, but optional (no error, `None`) when
+    /// the next token isn't a recognized window function name -- used
+    /// after `PSD a WINDOW <n>`, where a trailing window function name is
+    /// optional (default: unwindowed/rectangular).
+    fn parse_optional_window_fn_name(&mut self) -> Option<WindowFnAst> {
+        match self.peek() {
+            Some(Token::Ident(s)) if s == "HANN" => {
+                self.advance();
+                Some(WindowFnAst::Hann)
+            }
+            Some(Token::Ident(s)) if s == "HAMMING" => {
+                self.advance();
+                Some(WindowFnAst::Hamming)
+            }
+            _ => None,
+        }
     }
 }

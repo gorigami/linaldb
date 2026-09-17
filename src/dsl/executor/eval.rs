@@ -290,12 +290,49 @@ fn eval_call(
             }
             .map_err(eng)
         }
+        CallExpr::Variance(a) => {
+            let a = operand!(a, "a");
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Variance)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Variance)
+            }
+            .map_err(eng)
+        }
+        CallExpr::Median(a) => {
+            let a = operand!(a, "a");
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Median)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Median)
+            }
+            .map_err(eng)
+        }
+        CallExpr::Quantile { input, p } => {
+            let a = operand!(input, "a");
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Quantile(*p))
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Quantile(*p))
+            }
+            .map_err(eng)
+        }
+        CallExpr::Covariance(a, b) => {
+            let (a, b) = (operand!(a, "a"), operand!(b, "b"));
+            db.eval_binary(ctx, output, &a, &b, BinaryOp::Covariance)
+                .map_err(eng)
+        }
+        CallExpr::CovarianceMatrix(a) => {
+            let a = operand!(a, "a");
+            db.eval_covariance_matrix(ctx, output, &a).map_err(eng)
+        }
         // FFT/IFFT bypass eval_unary/UnaryOp (see eval_fft's doc comment)
         // and have no lazy form yet, mirroring Transpose/Correlate/
         // Similarity/Distance above.
-        CallExpr::Fft(a) => {
-            let a = operand!(a, "a");
-            db.eval_fft(ctx, output, &a).map_err(eng)
+        CallExpr::Fft { input, window } => {
+            let a = operand!(input, "a");
+            db.eval_fft(ctx, output, &a, window_fn_to_signal(window.as_ref()))
+                .map_err(eng)
         }
         CallExpr::Ifft(a) => {
             let a = operand!(a, "a");
@@ -305,9 +342,20 @@ fn eval_call(
             let a = operand!(a, "a");
             db.eval_magnitude(ctx, output, &a).map_err(eng)
         }
-        CallExpr::Psd { input, window } => {
+        CallExpr::Psd {
+            input,
+            window,
+            window_fn,
+        } => {
             let a = operand!(input, "a");
-            db.eval_psd(ctx, output, &a, *window).map_err(eng)
+            db.eval_psd(
+                ctx,
+                output,
+                &a,
+                *window,
+                window_fn_to_signal(window_fn.as_ref()),
+            )
+            .map_err(eng)
         }
         CallExpr::Whiten { signal, psd } => {
             let (signal, psd) = (operand!(signal, "signal"), operand!(psd, "psd"));
@@ -374,6 +422,10 @@ fn eval_call(
         CallExpr::Solve(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
             db.eval_solve(ctx, output, &a, &b).map_err(eng)
+        }
+        CallExpr::Lstsq(a, b) => {
+            let (a, b) = (operand!(a, "a"), operand!(b, "b"));
+            db.eval_lstsq(ctx, output, &a, &b).map_err(eng)
         }
         CallExpr::Eigenvalues(a) => {
             let a = operand!(a, "a");
@@ -468,9 +520,15 @@ pub(super) fn eval_let_multi(
         CallExpr::Rank(_) => return not_multi_output("RANK"),
         CallExpr::Inverse(_) => return not_multi_output("INVERSE"),
         CallExpr::Solve(_, _) => return not_multi_output("SOLVE"),
+        CallExpr::Lstsq(_, _) => return not_multi_output("LSTSQ"),
         CallExpr::Eigenvalues(_) => return not_multi_output("EIGENVALUES"),
         CallExpr::Cholesky(_) => return not_multi_output("CHOLESKY"),
         CallExpr::Pca { .. } => return not_multi_output("PCA"),
+        CallExpr::Variance(_) => return not_multi_output("VARIANCE"),
+        CallExpr::Median(_) => return not_multi_output("MEDIAN"),
+        CallExpr::Quantile { .. } => return not_multi_output("QUANTILE"),
+        CallExpr::Covariance(_, _) => return not_multi_output("COVARIANCE"),
+        CallExpr::CovarianceMatrix(_) => return not_multi_output("COVARIANCE MATRIX"),
         _ => {
             return Err(DslError::Parse {
                 line: line_no,
@@ -533,6 +591,26 @@ pub(super) fn infix_to_binary_op(op: InfixOp) -> BinaryOp {
         InfixOp::Multiply => BinaryOp::Multiply,
         InfixOp::Divide => BinaryOp::Divide,
         _ => unreachable!("comparison operators cannot appear in tensor expressions"),
+    }
+}
+
+/// Converts the DSL-layer `WindowFnAst` (or its absence) into the
+/// engine-layer `core::signal::WindowFunction` -- the same
+/// parse-AST-to-engine-type conversion pattern `agg_func_to_logical` uses
+/// for `AggFuncAst`/`AggregateFunction`, kept at this DSL/engine boundary
+/// so `core::signal` doesn't need to depend on `dsl::ast`.
+fn window_fn_to_signal(w: Option<&WindowFnAst>) -> crate::core::signal::WindowFunction {
+    match w {
+        None => crate::core::signal::WindowFunction::Rectangular,
+        Some(WindowFnAst::Hann) => crate::core::signal::WindowFunction::Hann,
+        Some(WindowFnAst::Hamming) => crate::core::signal::WindowFunction::Hamming,
+    }
+}
+
+fn window_fn_ast_to_string(w: &WindowFnAst) -> &'static str {
+    match w {
+        WindowFnAst::Hann => "HANN",
+        WindowFnAst::Hamming => "HAMMING",
     }
 }
 
@@ -711,12 +789,40 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Sum(a) => format!("SUM {}", expr_to_string(a)),
         CallExpr::Mean(a) => format!("MEAN {}", expr_to_string(a)),
         CallExpr::Stdev(a) => format!("STDEV {}", expr_to_string(a)),
-        CallExpr::Fft(a) => format!("FFT {}", expr_to_string(a)),
+        CallExpr::Variance(a) => format!("VARIANCE {}", expr_to_string(a)),
+        CallExpr::Median(a) => format!("MEDIAN {}", expr_to_string(a)),
+        CallExpr::Quantile { input, p } => format!("QUANTILE {} AT {}", expr_to_string(input), p),
+        CallExpr::Covariance(a, b) => {
+            format!(
+                "COVARIANCE {} WITH {}",
+                expr_to_string(a),
+                expr_to_string(b)
+            )
+        }
+        CallExpr::CovarianceMatrix(a) => format!("COVARIANCE MATRIX {}", expr_to_string(a)),
+        CallExpr::Fft { input, window } => match window {
+            Some(w) => format!(
+                "FFT {} WINDOW {}",
+                expr_to_string(input),
+                window_fn_ast_to_string(w)
+            ),
+            None => format!("FFT {}", expr_to_string(input)),
+        },
         CallExpr::Ifft(a) => format!("IFFT {}", expr_to_string(a)),
         CallExpr::Magnitude(a) => format!("MAGNITUDE {}", expr_to_string(a)),
-        CallExpr::Psd { input, window } => {
-            format!("PSD {} WINDOW {}", expr_to_string(input), window)
-        }
+        CallExpr::Psd {
+            input,
+            window,
+            window_fn,
+        } => match window_fn {
+            Some(w) => format!(
+                "PSD {} WINDOW {} {}",
+                expr_to_string(input),
+                window,
+                window_fn_ast_to_string(w)
+            ),
+            None => format!("PSD {} WINDOW {}", expr_to_string(input), window),
+        },
         CallExpr::Whiten { signal, psd } => {
             format!(
                 "WHITEN {} WITH {}",
@@ -757,6 +863,7 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Rank(a) => format!("RANK {}", expr_to_string(a)),
         CallExpr::Inverse(a) => format!("INVERSE {}", expr_to_string(a)),
         CallExpr::Solve(a, b) => format!("SOLVE {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Lstsq(a, b) => format!("LSTSQ {} {}", expr_to_string(a), expr_to_string(b)),
         CallExpr::Eigenvalues(a) => format!("EIGENVALUES {}", expr_to_string(a)),
         CallExpr::Qr(a) => format!("QR {}", expr_to_string(a)),
         CallExpr::Lu(a) => format!("LU {}", expr_to_string(a)),

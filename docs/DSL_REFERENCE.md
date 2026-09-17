@@ -139,6 +139,34 @@ LINAL provides two ways to perform math: Functional keywords and Infix operators
   (e.g. `v - SUM v`) instead of being treated as a same-rank vector of differing length.
 - `MEAN a`: Arithmetic mean of all elements. Result is a true scalar (rank-0), same as `SUM`.
 - `STDEV a`: Standard deviation of all elements. Result is a true scalar (rank-0), same as `SUM`.
+- `VARIANCE a`: Population variance of all elements (`STDEV a` squared — the two share one code
+  path, so they're always numerically consistent). Result is a true scalar (rank-0), same as `SUM`.
+  Supports `LAZY`, like `SUM`/`MEAN`/`STDEV`.
+- `MEDIAN a`: Median of all elements, flattened and sorted (any rank). Averages the two middle
+  values on an even element count. Result is a true scalar (rank-0).
+- `QUANTILE a AT p`: The `p`-th quantile (`0.0..=1.0`) of all elements, flattened and sorted, via
+  linear interpolation between the two nearest ranks (numpy's default `linear` method) — so
+  `QUANTILE a AT 0.5` matches `MEDIAN a` exactly. Result is a true scalar (rank-0).
+- `COVARIANCE a WITH b`: Population covariance between two same-shape tensors, treating
+  corresponding (flattened, row-major) elements as paired samples. Result is a true scalar
+  (rank-0).
+- `COVARIANCE MATRIX a`: Feature covariance matrix of `a` (rows = samples, columns = features):
+  mean-centers each column, then `(centeredᵗ * centered) / (rows - 1)` — the standard *sample*
+  covariance matrix (Bessel's correction), matching numpy's `cov` default. **Note the different
+  normalization from `COVARIANCE a WITH b` above** (`n` vs. `n - 1`) — two different statistics
+  serving different purposes, not an inconsistency. `a` must have at least 2 rows. Result is a
+  `Matrix(cols, cols)`.
+
+```sql
+VECTOR v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+LET var = VARIANCE v          -- 8.25 (STDEV v squared)
+LET med = MEDIAN v            -- 5.5
+LET p90 = QUANTILE v AT 0.9   -- 9.1
+VECTOR w = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+LET cov = COVARIANCE v WITH w -- -8.25 (perfectly anti-correlated)
+MATRIX samples = [[1,2],[2,1],[3,4],[4,3],[5,6]]
+LET cm = COVARIANCE MATRIX samples   -- Matrix(2, 2), sample covariance
+```
 
 ### Lazy Evaluation
 
@@ -167,10 +195,10 @@ LET scaled = m_a * 10
 
 ### Frequency-Domain Operators
 
-- `FFT a`: Real-to-complex forward Fast Fourier Transform. `a` must be a rank-1 `Vector(N)`. Result is a `Matrix(2, N/2+1)` — **row 0 is the real part, row 1 is the imaginary part** of each frequency bin (only non-negative frequencies are computed, since a real input signal's spectrum is symmetric — this is the standard real-input FFT optimization, not a data loss).
+- `FFT a [WINDOW HANN|HAMMING]`: Real-to-complex forward Fast Fourier Transform. `a` must be a rank-1 `Vector(N)`. Result is a `Matrix(2, N/2+1)` — **row 0 is the real part, row 1 is the imaginary part** of each frequency bin (only non-negative frequencies are computed, since a real input signal's spectrum is symmetric — this is the standard real-input FFT optimization, not a data loss). The optional `WINDOW` clause applies a Hann or Hamming window to `a` before transforming, to reduce spectral leakage — omitting it is the original unwindowed (rectangular) behavior. `HANN`/`HAMMING` are plain identifiers, not reserved keywords.
 - `IFFT a`: Complex-to-real inverse FFT. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces). Result is a real `Vector`. **Assumes the original signal length was even** (reconstructs length `2*(M-1)`) — the spectrum alone can't distinguish an even- from an odd-length source signal (both produce the same `M`), and there is currently no side-channel carrying the true length through the DSL layer. If you need an odd-length round trip, keep the original vector around rather than relying on `IFFT` to recover its exact length.
 - `MAGNITUDE a`: Power/magnitude spectrum. `a` must be a `Matrix(2, M)` spectrum (as `FFT` produces). Result is a real `Vector(M)`, `sqrt(re² + im²)` per bin. The convenience most whitening/PSD-estimation work actually needs without touching phase.
-- `PSD a WINDOW n`: Power spectral density (noise-floor) estimate via averaged periodograms. `a` must be a rank-1 `Vector` at least `n` samples long; splits it into non-overlapping `n`-sample chunks (any remainder that doesn't fill a full chunk is dropped), computes each chunk's power spectrum, and averages them elementwise. Result is a real `Vector(n/2+1)`. **Simplified vs. textbook Welch's method**: no 50% chunk overlap, and no window function (Hann/Hamming/etc.) applied before each chunk's FFT — good enough for noise-floor estimation, not a research-grade PSD estimator.
+- `PSD a WINDOW n [HANN|HAMMING]`: Power spectral density (noise-floor) estimate via averaged periodograms. `a` must be a rank-1 `Vector` at least `n` samples long; splits it into non-overlapping `n`-sample chunks (any remainder that doesn't fill a full chunk is dropped), computes each chunk's power spectrum, and averages them elementwise. Result is a real `Vector(n/2+1)`. The optional trailing `HANN`/`HAMMING` applies that window function to each chunk before its FFT (omitting it is the original unwindowed behavior). **Still simplified vs. textbook Welch's method**: no 50% chunk overlap, even with a window function applied — good enough for noise-floor estimation, not a research-grade PSD estimator.
 - `WHITEN a WITH b`: Flattens `a`'s noise spectrum against a PSD estimate `b` (as `PSD` produces): divides each bin of `FFT(a)` by `sqrt(b[bin])`, then inverse-transforms back to the time domain. `b` must have exactly `a.len()/2+1` entries — the same spectrum length `FFT(a)` itself would produce (in practice, estimate it with `PSD a WINDOW <a's own length>`, a single-chunk periodogram; resampling a PSD estimated at a different window size onto a longer signal is not implemented). Result is a real `Vector` the same length as `a`. The standard first step before matched filtering — pulling a real signal out of instrument noise needs the noise spectrum flattened first, or a loud broadband frequency band silently dominates over the signal you're looking for.
 - `BANDPASS a FROM low_hz TO high_hz WITH RATE sample_rate`: Brick-wall bandpass filter — zeros every FFT bin whose frequency (`bin_index * sample_rate / a.len()`) falls outside `[low_hz, high_hz]`, then inverse-transforms back to the time domain. `a` must be a rank-1 `Vector`. Result is a real `Vector` the same length as `a`. **Simplified vs. a real filter design** (IIR/FIR with a proper transition band, e.g. Butterworth/Chebyshev): a hard bin cutoff introduces ringing (Gibbs phenomenon) at sharp edges, unlike a designed filter's smooth rolloff.
 - `MATCHED_FILTER a WITH b`: FFT-based cross-correlation — `IFFT(FFT(a) * conj(FFT(b)))` — the standard real-world signal-detection statistic: the peak of the result (by absolute value) marks the best-matching lag between `a` (the data being searched) and `b` (the template being searched for). `a`/`b` must be rank-1 `Vector`s of the same length; result is a real `Vector` that length. **The peak lag is relative to `b`'s own reference point, not an absolute location in `a`** — if the feature `b` is modeling sits at index `c` within `b`'s own buffer, and `a`'s copy of that feature is truly at index `s`, the correlation peaks at `s - c`, not at `s` directly; recover the true location as `peak_lag + c`. Also computes **circular correlation, not linear correlation** (the FFT-multiply trick wraps around at the buffer edges) — fine for a peak safely inside the buffer, not for a match expected right at the boundary.
@@ -208,6 +236,7 @@ history.
 - `RANK a`: Numerical rank via singular value decomposition. Result is a true scalar, integer-valued (e.g. `2.0`) — no new scalar `Value` variant for an integer result.
 - `INVERSE a`: `a` must be a square `Matrix`. Result is a `Matrix` the same shape. **Errors if `a` is singular** — never returns a matrix full of `NaN`/`Inf`.
 - `SOLVE a b`: Solves `a x = b` for `x` via LU decomposition with partial pivoting. `a` must be square; `b` a `Vector` with length matching `a`'s row count. Result is a `Vector`. **Errors if `a` is singular.**
+- `LSTSQ a b`: Least-squares (minimum-norm) solve of `a x = b` for **any** shape of `a` — over-determined, under-determined, or square-but-singular — via the Moore-Penrose pseudo-inverse (SVD-based). `b` a `Vector` with length matching `a`'s row count. Result is a `Vector`. **Never errors on a non-square or singular `a`**, unlike `SOLVE` — the two are deliberately distinct keywords, not one polymorphic operator, so `SOLVE` keeps erroring loudly on non-square input rather than silently falling back to least-squares.
 - `EIGENVALUES a`: Real eigenvalues of a **symmetric** matrix only (guarantees real results — no complex-number `Value` support exists). `a` must be square and symmetric (checked within a relative numerical tolerance; a non-symmetric input errors rather than silently producing a wrong answer). Result is a `Vector` of eigenvalues in no particular guaranteed order.
 - `CHOLESKY a`: Cholesky decomposition (`a = L * Lᵗ`) of a symmetric **positive-definite** matrix. Result is the lower-triangular `Matrix` `L`. **Errors if `a` isn't positive-definite.**
 - `PCA a COMPONENTS k`: Projects `a`'s rows (samples) onto their top-`k` principal components — mean-centers each column, then keeps the top-`k` components of the centered data's SVD. `k` must be between 1 and `a`'s column count. Result is a `Matrix` with the same row count as `a` and `k` columns. Built directly on `SVD` below.
@@ -226,6 +255,10 @@ LET det = DETERMINANT m    -- 10.0
 LET inv = INVERSE m        -- Matrix(2, 2)
 VECTOR b = [4, 6]
 LET x = SOLVE m b          -- Vector(2): solves m @ x = b
+
+MATRIX overdetermined = [[1, 1], [2, 1], [3, 1]]
+VECTOR y = [2.1, 3.9, 6.05]
+LET fit = LSTSQ overdetermined y   -- Vector(2): least-squares [slope, intercept]
 
 LET q, r = QR m            -- multi-output LET: two names, one expression
 LET p, l, u = LU m
@@ -331,7 +364,8 @@ HAVING AVG(score) > 0.5
 LIMIT 10
 ```
 
-- **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `AVG_VEC`, `SUM_VEC`. A `SELECT` with an aggregate and no `GROUP BY` computes a single "global" aggregate row over the whole result set (e.g. `SELECT COUNT(*) FROM t`).
+- **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `AVG_VEC`, `SUM_VEC`, `VARIANCE`, `MEDIAN`. A `SELECT` with an aggregate and no `GROUP BY` computes a single "global" aggregate row over the whole result set (e.g. `SELECT COUNT(*) FROM t`).
+- **`VARIANCE(col)`/`MEDIAN(col)`**: population variance and median of a scalar (`Int`/`Float`/`Float64`) column, computed per group (or globally, with no `GROUP BY`) exactly like `SUM`/`AVG`. Both always produce a `DOUBLE` result regardless of the input column's own numeric type. Neither is supported as a window function (`OVER`) — `SELECT VARIANCE(x) OVER (...)` is a parse error, not a silently wrong result.
 - **`HAVING` on an aliased aggregate**: `HAVING` resolves an aggregate by alias too, not just by its bare call — `SELECT region, AVG(score) AS avg_score FROM diagnostics GROUP BY region HAVING avg_score > 0.5` matches rows the same as `HAVING AVG(score) > 0.5` would.
 - **Filtering**: `WHERE` or `FILTER` can be used interchangeably.
 - **`DISTINCT`**: `SELECT DISTINCT <cols> FROM ...` removes duplicate rows from the result.
@@ -521,11 +555,11 @@ SELECT SUBSTR(name, 1, 3) AS prefix, UPPER(TRIM(email)) AS clean_email FROM user
 
 Load and save data across different formats.
 
-- `USE DATASET FROM "path" [AS name] [FIELDS (name1, name2, ...)]`: Load external data (CSV, HDF5, Numpy, Zarr) into the current session as ephemeral tensors and a dataset view.
-  - Automatically detects format from file extension (`.csv`, `.h5`, `.npy`, `.npz`, `.zarr`).
+- `USE DATASET FROM "path" [AS name] [FIELDS (name1, name2, ...)]`: Load external data (CSV, HDF5, NetCDF, NumPy, Parquet, Zarr) into the current session as ephemeral tensors and a dataset view.
+  - Automatically detects format from file extension (`.csv`, `.h5`/`.hdf5`/`.h5ad`, `.nc`, `.npy`, `.npz`, `.parquet`, `.zarr`).
   - `FIELDS (...)`: explicitly pick which named columns/datasets/arrays to ingest, by exact name. Without it, a source that bundles fields of different shapes (e.g. an HDF5 file with a `(10, 64)` array and a `(7,)` array) keeps whichever fields share the first-encountered one's shape and silently-but-loudly skips the rest (reported as a warning). With `FIELDS`, only the named fields are read — a name that doesn't exist in the source, or a set of named fields that can't share one row count, is a hard error instead of a skip, since you've said exactly what you want.
 - `IMPORT DATASET FROM "path" [AS name] [FIELDS (name1, name2, ...)]`: Load and normalize external data into a persistent LINAL Dataset Package.
-  - Supports CSV, HDF5, Numpy, and Zarr. `FIELDS (...)` works the same way as for `USE DATASET FROM` above.
+  - Supports CSV, HDF5, NetCDF, NumPy, Parquet, and Zarr. `FIELDS (...)` works the same way as for `USE DATASET FROM` above.
 - `IMPORT CSV FROM "path" AS name`: (Legacy) Auto-infer schema and load CSV into a relational dataset.
 - `EXPORT [CSV] name TO "path"`: Save dataset to CSV. The `CSV` keyword is optional — `EXPORT name TO "path"` behaves identically. A `Vector`/`Matrix` column is written as a JSON string per cell (e.g. `{"Vector":[1.0,2.0,3.0]}`), the same encoding `SAVE DATASET`'s legacy fallback uses — CSV has no native representation for nested/list data. Use `SAVE DATASET` instead for a native binary (Parquet `FixedSizeList`) encoding of vector/matrix data.
 - `SAVE DATASET name [TO "path"]`: Persist to Parquet (includes metadata/lineage).
@@ -543,8 +577,19 @@ Load and save data across different formats.
 
 LINAL supports direct ingestion of multi-dimensional data:
 
-- **HDF5**: Ingests datasets from groups; flattens them into columns.
+- **HDF5**: Ingests datasets from groups; flattens them into columns. `.h5`/`.hdf5`/`.h5ad`
+  files are read as opaque generic containers (no attribute interpretation) — see **NetCDF**
+  below for the CF-aware alternative.
+- **NetCDF** (`.nc`): Real CF-convention semantics, not just opaque HDF5 bytes (NetCDF4 files
+  are HDF5 under the hood). Per variable: `scale_factor`/`add_offset` unpacking
+  (`unpacked = raw * scale_factor + add_offset`), `_FillValue`/`missing_value` mapped to `NaN`,
+  and `units`/`standard_name`/`long_name` surfaced as column metadata (visible via `SHOW SCHEMA`).
+  Scoped to float-stored variables — integer-packed variables (the classic raw-satellite-data
+  case) aren't supported, since this engine's connectors are float-only throughout.
 - **Numpy**: Supports `.npy` (single vector/matrix) and `.npz` (named collections).
+- **Parquet** (`.parquet`): Generic external Parquet ingestion (e.g. a Pandas/Arrow/Spark
+  export) — distinct from `SAVE`/`LOAD DATASET`'s own internal Parquet dataset-package format,
+  which never goes through `USE`/`IMPORT DATASET FROM` at all.
 - **Zarr**: Supports V3 Zarr stores with recursive group traversal.
 
 A source file can bundle several fields of different shapes (e.g. an HDF5

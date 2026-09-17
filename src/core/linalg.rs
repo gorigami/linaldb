@@ -160,6 +160,48 @@ pub fn solve(a_tensor: &Tensor, b_tensor: &Tensor) -> Result<Vec<f32>, String> {
     Ok(x.iter().map(|&v| v as f32).collect())
 }
 
+/// `LSTSQ a b` -- least-squares (minimum-norm) solve of `a x = b` for any
+/// shape of `a`: over-determined (more rows than columns), under-determined,
+/// or exactly square-but-singular. Unlike `SOLVE`, this never errors on a
+/// non-square or singular `a` -- it's built on the Moore-Penrose
+/// pseudo-inverse (via the same SVD `svd()` above already computes), which
+/// is defined for every matrix shape and rank. `b` must still be a rank-1
+/// Vector whose length matches `a`'s row count.
+pub fn lstsq(a_tensor: &Tensor, b_tensor: &Tensor) -> Result<Vec<f32>, String> {
+    let a = tensor_to_matrix(a_tensor)?;
+
+    if b_tensor.shape.rank() != 1 {
+        return Err(format!(
+            "LSTSQ: b must be a rank-1 Vector, got rank {} (shape {:?})",
+            b_tensor.shape.rank(),
+            b_tensor.shape.dims
+        ));
+    }
+    if b_tensor.shape.dims[0] != a.nrows() {
+        return Err(format!(
+            "LSTSQ: b has length {} but a has {} rows -- lengths must match",
+            b_tensor.shape.dims[0],
+            a.nrows()
+        ));
+    }
+
+    let b_data: Vec<f64> = b_tensor
+        .to_logical_vec()
+        .iter()
+        .map(|&v| v as f64)
+        .collect();
+    let b = nalgebra::DVector::from_vec(b_data);
+
+    let svd = a.clone().svd(true, true);
+    let max_singular = svd.singular_values.iter().cloned().fold(0.0, f64::max);
+    let eps = REL_EPSILON * max_singular.max(1.0);
+    let pinv = svd
+        .pseudo_inverse(eps)
+        .map_err(|e| format!("LSTSQ: failed to compute pseudo-inverse ({e})"))?;
+    let x = pinv * b;
+    Ok(x.iter().map(|&v| v as f32).collect())
+}
+
 /// `EIGENVALUES a` -- real eigenvalues of a **symmetric** matrix only
 /// (guarantees real eigenvalues, no complex-number `Value`/`ValueType`
 /// support needed -- see `LINEAGE_AND_LINALG_PLAN.md` Phase 8.3). Errors if
@@ -339,6 +381,36 @@ pub fn pca(tensor: &Tensor, k: usize) -> Result<MatrixData, String> {
     Ok(matrix_to_tensor_data(&projected))
 }
 
+/// `COVARIANCE MATRIX a` -- feature covariance matrix of `a` (rows =
+/// samples, columns = features): mean-center each column (same convention
+/// `pca` above uses), then `(centered^T * centered) / (rows - 1)`, the
+/// standard *sample* covariance matrix (Bessel's correction, dividing by
+/// `n - 1`) -- the conventional normalization for a features-by-features
+/// covariance matrix (matches numpy's `cov` default). Deliberately a
+/// different normalization than `engine::kernels::variance`/`covariance`'s
+/// *population* convention (`n`, not `n - 1`) -- two different statistics
+/// serving different purposes, not an inconsistency to "fix".
+pub fn covariance_matrix(tensor: &Tensor) -> Result<MatrixData, String> {
+    let m = tensor_to_matrix(tensor)?;
+    let (rows, cols) = (m.nrows(), m.ncols());
+    if rows < 2 {
+        return Err(format!(
+            "COVARIANCE MATRIX: needs at least 2 samples (rows), got {rows}"
+        ));
+    }
+
+    let mut centered = m.clone();
+    for j in 0..cols {
+        let mean: f64 = centered.column(j).iter().sum::<f64>() / rows as f64;
+        for i in 0..rows {
+            centered[(i, j)] -= mean;
+        }
+    }
+
+    let cov = (centered.transpose() * &centered) / (rows as f64 - 1.0);
+    Ok(matrix_to_tensor_data(&cov))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +506,42 @@ mod tests {
         let a = matrix_tensor(2, 2, vec![1.0, 2.0, 2.0, 4.0]);
         let b = vector_tensor(vec![1.0, 2.0]);
         assert!(solve(&a, &b).is_err());
+    }
+
+    #[test]
+    fn lstsq_matches_solve_on_exact_square_system() {
+        // [[2,0],[0,2]] x = [4, 6] -> x = [2, 3], same system `solve` covers.
+        let a = matrix_tensor(2, 2, vec![2.0, 0.0, 0.0, 2.0]);
+        let b = vector_tensor(vec![4.0, 6.0]);
+        let x = lstsq(&a, &b).unwrap();
+        assert!((x[0] - 2.0).abs() < 1e-4);
+        assert!((x[1] - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lstsq_fits_overdetermined_linear_regression() {
+        // y = 2x, sampled at x = 1, 2, 3 with y = [2, 4, 6.1] (near-exact,
+        // one point off) -- least-squares slope should land close to 2.
+        let a = matrix_tensor(3, 1, vec![1.0, 2.0, 3.0]);
+        let b = vector_tensor(vec![2.0, 4.0, 6.1]);
+        let x = lstsq(&a, &b).unwrap();
+        assert!((x[0] - 2.0).abs() < 0.05, "slope was {}", x[0]);
+    }
+
+    #[test]
+    fn lstsq_never_errors_on_singular_square_system() {
+        // Same singular system `solve` rejects -- `lstsq` returns the
+        // minimum-norm solution instead of erroring.
+        let a = matrix_tensor(2, 2, vec![1.0, 2.0, 2.0, 4.0]);
+        let b = vector_tensor(vec![1.0, 2.0]);
+        assert!(lstsq(&a, &b).is_ok());
+    }
+
+    #[test]
+    fn lstsq_rejects_mismatched_b_length() {
+        let a = matrix_tensor(3, 2, vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        let b = vector_tensor(vec![1.0, 2.0]);
+        assert!(lstsq(&a, &b).is_err());
     }
 
     #[test]

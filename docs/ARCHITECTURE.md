@@ -171,8 +171,20 @@ The core module contains fundamental data structures and abstractions:
 #### `connectors/` (Scientific Ingestion)
 
 - **Connector**: Trait for format-specific ingestion (translation only).
-- **ConnectorRegistry**: Global registry for format handlers.
+- **ConnectorRegistry**: Global registry for format handlers (`get_connector_registry()`,
+  `dsl/persistence.rs`) — first-`can_handle`-match-wins, so registration order matters when two
+  connectors could claim the same extension (see **NetCdfConnector** below).
 - **CsvConnector**: High-performance Arrow-based CSV ingestion.
+- **NetCdfConnector** (`.nc`, Phase 1 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`): real CF-convention
+  semantics (`scale_factor`/`add_offset` unpacking, `_FillValue`→`NaN`, `units`/`standard_name`/
+  `long_name` as field metadata) built directly on the `hdf5-metno` crate already a dependency
+  (NetCDF4 is HDF5 under the hood — no new dependency needed). Registered *before*
+  `Hdf5Connector` in `get_connector_registry()`, since `Hdf5Connector::can_handle` still lists
+  `.nc` too; `.h5`/`.h5ad` are unaffected (`NetCdfConnector` doesn't claim either).
+- **ParquetConnector** (`.parquet`): generic external Parquet ingestion via
+  `USE`/`IMPORT DATASET FROM`, distinct from `core::storage::ParquetStorage` (the internal
+  dataset-package format `SAVE`/`LOAD DATASET` use, reached through a completely different code
+  path that never touches the connector registry).
 
 #### `signal.rs` (Frequency-Domain Primitives, v0.1.63+)
 
@@ -529,7 +541,7 @@ FROM docs GROUP BY category
 
 #### Scientific Dataset Ingestion
 
-LINAL implements a connector-based architecture for high-performance scientific data (HDF5, Numpy, Zarr, CSV, etc.):
+LINAL implements a connector-based architecture for high-performance scientific data (HDF5, NetCDF, Numpy, Parquet, Zarr, CSV, etc.):
 
 1. **Connector Isolation**: Connectors are responsible ONLY for translating external formats into Arrow `RecordBatch`es.
 2. **Ephemeral Context (USE)**: `USE DATASET FROM` loads data directly into memory as tensors and registers a temporary dataset view. No persistence on disk.

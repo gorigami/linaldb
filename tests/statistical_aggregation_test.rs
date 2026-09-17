@@ -56,6 +56,67 @@ fn test_statistical_aggregations() {
         }
         _ => panic!("Expected Tensor output from SHOW"),
     }
+
+    // 6. Test VARIANCE -- same v1, should be STDEV's value squared (1.25).
+    execute_line(&mut db, "LET var1 = VARIANCE v1", 1).unwrap();
+    let var1 = db.get("var1").unwrap();
+    assert!((var1.data_ref()[0] - 1.25).abs() < 1e-5);
+    assert_eq!(var1.shape.rank(), 0);
+
+    // LAZY VARIANCE should also work, mirroring SUM/MEAN/STDEV.
+    execute_line(&mut db, "LAZY LET var_lazy = VARIANCE v1", 1).unwrap();
+    let output = execute_line(&mut db, "SHOW var_lazy", 1).unwrap();
+    match output {
+        linal::dsl::DslOutput::Tensor(t) => {
+            assert!((t.data_ref()[0] - 1.25).abs() < 1e-5);
+        }
+        _ => panic!("Expected Tensor output from SHOW"),
+    }
+
+    // 7. Test MEDIAN -- v1 = [1,2,3,4], even count -> average of 2,3 = 2.5.
+    execute_line(&mut db, "LET med1 = MEDIAN v1", 1).unwrap();
+    let med1 = db.get("med1").unwrap();
+    assert_eq!(med1.data_ref()[0], 2.5);
+
+    execute_line(&mut db, "VECTOR v3 = [5, 1, 3]", 1).unwrap();
+    execute_line(&mut db, "LET med3 = MEDIAN v3", 1).unwrap();
+    let med3 = db.get("med3").unwrap();
+    assert_eq!(med3.data_ref()[0], 3.0);
+
+    // 8. Test QUANTILE -- AT 0.0 / 1.0 are the min/max; AT 0.5 matches MEDIAN.
+    execute_line(&mut db, "LET q0 = QUANTILE v1 AT 0.0", 1).unwrap();
+    assert_eq!(db.get("q0").unwrap().data_ref()[0], 1.0);
+    execute_line(&mut db, "LET q1 = QUANTILE v1 AT 1.0", 1).unwrap();
+    assert_eq!(db.get("q1").unwrap().data_ref()[0], 4.0);
+    execute_line(&mut db, "LET q50 = QUANTILE v1 AT 0.5", 1).unwrap();
+    assert_eq!(db.get("q50").unwrap().data_ref()[0], 2.5);
+
+    // 9. Test COVARIANCE -- v1 with itself is its own variance.
+    execute_line(&mut db, "LET cov_self = COVARIANCE v1 WITH v1", 1).unwrap();
+    assert!((db.get("cov_self").unwrap().data_ref()[0] - 1.25).abs() < 1e-5);
+
+    // v4 = -v1 (perfectly anti-correlated) -> covariance = -variance(v1)
+    execute_line(&mut db, "VECTOR v4 = [-1, -2, -3, -4]", 1).unwrap();
+    execute_line(&mut db, "LET cov_neg = COVARIANCE v1 WITH v4", 1).unwrap();
+    assert!((db.get("cov_neg").unwrap().data_ref()[0] - (-1.25)).abs() < 1e-5);
+
+    // 10. Test COVARIANCE MATRIX -- symmetric, diagonal matches per-column
+    // sample variance (n - 1 denominator, unlike the population COVARIANCE
+    // above -- see core::linalg::covariance_matrix's doc comment).
+    execute_line(
+        &mut db,
+        "MATRIX cm_data = [[1, 2], [2, 1], [3, 4], [4, 3]]",
+        1,
+    )
+    .unwrap();
+    execute_line(&mut db, "LET cm = COVARIANCE MATRIX cm_data", 1).unwrap();
+    let cm = db.get("cm").unwrap();
+    assert_eq!(cm.shape.dims, vec![2, 2]);
+    let cm_data = cm.to_logical_vec();
+    // Column 0 = [1,2,3,4], mean 2.5, sample variance = 5/3.
+    assert!((cm_data[0] - (5.0 / 3.0)).abs() < 1e-4);
+    // Symmetric: cm[0][1] == cm[1][0]
+    assert!((cm_data[1] - cm_data[2]).abs() < 1e-5);
 }
 
 /// Regression test for a silent-correctness bug found via a real end-to-end example

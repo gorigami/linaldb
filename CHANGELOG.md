@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `LSTSQ` least-squares/pseudo-inverse solve
+
+`LSTSQ a b` solves `a x = b` for any shape of `a` (over-determined, under-determined, or
+square-but-singular) via nalgebra's SVD-based Moore-Penrose pseudo-inverse — the minimum-norm
+solution. A new, distinct keyword from `SOLVE`, which stays square-only and keeps erroring
+loudly on non-square input, per Phase 1 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`'s locked design
+decision (no polymorphic shape-dependent behavior on one operator).
+
+### Added — `VARIANCE`/`MEDIAN`/`QUANTILE`/`COVARIANCE` reductions, `VARIANCE`/`MEDIAN` SQL aggregates
+
+New DSL tensor reductions: `VARIANCE a` (population variance, literally `STDEV a` squared —
+factored to share one code path so the two never numerically drift), `MEDIAN a`, `QUANTILE a AT
+p` (linear interpolation, matching numpy's default), `COVARIANCE a WITH b` (population
+covariance between two same-shape tensors), and `COVARIANCE MATRIX a` (sample, `n-1`, feature
+covariance matrix — the standard PCA-adjacent statistic, deliberately a different normalization
+convention than the population reductions above). `VARIANCE`/`MEDIAN` also added as SQL
+`AggregateFunction` variants (`SELECT VARIANCE(x), MEDIAN(x) FROM t GROUP BY ...`), always
+producing `DOUBLE` regardless of the input column's type, explicitly rejecting `OVER`
+(window-function) usage with a clear parse error. Caught two pre-existing wildcard-arm
+schema-inference bugs along the way (`query/logical.rs`) that would have silently reported these
+new aggregate columns as `INT` instead of `DOUBLE`.
+
+### Added — FFT/PSD windowing (`WINDOW HANN`/`WINDOW HAMMING`)
+
+`FFT a WINDOW HANN|HAMMING` and `PSD a WINDOW <n> HANN|HAMMING` apply a Hann or Hamming window
+before transforming, to reduce spectral leakage — closing the gap `core::signal::psd`'s own doc
+comment previously flagged ("no window function applied ... implicit rectangular window"). Both
+clauses are optional; omitting them is the original, unchanged unwindowed behavior.
+`EXPLAIN LINEAGE` reports which window function actually ran.
+
+### Added — NetCDF/CF-convention connector + external Parquet ingestion connector
+
+`NetCdfConnector` (`.nc`) gives real CF-convention semantics — `scale_factor`/`add_offset`
+unpacking, `_FillValue`/`missing_value` mapped to `NaN`, `units`/`standard_name`/`long_name`
+surfaced as column metadata — where `.nc` files previously fell through to `Hdf5Connector`'s
+opaque generic-container reading. Built on the `hdf5-metno` crate already a dependency (no new
+crate needed: NetCDF4 files are HDF5 under the hood). Registered *before* `Hdf5Connector` in
+`get_connector_registry()` (first-match-wins registry); `.h5`/`.h5ad` routing is unchanged
+(regression-tested). `ParquetConnector` (`.parquet`) adds generic external Parquet ingestion via
+`USE`/`IMPORT DATASET FROM`, distinct from the engine's own internal Parquet dataset-package
+format (`SAVE`/`LOAD DATASET`).
+
 ## [0.1.83] - 2026-09-16
 
 ### Fixed — `Bool` column predicates silently matched zero rows instead of comparing correctly

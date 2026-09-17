@@ -718,24 +718,13 @@ pub fn mean_with_timestamp(
     Tensor::new(new_id, Shape::new(Vec::new()), vec![m], metadata)
 }
 
-/// Standard deviation of all elements in a tensor
-pub fn stdev(a: &Tensor, new_id: TensorId) -> Result<Tensor, String> {
-    stdev_with_timestamp(a, new_id, chrono::Utc::now())
-}
-
-pub fn stdev_with_timestamp(
-    a: &Tensor,
-    new_id: TensorId,
-    timestamp: chrono::DateTime<chrono::Utc>,
-) -> Result<Tensor, String> {
-    let total_elements = a.shape.num_elements() as f32;
-    if total_elements == 0.0 {
-        return Err("Cannot compute stdev of empty tensor".into());
-    }
-
-    let mean_val = mean_with_timestamp(a, TensorId::new(), timestamp)?.data_ref()[0];
-
-    let sq_diff_sum: f32 = if let Some(slice) = a.as_contiguous_slice() {
+/// Sum of squared deviations from `mean_val` over every element of `a`
+/// (any rank) -- the shared strided-traversal core `stdev`/`variance` both
+/// need, factored out so the two stay numerically identical (variance is
+/// literally `stdev^2`, they must never drift into computing it two
+/// different ways).
+fn sum_squared_deviations(a: &Tensor, mean_val: f32) -> f32 {
+    if let Some(slice) = a.as_contiguous_slice() {
         slice.iter().map(|&x| (x - mean_val).powi(2)).sum()
     } else {
         let mut total = 0.0;
@@ -759,14 +748,153 @@ pub fn stdev_with_timestamp(
             }
         }
         total
-    };
+    }
+}
 
-    let variance = sq_diff_sum / total_elements;
+/// Standard deviation of all elements in a tensor
+pub fn stdev(a: &Tensor, new_id: TensorId) -> Result<Tensor, String> {
+    stdev_with_timestamp(a, new_id, chrono::Utc::now())
+}
+
+pub fn stdev_with_timestamp(
+    a: &Tensor,
+    new_id: TensorId,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<Tensor, String> {
+    let total_elements = a.shape.num_elements() as f32;
+    if total_elements == 0.0 {
+        return Err("Cannot compute stdev of empty tensor".into());
+    }
+
+    let variance = variance_with_timestamp(a, TensorId::new(), timestamp)?.data_ref()[0];
     let stdev = variance.sqrt();
 
     // True scalar (rank-0) -- see the comment on `sum_with_timestamp` above for why this matters.
     let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
     Tensor::new(new_id, Shape::new(Vec::new()), vec![stdev], metadata)
+}
+
+/// Population variance of all elements in a tensor (divides the sum of
+/// squared deviations by the element count, not `count - 1`) -- `STDEV`'s
+/// result is just this value square-rooted, consistently with it always
+/// having been the population form (`STDEV` predates this function and
+/// already divided by the full element count, not `n - 1`).
+pub fn variance(a: &Tensor, new_id: TensorId) -> Result<Tensor, String> {
+    variance_with_timestamp(a, new_id, chrono::Utc::now())
+}
+
+pub fn variance_with_timestamp(
+    a: &Tensor,
+    new_id: TensorId,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<Tensor, String> {
+    let total_elements = a.shape.num_elements() as f32;
+    if total_elements == 0.0 {
+        return Err("Cannot compute variance of empty tensor".into());
+    }
+
+    let mean_val = mean_with_timestamp(a, TensorId::new(), timestamp)?.data_ref()[0];
+    let variance = sum_squared_deviations(a, mean_val) / total_elements;
+
+    let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
+    Tensor::new(new_id, Shape::new(Vec::new()), vec![variance], metadata)
+}
+
+/// Median of all elements in a tensor (any rank), flattened and sorted.
+/// Averages the two middle values on an even element count.
+pub fn median(a: &Tensor, new_id: TensorId) -> Result<Tensor, String> {
+    median_with_timestamp(a, new_id, chrono::Utc::now())
+}
+
+pub fn median_with_timestamp(
+    a: &Tensor,
+    new_id: TensorId,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<Tensor, String> {
+    let mut sorted = a.to_logical_vec();
+    if sorted.is_empty() {
+        return Err("Cannot compute median of empty tensor".into());
+    }
+    sorted.sort_by(|x, y| x.partial_cmp(y).expect("tensor data must not contain NaN"));
+
+    let n = sorted.len();
+    let mid = n / 2;
+    let median = if n.is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    };
+
+    let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
+    Tensor::new(new_id, Shape::new(Vec::new()), vec![median], metadata)
+}
+
+/// `p`-th quantile (`0.0..=1.0`) of all elements in a tensor (any rank),
+/// flattened and sorted, via linear interpolation between the two nearest
+/// ranks -- the same convention numpy's default `linear` interpolation
+/// uses, so `QUANTILE a AT 0.5` matches `MEDIAN a` exactly.
+pub fn quantile(a: &Tensor, p: f64, new_id: TensorId) -> Result<Tensor, String> {
+    quantile_with_timestamp(a, p, new_id, chrono::Utc::now())
+}
+
+pub fn quantile_with_timestamp(
+    a: &Tensor,
+    p: f64,
+    new_id: TensorId,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<Tensor, String> {
+    if !(0.0..=1.0).contains(&p) {
+        return Err(format!("QUANTILE: p must be between 0.0 and 1.0, got {p}"));
+    }
+    let mut sorted = a.to_logical_vec();
+    if sorted.is_empty() {
+        return Err("Cannot compute quantile of empty tensor".into());
+    }
+    sorted.sort_by(|x, y| x.partial_cmp(y).expect("tensor data must not contain NaN"));
+
+    let n = sorted.len();
+    let rank = p * (n - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    let frac = rank - lo as f64;
+    let value: f32 = if lo == hi {
+        sorted[lo]
+    } else {
+        (sorted[lo] as f64 * (1.0 - frac) + sorted[hi] as f64 * frac) as f32
+    };
+
+    let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
+    Tensor::new(new_id, Shape::new(Vec::new()), vec![value], metadata)
+}
+
+/// Population covariance between two same-shape tensors (any rank),
+/// treating corresponding (flattened, row-major) elements as paired
+/// samples: `COVARIANCE a WITH b`. Divides by `n`, matching `VARIANCE`'s
+/// population convention (not `n - 1`) -- unlike `COVARIANCE MATRIX`'s
+/// sample-covariance convention, see `core::linalg::covariance_matrix`.
+pub fn covariance(a: &Tensor, b: &Tensor) -> Result<f32, String> {
+    if a.shape.dims != b.shape.dims {
+        return Err(format!(
+            "COVARIANCE: shape mismatch -- a is {:?}, b is {:?}",
+            a.shape.dims, b.shape.dims
+        ));
+    }
+    let a_data = a.to_logical_vec();
+    let b_data = b.to_logical_vec();
+    let n = a_data.len();
+    if n == 0 {
+        return Err("Cannot compute covariance of empty tensors".into());
+    }
+    let n_f = n as f32;
+    let mean_a: f32 = a_data.iter().sum::<f32>() / n_f;
+    let mean_b: f32 = b_data.iter().sum::<f32>() / n_f;
+    let cov: f32 = a_data
+        .iter()
+        .zip(b_data.iter())
+        .map(|(&x, &y)| (x - mean_a) * (y - mean_b))
+        .sum::<f32>()
+        / n_f;
+    Ok(cov)
 }
 
 /// Normaliza un tensor rank-1 a norma 1 (L2)
@@ -1412,6 +1540,10 @@ pub fn evaluate_expression(
         Expression::Stdev(inner) => {
             let t = evaluate_expression(inner, timestamp)?;
             stdev_with_timestamp(&t, TensorId::new(), timestamp)
+        }
+        Expression::Variance(inner) => {
+            let t = evaluate_expression(inner, timestamp)?;
+            variance_with_timestamp(&t, TensorId::new(), timestamp)
         }
     }
 }
