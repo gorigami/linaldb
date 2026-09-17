@@ -139,6 +139,68 @@ fn netcdf_connector_applies_scale_offset_and_fill_value() {
     assert_eq!(time_col.values(), &[0.0, 1.0, 2.0, 3.0]);
 }
 
+/// Real-world regression: NCEP/NCAR Reanalysis's own published `.nc` files (verified directly
+/// against `air.mon.mean.nc`/`slp.mon.mean.nc`, downloaded from
+/// `downloads.psl.noaa.gov/Datasets/ncep.reanalysis.derived/surface/`) declare
+/// `scale_factor`/`add_offset`/`missing_value` as 1-element 1-D arrays, not true 0-d HDF5
+/// scalars -- unlike `write_cf_netcdf`'s `write_scalar` calls above. `read_scalar` hard-errors
+/// on that shape mismatch, which `read_f64_attr`'s `.ok()` silently swallowed, disabling CF
+/// decoding entirely against this real, common file shape with no error or warning at all.
+#[test]
+fn netcdf_connector_applies_cf_attrs_declared_as_1_element_arrays_not_scalars() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("array_shaped_attrs.nc");
+    let file = hdf5::File::create(&path).expect("create .nc file");
+
+    let raw: Vec<f32> = vec![10.0, 20.0, -9999.0, 40.0];
+    let ds = file
+        .new_dataset::<f32>()
+        .shape(raw.len())
+        .create("temp")
+        .expect("create temp dataset");
+    ds.write(&raw).expect("write temp data");
+
+    ds.new_attr::<f64>()
+        .shape(1)
+        .create("scale_factor")
+        .expect("create scale_factor attr")
+        .write(&[2.0])
+        .expect("write scale_factor as a 1-element array");
+    ds.new_attr::<f64>()
+        .shape(1)
+        .create("add_offset")
+        .expect("create add_offset attr")
+        .write(&[1.0])
+        .expect("write add_offset as a 1-element array");
+    ds.new_attr::<f64>()
+        .shape(1)
+        .create("missing_value")
+        .expect("create missing_value attr")
+        .write(&[-9999.0])
+        .expect("write missing_value as a 1-element array");
+
+    let registry = persistence::get_connector_registry();
+    let connector = registry.find_connector(path.to_str().unwrap()).unwrap();
+    let (batch, _lineage) = connector
+        .read_dataset(path.to_str().unwrap(), None)
+        .expect("should read the .nc file");
+
+    let temp_col = batch
+        .column(batch.schema().index_of("temp").unwrap())
+        .as_any()
+        .downcast_ref::<arrow::array::Float32Array>()
+        .expect("temp should be Float32");
+
+    // raw [10, 20, -9999(fill), 40], scale=2, offset=1 -> [21, 41, NaN, 81]
+    assert!((temp_col.value(0) - 21.0).abs() < 1e-3);
+    assert!((temp_col.value(1) - 41.0).abs() < 1e-3);
+    assert!(
+        temp_col.value(2).is_nan(),
+        "1-element-array-declared missing_value should still mask to NaN"
+    );
+    assert!((temp_col.value(3) - 81.0).abs() < 1e-3);
+}
+
 #[test]
 fn netcdf_connector_surfaces_units_and_standard_name_as_field_metadata() {
     let dir = tempfile::tempdir().unwrap();

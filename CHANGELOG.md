@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `NetCdfConnector` silently ignored `scale_factor`/`add_offset`/`missing_value` declared as 1-element arrays
+
+Found building `linal-hub`'s `12_climate_science_reanalysis.ipynb` notebook against real NCEP/
+NCAR Reanalysis data (`air.mon.mean.nc`/`slp.mon.mean.nc`, downloaded directly from
+`downloads.psl.noaa.gov`) — exactly the kind of real-world file Phase 1's NetCDF connector
+(`SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`) was built to handle. Those files declare
+`scale_factor`/`add_offset`/`missing_value` as 1-element 1-D HDF5 arrays rather than true 0-d
+scalars; `read_f64_attr` used `read_scalar()`, which hard-errors on that shape mismatch (`ndim
+mismatch: expected scalar, got 1`) — an error `.ok()` then silently swallowed, defaulting to
+identity unpacking and no fill-value masking with no warning at all. The connector's own
+pre-existing tests all used `write_scalar` (true 0-d scalars) to build their fixtures, so this
+real-file shape was never exercised. Fixed by switching to `read_raw()`, which flattens either
+shape into a `Vec<T>` uniformly — no behavior change for files that do use true scalars. New
+regression test (`netcdf_connector_applies_cf_attrs_declared_as_1_element_arrays_not_scalars`,
+`tests/netcdf_connector_test.rs`) writes the attributes in the 1-element-array shape and asserts
+correct unpacking/masking, unlike the existing scalar-shaped fixture.
+
 ## [0.1.84] - 2026-09-17
 
 ### Added — scalar `Complex` value type, `EIGENVALUES_GENERAL`/`EIGEN_GENERAL`
