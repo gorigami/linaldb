@@ -580,6 +580,35 @@ impl Dataset {
         Ok(())
     }
 
+    /// Same backfill as `create_index`, but for a `VectorIndex` restored
+    /// from a previously persisted `VectorIndexSnapshot` (`LOAD DATASET`'s
+    /// accelerated path): populates the fresh index via `add()` in row
+    /// order exactly like `create_index` does, then restores the
+    /// clustering directly (`VectorIndex::restore_from_snapshot`) instead
+    /// of calling `build()`'s full k-means pass. The caller is responsible
+    /// for having already confirmed the snapshot's content hash still
+    /// matches this column's data -- this method trusts it.
+    pub fn create_vector_index_from_snapshot(
+        &mut self,
+        column_name: String,
+        snapshot: crate::core::index::vector::VectorIndexSnapshot,
+    ) -> Result<(), String> {
+        if !self.schema_has_field(&column_name) {
+            return Err(format!("Column '{}' not found in schema", column_name));
+        }
+
+        let mut index = crate::core::index::vector::VectorIndex::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            if let Some(val) = row.get(&column_name) {
+                index.add(i, val)?;
+            }
+        }
+        index.restore_from_snapshot(snapshot)?;
+
+        self.indices.insert(column_name, Box::new(index));
+        Ok(())
+    }
+
     /// Get index for a column
     pub fn get_index(&self, column_name: &str) -> Option<&dyn Index> {
         self.indices.get(column_name).map(|b| b.as_ref())

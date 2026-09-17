@@ -1,6 +1,7 @@
 use super::{Index, IndexType};
 use crate::core::tensor::Tensor;
 use crate::core::value::Value;
+use serde::{Deserialize, Serialize};
 
 /// Below this many vectors, clustering overhead isn't worth it -- a brute
 /// force scan is already fast, so `build()` leaves `clusters` empty and
@@ -11,7 +12,7 @@ const KMEANS_ITERATIONS: usize = 10;
 
 /// One IVF (inverted-file) bucket: a centroid plus the indices (into
 /// `VectorIndex::vectors`) of the vectors assigned to it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Cluster {
     centroid: Tensor,
     members: Vec<usize>,
@@ -188,6 +189,84 @@ impl VectorIndex {
         let best_possible_angle = (angle_to_centroid - radius_angle).max(0.0);
         Ok(best_possible_angle.cos())
     }
+
+    /// Exports the clustering `build()` last computed, for `SAVE DATASET`
+    /// to persist -- `None` if `build()` never ran or the vector count was
+    /// below `MIN_VECTORS_TO_CLUSTER` (nothing expensive to have saved).
+    pub fn snapshot(&self) -> Option<VectorIndexSnapshot> {
+        if self.clusters.is_empty() {
+            return None;
+        }
+        Some(VectorIndexSnapshot {
+            clustered_count: self.clustered_count,
+            clusters: self.clusters.clone(),
+        })
+    }
+
+    /// Restores a previously exported clustering without recomputing
+    /// k-means -- the entire point of persisting it (`build()`'s k-means
+    /// pass is exactly the "full rebuild + blocking k-means on every ...
+    /// LOAD DATASET" cost `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`'s audit
+    /// flagged). Only valid when `self.vectors` was populated via `add()`
+    /// in the exact same order as when the snapshot was taken -- `members`
+    /// are indices *into* `self.vectors`, not row IDs, so a reordering
+    /// would silently point clusters at the wrong vectors. The caller is
+    /// responsible for confirming that via `content_hash` before calling
+    /// this (not re-checked here); `LOAD DATASET` re-inserts rows in their
+    /// saved order, so this always holds there.
+    pub fn restore_from_snapshot(&mut self, snapshot: VectorIndexSnapshot) -> Result<(), String> {
+        if snapshot.clustered_count > self.vectors.len() {
+            return Err(format!(
+                "vector index snapshot expects at least {} vectors, only {} were added",
+                snapshot.clustered_count,
+                self.vectors.len()
+            ));
+        }
+        self.clusters = snapshot.clusters;
+        self.clustered_count = snapshot.clustered_count;
+        Ok(())
+    }
+
+    /// Content hash of a vector column's values, in row order -- lets
+    /// `LOAD DATASET` detect a persisted clustering snapshot that no
+    /// longer matches the data it was built from (e.g. `data.parquet`
+    /// edited independently of `vector_index_clusters.json`) and fall
+    /// back to a full rebuild instead of silently restoring a stale
+    /// clustering. Non-`Vector` values are skipped rather than erroring --
+    /// a genuine vector-indexed column should never contain any, but this
+    /// is a hash, not a validator.
+    pub fn content_hash(values: &[Value]) -> String {
+        let mut bytes = Vec::new();
+        for v in values {
+            if let Value::Vector(data) = v {
+                for f in data {
+                    bytes.extend_from_slice(&f.to_le_bytes());
+                }
+            }
+        }
+        crate::core::provenance::compute_content_hash(&bytes)
+    }
+}
+
+/// `VectorIndex::snapshot`'s persistable output: everything `build()`
+/// computes, minus the vectors themselves (those come back for free by
+/// re-`add()`-ing the freshly loaded rows, in the same order, which is
+/// what makes `members`'s indices-into-`vectors` still valid on restore).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorIndexSnapshot {
+    clustered_count: usize,
+    clusters: Vec<Cluster>,
+}
+
+/// What `SAVE DATASET` actually writes to disk per vector-indexed column
+/// (`datasets/<name>/vector_index_clusters.json`, keyed by column name):
+/// the snapshot plus the content hash it was computed from, so `LOAD
+/// DATASET` can tell a still-valid snapshot from a stale one before
+/// trusting it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedVectorIndex {
+    pub content_hash: String,
+    pub snapshot: VectorIndexSnapshot,
 }
 
 impl Index for VectorIndex {
@@ -329,6 +408,10 @@ impl Index for VectorIndex {
         self.clustered_count = n;
         Ok(())
     }
+
+    fn export_snapshot(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(self.snapshot()?).ok()
+    }
 }
 
 #[cfg(test)]
@@ -386,6 +469,78 @@ mod tests {
             NUM_TRUE_CLUSTERS * PER_CLUSTER
         );
         assert_eq!(index.clustered_count, NUM_TRUE_CLUSTERS * PER_CLUSTER);
+    }
+
+    #[test]
+    fn small_index_has_no_snapshot_to_export() {
+        let mut index = VectorIndex::new();
+        for i in 0..(MIN_VECTORS_TO_CLUSTER - 1) {
+            index.add(i, &point(0, i)).unwrap();
+        }
+        index.build().unwrap();
+        assert!(index.snapshot().is_none());
+    }
+
+    #[test]
+    fn snapshot_and_restore_round_trips_identical_search_results() {
+        let original = well_separated_index();
+        let snapshot = original.snapshot().expect("should have clustered");
+
+        // Rebuild a fresh index from the same points, in the same order,
+        // then restore from the snapshot instead of calling build() --
+        // mirrors exactly what LOAD DATASET does (re-add() the reloaded
+        // rows, then restore_from_snapshot instead of a full k-means pass).
+        let mut restored = VectorIndex::new();
+        for axis in 0..NUM_TRUE_CLUSTERS {
+            for j in 0..PER_CLUSTER {
+                restored
+                    .add(axis * PER_CLUSTER + j, &point(axis, j))
+                    .unwrap();
+            }
+        }
+        restored.restore_from_snapshot(snapshot).unwrap();
+
+        let query = one_hot_tensor(2);
+        let mut original_results = original.search(&query, 10).unwrap();
+        let mut restored_results = restored.search(&query, 10).unwrap();
+        original_results.sort_by_key(|(id, _)| *id);
+        restored_results.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            original_results
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            restored_results
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn restore_from_snapshot_rejects_too_few_vectors() {
+        let original = well_separated_index();
+        let snapshot = original.snapshot().unwrap();
+
+        let mut too_few = VectorIndex::new();
+        too_few.add(0, &point(0, 0)).unwrap();
+        assert!(too_few.restore_from_snapshot(snapshot).is_err());
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_sensitive_to_data_changes() {
+        let a = vec![Value::Vector(vec![1.0, 2.0, 3.0])];
+        let b = vec![Value::Vector(vec![1.0, 2.0, 3.0])];
+        let c = vec![Value::Vector(vec![1.0, 2.0, 3.1])];
+        assert_eq!(VectorIndex::content_hash(&a), VectorIndex::content_hash(&b));
+        assert_ne!(VectorIndex::content_hash(&a), VectorIndex::content_hash(&c));
+    }
+
+    #[test]
+    fn content_hash_is_order_sensitive() {
+        let a = vec![Value::Vector(vec![1.0, 0.0]), Value::Vector(vec![0.0, 1.0])];
+        let b = vec![Value::Vector(vec![0.0, 1.0]), Value::Vector(vec![1.0, 0.0])];
+        assert_ne!(VectorIndex::content_hash(&a), VectorIndex::content_hash(&b));
     }
 
     #[test]

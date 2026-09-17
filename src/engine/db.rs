@@ -1146,6 +1146,19 @@ impl TensorDb {
             .create_vector_index(dataset_name, column_name)
     }
 
+    /// Restores a vector index from a previously persisted clustering
+    /// snapshot instead of recomputing k-means -- see `DatabaseInstance`'s
+    /// impl and `core::index::vector::VectorIndex::restore_from_snapshot`.
+    pub fn create_vector_index_from_snapshot(
+        &mut self,
+        dataset_name: &str,
+        column_name: &str,
+        snapshot: crate::core::index::vector::VectorIndexSnapshot,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .create_vector_index_from_snapshot(dataset_name, column_name, snapshot)
+    }
+
     pub fn list_indices(&self) -> Vec<(String, String, String)> {
         self.active_instance().list_indices()
     }
@@ -2949,6 +2962,20 @@ impl DatabaseInstance {
         let index = Box::new(crate::core::index::vector::VectorIndex::new());
         dataset
             .create_index(column_name.to_string(), index)
+            .map_err(EngineError::InvalidOp)
+    }
+
+    /// Restore a vector index on a dataset column from a persisted
+    /// clustering snapshot, skipping `build()`'s k-means pass entirely.
+    pub fn create_vector_index_from_snapshot(
+        &mut self,
+        dataset_name: &str,
+        column_name: &str,
+        snapshot: crate::core::index::vector::VectorIndexSnapshot,
+    ) -> Result<(), EngineError> {
+        let dataset = self.get_dataset_mut(dataset_name)?;
+        dataset
+            .create_vector_index_from_snapshot(column_name.to_string(), snapshot)
             .map_err(EngineError::InvalidOp)
     }
 

@@ -326,3 +326,154 @@ fn cosine_threshold_query_is_exact_on_a_clustered_vector_index() {
         PER_CLUSTER, row_count
     );
 }
+
+/// SCIENTIFIC_ENGINE_EXPANSION_PLAN.md Phase 2: index persistence. Once a
+/// vector index is large enough to actually cluster, SAVE DATASET should
+/// persist that clustering (`vector_index_clusters.json`) and LOAD DATASET
+/// should restore it directly -- no k-means recomputation -- rather than
+/// rebuilding from scratch every time.
+#[test]
+fn vector_index_clustering_survives_save_and_load_without_rebuilding() {
+    let _ = std::fs::remove_dir_all("./data/default/datasets/snap_vecs");
+
+    const N: usize = 120; // comfortably past MIN_VECTORS_TO_CLUSTER (64)
+
+    let mut db = TensorDb::new();
+    let mut script = String::from("DATASET snap_vecs COLUMNS (id: Int, embedding: Vector(4))\n");
+    for i in 0..N {
+        let angle = i as f32;
+        let v = [
+            angle.sin(),
+            angle.cos(),
+            (angle * 0.5).sin(),
+            (angle * 0.5).cos(),
+        ];
+        script.push_str(&format!(
+            "INSERT INTO snap_vecs VALUES ({}, [{}])\n",
+            i,
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    script.push_str("CREATE VECTOR INDEX ON snap_vecs(embedding)\n");
+    script.push_str("SAVE DATASET snap_vecs\n");
+    linal::dsl::execute_script(&mut db, &script).expect("setup+save script failed");
+
+    let snapshot_path = "./data/default/datasets/snap_vecs/vector_index_clusters.json";
+    assert!(
+        std::path::Path::new(snapshot_path).exists(),
+        "expected SAVE DATASET to write a vector_index_clusters.json"
+    );
+    let raw = std::fs::read_to_string(snapshot_path).unwrap();
+    assert!(
+        raw.contains("\"clustered_count\": 120"),
+        "expected the persisted snapshot to reflect all 120 clustered vectors, got: {raw}"
+    );
+
+    // Fresh engine, simulating a process restart -- must restore from the
+    // persisted snapshot, not rebuild via k-means.
+    let mut db2 = TensorDb::new();
+    let output = linal::dsl::execute_line(&mut db2, "LOAD DATASET snap_vecs", 1)
+        .expect("load failed")
+        .to_string();
+    assert!(
+        output.contains("from snapshot: embedding") || output.contains("from snapshot: emb"),
+        "expected the load message to report a snapshot-restored vector index, got: {output}"
+    );
+
+    // The restored index must actually work: an exact self-query returns
+    // the matching row as its top hit.
+    let query = format!(
+        "SEARCH snap_vecs ON embedding QUERY [{}] LIMIT 1",
+        [0.0f32.sin(), 0.0f32.cos(), 0.0f32.sin(), 0.0f32.cos()]
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let out = linal::dsl::execute_line(&mut db2, &query, 2).expect("search failed");
+    let linal::dsl::DslOutput::Table(ds) = out else {
+        panic!("expected inline Table")
+    };
+    assert_eq!(ds.len(), 1);
+    let id_col = ds.schema.get_field_index("id").unwrap();
+    match &ds.rows[0].values[id_col] {
+        linal::core::value::Value::Int(0) => {}
+        other => panic!("expected row id 0 as the exact nearest match, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all("./data/default/datasets/snap_vecs");
+}
+
+/// A persisted snapshot whose content hash no longer matches the reloaded
+/// column's data (e.g. `data.parquet` edited independently) must be
+/// rejected, not silently trusted -- LOAD DATASET falls back to a full
+/// k-means rebuild instead, and the index is still correct afterward.
+#[test]
+fn stale_vector_index_snapshot_is_rejected_and_falls_back_to_rebuild() {
+    let _ = std::fs::remove_dir_all("./data/default/datasets/stale_vecs");
+
+    const N: usize = 80;
+
+    let mut db = TensorDb::new();
+    let mut script = String::from("DATASET stale_vecs COLUMNS (id: Int, embedding: Vector(4))\n");
+    for i in 0..N {
+        let angle = i as f32;
+        let v = [angle.sin(), angle.cos(), 0.0, 0.0];
+        script.push_str(&format!(
+            "INSERT INTO stale_vecs VALUES ({}, [{}])\n",
+            i,
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    script.push_str("CREATE VECTOR INDEX ON stale_vecs(embedding)\n");
+    script.push_str("SAVE DATASET stale_vecs\n");
+    linal::dsl::execute_script(&mut db, &script).expect("setup+save script failed");
+    // Corrupt the persisted content hash in place, simulating drift between
+    // the snapshot and the actual column data.
+    let snapshot_path = "./data/default/datasets/stale_vecs/vector_index_clusters.json";
+    let raw = std::fs::read_to_string(snapshot_path).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    value["embedding"]["content_hash"] = serde_json::Value::String("stale-hash".to_string());
+    std::fs::write(snapshot_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+    let mut db2 = TensorDb::new();
+    let output = linal::dsl::execute_line(&mut db2, "LOAD DATASET stale_vecs", 1)
+        .expect("load failed")
+        .to_string();
+    assert!(
+        !output.contains("from snapshot"),
+        "a content-hash mismatch must not be silently trusted, got: {output}"
+    );
+    assert!(
+        output.contains("indices restored on"),
+        "the index should still be rebuilt (just not from the stale snapshot), got: {output}"
+    );
+
+    // The rebuilt index must still be correct.
+    let query = format!(
+        "SEARCH stale_vecs ON embedding QUERY [{}] LIMIT 1",
+        [0.0f32.sin(), 0.0f32.cos(), 0.0, 0.0]
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let out = linal::dsl::execute_line(&mut db2, &query, 2).expect("search failed");
+    let linal::dsl::DslOutput::Table(ds) = out else {
+        panic!("expected inline Table")
+    };
+    assert_eq!(ds.len(), 1);
+    let id_col = ds.schema.get_field_index("id").unwrap();
+    match &ds.rows[0].values[id_col] {
+        linal::core::value::Value::Int(0) => {}
+        other => panic!("expected row id 0 as the exact nearest match, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all("./data/default/datasets/stale_vecs");
+}

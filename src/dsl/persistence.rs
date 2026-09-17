@@ -114,6 +114,43 @@ fn save_dataset_core(
             msg: format!("Failed to save index definitions: {}", e),
         })?;
 
+    // Persist each vector index's clustering (if it clustered at all --
+    // see VectorIndex::snapshot) alongside a content hash of the column it
+    // was built from, so LOAD DATASET can restore it without recomputing
+    // k-means. Best-effort: a column whose values can't be read is simply
+    // not snapshotted (LOAD DATASET falls back to a full rebuild for it),
+    // same "never fail the whole save over one index" policy the
+    // definitions above already have.
+    let mut vector_index_snapshots = std::collections::HashMap::new();
+    for (column, index) in &dataset.indices {
+        if index.index_type() != crate::core::index::IndexType::Vector {
+            continue;
+        }
+        let Some(snapshot_json) = index.export_snapshot() else {
+            continue; // too few vectors to have clustered -- nothing to persist
+        };
+        let Ok(snapshot) = serde_json::from_value(snapshot_json) else {
+            continue;
+        };
+        let Ok(values) = dataset.get_column(column) else {
+            continue;
+        };
+        let content_hash = crate::core::index::vector::VectorIndex::content_hash(&values);
+        vector_index_snapshots.insert(
+            column.clone(),
+            crate::core::index::vector::PersistedVectorIndex {
+                content_hash,
+                snapshot,
+            },
+        );
+    }
+    storage
+        .save_vector_index_snapshots(&disk_name, &vector_index_snapshots)
+        .map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to save vector index snapshots: {}", e),
+        })?;
+
     let mut metadata = if storage.metadata_exists(&disk_name) {
         let mut meta = storage
             .load_dataset_metadata(&disk_name)
@@ -299,15 +336,49 @@ fn load_dataset_core(
     // a column that no longer exists or no longer matches the indexed type
     // (e.g. the schema changed on disk) is skipped rather than failing the
     // whole load.
+    //
+    // Vector indices get one extra opportunity: if `SAVE DATASET` also
+    // persisted a clustering snapshot (`vector_index_clusters.json`) whose
+    // content hash still matches this column's freshly-loaded data, restore
+    // it directly (`create_vector_index_from_snapshot`) instead of paying
+    // for a full k-means rebuild -- otherwise fall back to the same
+    // from-scratch rebuild as before.
     let index_defs = storage
         .load_index_definitions(&disk_name)
         .unwrap_or_default();
+    let vector_snapshots = storage
+        .load_vector_index_snapshots(&disk_name)
+        .unwrap_or_default();
     let mut restored_indexes = Vec::new();
+    let mut restored_from_snapshot = Vec::new();
     for def in &index_defs {
         let result = match def.index_type {
             crate::core::index::IndexType::Hash => db.create_index(dataset_name, &def.column),
             crate::core::index::IndexType::Vector => {
-                db.create_vector_index(dataset_name, &def.column)
+                let from_snapshot = vector_snapshots.get(&def.column).and_then(|persisted| {
+                    let values = db
+                        .get_dataset(dataset_name)
+                        .ok()?
+                        .get_column(&def.column)
+                        .ok()?;
+                    let current_hash =
+                        crate::core::index::vector::VectorIndex::content_hash(&values);
+                    (current_hash == persisted.content_hash).then(|| persisted.snapshot.clone())
+                });
+                match from_snapshot {
+                    Some(snapshot) => {
+                        let r = db.create_vector_index_from_snapshot(
+                            dataset_name,
+                            &def.column,
+                            snapshot,
+                        );
+                        if r.is_ok() {
+                            restored_from_snapshot.push(def.column.clone());
+                        }
+                        r
+                    }
+                    None => db.create_vector_index(dataset_name, &def.column),
+                }
             }
         };
         if result.is_ok() {
@@ -317,8 +388,14 @@ fn load_dataset_core(
 
     let index_note = if restored_indexes.is_empty() {
         String::new()
-    } else {
+    } else if restored_from_snapshot.is_empty() {
         format!(", indices restored on: {}", restored_indexes.join(", "))
+    } else {
+        format!(
+            ", indices restored on: {} (from snapshot: {})",
+            restored_indexes.join(", "),
+            restored_from_snapshot.join(", ")
+        )
     };
 
     Ok(DslOutput::Message(format!(

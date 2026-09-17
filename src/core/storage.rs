@@ -135,6 +135,65 @@ impl ParquetStorage {
         format!("{}/datasets/{}/indexes.json", self.base_path, name)
     }
 
+    fn vector_index_clusters_path(&self, name: &str) -> String {
+        format!(
+            "{}/datasets/{}/vector_index_clusters.json",
+            self.base_path, name
+        )
+    }
+
+    /// Persist each vector-indexed column's clustering (`VectorIndex::
+    /// snapshot`) plus the content hash it was computed from, so `LOAD
+    /// DATASET` can restore the clustering without recomputing k-means --
+    /// closes the "full rebuild + blocking k-means on every ... LOAD
+    /// DATASET" gap `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`'s audit flagged.
+    /// Overwrites unconditionally (including with an empty map), same
+    /// policy as `save_index_definitions`.
+    pub fn save_vector_index_snapshots(
+        &self,
+        name: &str,
+        snapshots: &std::collections::HashMap<
+            String,
+            crate::core::index::vector::PersistedVectorIndex,
+        >,
+    ) -> Result<(), StorageError> {
+        self.ensure_directories(Some(name))?;
+        let path = self.vector_index_clusters_path(name);
+        let json = serde_json::to_string_pretty(snapshots).map_err(|e| {
+            StorageError::Serialization(format!(
+                "Failed to serialize vector index snapshots: {}",
+                e
+            ))
+        })?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Loads previously persisted vector index snapshots. Returns an empty
+    /// map (not an error) if none were ever saved -- datasets written
+    /// before this feature existed, or with no vector index large enough
+    /// to have clustered, simply have no such file.
+    pub fn load_vector_index_snapshots(
+        &self,
+        name: &str,
+    ) -> Result<
+        std::collections::HashMap<String, crate::core::index::vector::PersistedVectorIndex>,
+        StorageError,
+    > {
+        let path = self.vector_index_clusters_path(name);
+        if !Path::new(&path).exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let json = fs::read_to_string(path)?;
+        let snapshots = serde_json::from_str(&json).map_err(|e| {
+            StorageError::Serialization(format!(
+                "Failed to deserialize vector index snapshots: {}",
+                e
+            ))
+        })?;
+        Ok(snapshots)
+    }
+
     /// Persist which columns have indices (and of what type) so `LOAD
     /// DATASET` can rebuild them. Overwrites unconditionally (including with
     /// an empty list) so the file always reflects the dataset's current
