@@ -205,3 +205,166 @@ fn complex_column_survives_save_and_load() {
 
     let _ = std::fs::remove_dir_all("./data/default/datasets/cnums_persist");
 }
+
+/// Regression coverage for the aggregate-path bugs Phase 3's dedicated
+/// wildcard-arm audit found: SUM/AVG(complex_col) silently produced Int(0)/
+/// a schema type mismatch, and MIN/MAX(complex_col) silently returned the
+/// first row's value dressed up as "the max" instead of erroring (Complex
+/// has no total order).
+#[test]
+fn complex_sum_and_avg_aggregates_are_correct() {
+    let mut db = TensorDb::new();
+    setup(&mut db);
+    run(
+        &mut db,
+        "TRANSFORM nums SELECT id, COMPLEX(re, im) AS val INTO cnums",
+        4,
+    );
+
+    // (3+4i) + (1-1i) = 4+3i
+    let out = run(&mut db, "SELECT SUM(val) AS s FROM cnums", 5);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let s_idx = ds.schema.get_field_index("s").unwrap();
+    assert_eq!(
+        ds.schema.fields[s_idx].value_type,
+        linal::core::value::ValueType::Complex
+    );
+    match &ds.rows[0].values[s_idx] {
+        linal::core::value::Value::Complex(c) => {
+            assert!((c.re - 4.0).abs() < 1e-9);
+            assert!((c.im - 3.0).abs() < 1e-9);
+        }
+        other => panic!("expected Complex, got {other:?}"),
+    }
+
+    // (4+3i) / 2 = 2+1.5i
+    let out = run(&mut db, "SELECT AVG(val) AS a FROM cnums", 6);
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let a_idx = ds.schema.get_field_index("a").unwrap();
+    assert_eq!(
+        ds.schema.fields[a_idx].value_type,
+        linal::core::value::ValueType::Complex
+    );
+    match &ds.rows[0].values[a_idx] {
+        linal::core::value::Value::Complex(c) => {
+            assert!((c.re - 2.0).abs() < 1e-9);
+            assert!((c.im - 1.5).abs() < 1e-9);
+        }
+        other => panic!("expected Complex, got {other:?}"),
+    }
+}
+
+#[test]
+fn complex_min_max_aggregates_error_loudly_not_silently_wrong() {
+    let mut db = TensorDb::new();
+    setup(&mut db);
+    run(
+        &mut db,
+        "TRANSFORM nums SELECT id, COMPLEX(re, im) AS val INTO cnums",
+        4,
+    );
+    assert!(execute_line(&mut db, "SELECT MIN(val) FROM cnums", 5).is_err());
+    assert!(execute_line(&mut db, "SELECT MAX(val) FROM cnums", 6).is_err());
+}
+
+#[test]
+fn complex_window_sum_accumulates_correctly() {
+    let mut db = TensorDb::new();
+    setup(&mut db);
+    run(
+        &mut db,
+        "TRANSFORM nums SELECT id, COMPLEX(re, im) AS val INTO cnums",
+        4,
+    );
+
+    let out = run(
+        &mut db,
+        "SELECT id, SUM(val) OVER (ORDER BY id) AS s FROM cnums",
+        5,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let s_idx = ds.schema.get_field_index("s").unwrap();
+    // Row 1: just (3+4i). Row 2: (3+4i)+(1-1i) = 4+3i.
+    match &ds.rows[0].values[s_idx] {
+        linal::core::value::Value::Complex(c) => {
+            assert!((c.re - 3.0).abs() < 1e-9 && (c.im - 4.0).abs() < 1e-9);
+        }
+        other => panic!("expected Complex, got {other:?}"),
+    }
+    match &ds.rows[1].values[s_idx] {
+        linal::core::value::Value::Complex(c) => {
+            assert!((c.re - 4.0).abs() < 1e-9 && (c.im - 3.0).abs() < 1e-9);
+        }
+        other => panic!("expected Complex, got {other:?}"),
+    }
+}
+
+#[test]
+fn complex_window_avg_divides_by_count_not_just_the_running_sum() {
+    let mut db = TensorDb::new();
+    setup(&mut db);
+    run(
+        &mut db,
+        "TRANSFORM nums SELECT id, COMPLEX(re, im) AS val INTO cnums",
+        4,
+    );
+
+    let out = run(
+        &mut db,
+        "SELECT id, AVG(val) OVER (ORDER BY id) AS a FROM cnums",
+        5,
+    );
+    let DslOutput::Table(ds) = out else {
+        panic!("expected table")
+    };
+    let a_idx = ds.schema.get_field_index("a").unwrap();
+    // Row 1: (3+4i)/1 = 3+4i. Row 2: ((3+4i)+(1-1i))/2 = (4+3i)/2 = 2+1.5i.
+    match &ds.rows[0].values[a_idx] {
+        linal::core::value::Value::Complex(c) => {
+            assert!((c.re - 3.0).abs() < 1e-9 && (c.im - 4.0).abs() < 1e-9);
+        }
+        other => panic!("expected Complex, got {other:?}"),
+    }
+    match &ds.rows[1].values[a_idx] {
+        linal::core::value::Value::Complex(c) => {
+            assert!((c.re - 2.0).abs() < 1e-9 && (c.im - 1.5).abs() < 1e-9);
+        }
+        other => panic!("expected Complex, got {other:?}"),
+    }
+}
+
+#[test]
+fn complex_window_max_errors_loudly_not_silently_wrong() {
+    let mut db = TensorDb::new();
+    setup(&mut db);
+    run(
+        &mut db,
+        "TRANSFORM nums SELECT id, COMPLEX(re, im) AS val INTO cnums",
+        4,
+    );
+    let result = execute_line(
+        &mut db,
+        "SELECT id, MAX(val) OVER (ORDER BY id) AS m FROM cnums",
+        5,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn order_by_complex_column_errors_loudly_not_silently_unsorted() {
+    let mut db = TensorDb::new();
+    setup(&mut db);
+    run(
+        &mut db,
+        "TRANSFORM nums SELECT id, COMPLEX(re, im) AS val INTO cnums",
+        4,
+    );
+    let result = execute_line(&mut db, "SELECT id FROM cnums ORDER BY val", 5);
+    assert!(result.is_err());
+}
