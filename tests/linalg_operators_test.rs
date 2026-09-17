@@ -48,6 +48,12 @@ fn scalar_operators_hand_computable() {
     assert!((x[0] - (-1.8)).abs() < 1e-4);
     assert!((x[1] - 1.6).abs() < 1e-4);
 
+    // LSTSQ on the same square, nonsingular system should agree with SOLVE.
+    run(&mut db, "LET x_lstsq = LSTSQ m b", 71);
+    let x_lstsq = tensor_data(&db, "x_lstsq");
+    assert!((x_lstsq[0] - (-1.8)).abs() < 1e-3);
+    assert!((x_lstsq[1] - 1.6).abs() < 1e-3);
+
     run(&mut db, "MATRIX sym = [[5, 0], [0, 3]]", 8);
     run(&mut db, "LET eigs = EIGENVALUES sym", 9);
     let mut eigs = tensor_data(&db, "eigs");
@@ -66,6 +72,22 @@ fn error_paths_are_loud_not_nan() {
     run(&mut db, "VECTOR b2 = [1, 2]", 3);
     let err = run_err(&mut db, "LET x2 = SOLVE singular b2", 4);
     assert!(format!("{err:?}").contains("singular"));
+
+    // LSTSQ never errors on the same singular system SOLVE just rejected --
+    // it returns the minimum-norm solution instead.
+    run(&mut db, "LET x2_lstsq = LSTSQ singular b2", 41);
+
+    // LSTSQ also handles a genuinely non-square system SOLVE can't touch.
+    run(
+        &mut db,
+        "MATRIX overdetermined = [[1, 1], [2, 1], [3, 1]]",
+        42,
+    );
+    run(&mut db, "VECTOR y = [2, 4, 6]", 43);
+    run(&mut db, "LET slope_intercept = LSTSQ overdetermined y", 44);
+    let fit = tensor_data(&db, "slope_intercept");
+    assert!((fit[0] - 2.0).abs() < 1e-3, "slope was {}", fit[0]);
+    assert!((fit[1] - 0.0).abs() < 1e-3, "intercept was {}", fit[1]);
 
     run(&mut db, "MATRIX nonsquare = [[1, 2, 3], [4, 5, 6]]", 5);
     let err = run_err(&mut db, "LET t2 = TRACE nonsquare", 6);
