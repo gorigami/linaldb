@@ -1,6 +1,8 @@
 pub mod csv_connector;
 pub mod hdf5_connector;
+pub mod netcdf_connector;
 pub mod numpy_connector;
+pub mod parquet_connector;
 pub mod zarr_connector;
 
 use crate::core::dataset::{DatasetLineage, DatasetSchema};

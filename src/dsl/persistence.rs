@@ -1,5 +1,6 @@
 use crate::core::connectors::{
-    csv_connector::CsvConnector, hdf5_connector::Hdf5Connector, numpy_connector::NumpyConnector,
+    csv_connector::CsvConnector, hdf5_connector::Hdf5Connector, netcdf_connector::NetCdfConnector,
+    numpy_connector::NumpyConnector, parquet_connector::ParquetConnector,
     zarr_connector::ZarrConnector, ConnectorRegistry,
 };
 use crate::core::dataset::{Dataset, DatasetMetadata, DatasetOrigin, ResourceReference};
@@ -38,6 +39,14 @@ pub fn get_connector_registry() -> ConnectorRegistry {
     let mut registry = ConnectorRegistry::new();
     registry.register(Box::new(CsvConnector::new()));
     registry.register(Box::new(NumpyConnector));
+    registry.register(Box::new(ParquetConnector::new()));
+    // NetCDF (`.nc`) MUST be registered before Hdf5Connector: `ConnectorRegistry::find_connector`
+    // returns the first `can_handle` match, and Hdf5Connector's own `can_handle` still lists
+    // "nc" too (NetCDF4 files are HDF5 under the hood) -- registering NetCdfConnector first is
+    // what actually routes `.nc` to the CF-aware connector instead of Hdf5Connector's opaque
+    // generic-container reading. `.h5`/`.h5ad` are untouched: NetCdfConnector doesn't claim
+    // either extension, so they still fall through to Hdf5Connector exactly as before.
+    registry.register(Box::new(NetCdfConnector));
     registry.register(Box::new(Hdf5Connector));
     registry.register(Box::new(ZarrConnector));
     registry
