@@ -105,6 +105,108 @@ fn test_search_without_into_returns_inline_table() {
 }
 
 #[test]
+fn test_search_filter_clause_post_filters_the_top_k_results() {
+    // SCIENTIFIC_ENGINE_EXPANSION_PLAN.md Phase 2: SEARCH's modern syntax
+    // gains an optional FILTER <predicate> clause, distinct from WHERE
+    // (already claimed by the legacy alternate query-vector syntax).
+    let mut db = TensorDb::new();
+    let script = r#"
+    DATASET docs COLUMNS (id: Int, category: String, embedding: Vector(3))
+    CREATE VECTOR INDEX ON docs(embedding)
+    INSERT INTO docs VALUES (1, "a", [1.0, 0.0, 0.0])
+    INSERT INTO docs VALUES (2, "b", [0.9, 0.1, 0.0])
+    INSERT INTO docs VALUES (3, "a", [0.8, 0.2, 0.0])
+    "#;
+    linal::dsl::execute_script(&mut db, script).expect("setup script failed");
+
+    // Unfiltered: all 3 rows are within the top-3.
+    let output = linal::dsl::execute_line(
+        &mut db,
+        "SEARCH docs ON embedding QUERY [1.0, 0.0, 0.0] LIMIT 3",
+        1,
+    )
+    .expect("search failed");
+    let linal::dsl::DslOutput::Table(ds) = output else {
+        panic!("expected inline Table")
+    };
+    assert_eq!(ds.len(), 3);
+
+    // FILTER category = "a": only ids 1 and 3 survive, id 2 (category "b")
+    // is dropped even though it's within the top-3 by similarity.
+    let output = linal::dsl::execute_line(
+        &mut db,
+        r#"SEARCH docs ON embedding QUERY [1.0, 0.0, 0.0] LIMIT 3 FILTER category = "a""#,
+        2,
+    )
+    .expect("filtered search failed");
+    let linal::dsl::DslOutput::Table(ds) = output else {
+        panic!("expected inline Table")
+    };
+    assert_eq!(ds.len(), 2);
+    let id_col = ds.schema.get_field_index("id").unwrap();
+    let mut ids: Vec<i64> = ds
+        .rows
+        .iter()
+        .map(|row| match &row.values[id_col] {
+            linal::core::value::Value::Int(i) => *i,
+            other => panic!("expected Int id, got {other:?}"),
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 3]);
+
+    // FILTER + INTO together still works.
+    let output = linal::dsl::execute_line(
+        &mut db,
+        r#"SEARCH docs ON embedding QUERY [1.0, 0.0, 0.0] LIMIT 3 FILTER category = "a" INTO filtered"#,
+        3,
+    )
+    .expect("filtered search into failed");
+    assert!(matches!(output, linal::dsl::DslOutput::Message(_)));
+    let filtered = db.get_dataset("filtered").expect("`filtered` should exist");
+    assert_eq!(filtered.len(), 2);
+}
+
+#[test]
+fn test_search_legacy_forms_unaffected_by_filter_clause() {
+    // The plan explicitly scopes FILTER to the modern syntax only -- both
+    // legacy forms (FROM...ON...K=, and WHERE...~=...LIMIT) must keep
+    // parsing and executing exactly as before.
+    let mut db = TensorDb::new();
+    let script = r#"
+    DATASET docs COLUMNS (id: Int, embedding: Vector(3))
+    CREATE VECTOR INDEX ON docs(embedding)
+    INSERT INTO docs VALUES (1, [1.0, 0.0, 0.0])
+    INSERT INTO docs VALUES (2, [0.0, 1.0, 0.0])
+    "#;
+    linal::dsl::execute_script(&mut db, script).expect("setup script failed");
+
+    linal::dsl::execute_line(
+        &mut db,
+        "SEARCH legacy_results FROM docs QUERY [1.0, 0.0, 0.0] ON embedding K=2",
+        1,
+    )
+    .expect("legacy FROM syntax should still work");
+    assert_eq!(
+        db.get_dataset("legacy_results")
+            .expect("legacy_results should exist")
+            .len(),
+        2
+    );
+
+    let output = linal::dsl::execute_line(
+        &mut db,
+        "SEARCH docs WHERE embedding ~= [1.0, 0.0, 0.0] LIMIT 2",
+        2,
+    )
+    .expect("legacy WHERE syntax should still work");
+    let linal::dsl::DslOutput::Table(ds) = output else {
+        panic!("expected inline Table")
+    };
+    assert_eq!(ds.len(), 2);
+}
+
+#[test]
 fn test_index_definitions_survive_save_and_load() {
     let mut db = TensorDb::new();
 

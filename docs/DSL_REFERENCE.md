@@ -672,6 +672,7 @@ CREATE VECTOR INDEX ON docs(embedding)
 
 - `CREATE INDEX [<name>] ON <dataset>(<column>)`: Build a standard lookup index on a scalar column.
 - `CREATE VECTOR INDEX [<name>] ON <dataset>(<column>)`: Build an index-accelerated structure over a `Vector` column, enabling `SEARCH` and index-aware `COSINE_SIM` filtering in `WHERE` clauses.
+  - **Hybrid filters**: `WHERE COSINE_SIM(embedding, [...]) > threshold AND category = 'electronics'` is index-accelerated too, not just the bare `COSINE_SIM` comparison alone — the query planner finds the `COSINE_SIM(...) > threshold` conjunct anywhere in a top-level `AND` chain (any position, any number of other conjuncts), routes it through the vector index, and applies the remaining conjuncts as a post-filter on those results. `EXPLAIN` always shows whether this actually fired (look for `CosineFilterExec` in the physical plan) — an `AND` predicate whose `COSINE_SIM` conjunct doesn't match this shape, or whose column has no vector index, falls back to a full scan+filter exactly as before, never silently wrong, just unaccelerated.
 - List existing indexes with `SHOW INDEXES [<dataset>]` (§9).
 - **Persistence**: `SAVE DATASET` writes which columns are indexed (and with what index type) alongside the data; `LOAD DATASET` rebuilds each one from the reloaded rows automatically. Before this, a `CREATE INDEX` only lived for the current process — reloading a saved dataset silently lost every index with no warning. `LOAD DATASET`'s output message now reports which indexes were restored (e.g. `"... indices restored on: category, embedding"`).
 - **Vector index clustering**: `CREATE VECTOR INDEX` automatically clusters the column's vectors (IVF-style, k-means with a cosine-similarity metric) once the column has at least ~64 rows — no extra syntax, this is transparent. Below that size, or before enough rows exist, it falls back to the original brute-force scan. `SEARCH`/`SELECT ... ORDER BY COSINE_SIM(...)` (approximate top-k) only probe the nearest few clusters; `WHERE COSINE_SIM(...) > threshold` (an exact predicate, not a ranking) instead uses a provable per-cluster similarity bound to skip clusters that provably can't contain a match, so it never drops a qualifying row.
@@ -683,10 +684,12 @@ The modern form:
 ```sql
 SEARCH docs ON embedding QUERY [0.9, 0.1, 0.0] LIMIT 10
 SEARCH docs ON embedding QUERY my_query_tensor LIMIT 10 INTO results
+SEARCH docs ON embedding QUERY [0.9, 0.1, 0.0] LIMIT 10 FILTER category = "electronics"
 ```
 
-- `SEARCH <dataset> ON <column> QUERY <[vector literal]|tensor_name> LIMIT <k> [INTO <target>]`
+- `SEARCH <dataset> ON <column> QUERY <[vector literal]|tensor_name> LIMIT <k> [FILTER <predicate>] [INTO <target>]`
 - Returns the top-`k` nearest rows by cosine similarity; `INTO <target>` materializes the results as a new dataset instead of returning them inline.
+- **`FILTER <predicate>`** (modern syntax only — the two alternate forms below don't have it): applies `<predicate>` to the `k` nearest-neighbor results as a post-filter, using the same predicate vocabulary as `WHERE`/`FILTER` in `SELECT` (§4). This is a **post**-filter, not a pre-filtered/expanded search — a highly selective predicate can return fewer than `k` rows, since filtering happens after the top-`k` candidates are already chosen, not before. A separate keyword from `WHERE`: `WHERE` is already claimed by this statement's alternate query-vector syntax below, so `FILTER` avoids silently breaking those scripts.
 
 Two alternate forms exist and parse to the exact same statement:
 

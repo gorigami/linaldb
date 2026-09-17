@@ -172,15 +172,22 @@ pub fn execute_explain(
                         })?
                 }
             };
-            LogicalPlan::VectorSearch {
+            let mut plan = LogicalPlan::VectorSearch {
                 input: Box::new(LogicalPlan::Scan {
                     dataset_name: s.dataset.clone(),
-                    schema,
+                    schema: schema.clone(),
                 }),
                 column: s.column.clone(),
                 query: query_tensor,
                 k: s.top_k,
+            };
+            if let Some(filter_expr) = &s.filter {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: explain_expr(filter_expr),
+                };
             }
+            plan
         }
 
         ExplainTarget::Select(s) => {
