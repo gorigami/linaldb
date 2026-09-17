@@ -125,9 +125,9 @@ Mounted per-dataset at `/delivery/datasets/:name/`:
   {"parquet": "data.parquet"}, ...}`).
 - `schema.json` — **the authoritative column typing for a client to
   trust**, not something to infer from the Parquet file's physical type.
-  Each column: `{"name": ..., "value_type": "Int"|"Float"|"String"|"Bool"
-  | {"Vector": <dim>} | {"Matrix": [<rows>, <cols>]}, "shape": {"dims":
-  [...]}, "nullable": bool}`.
+  Each column: `{"name": ..., "value_type": "Int"|"Float"|"Float64"|
+  "String"|"Bool"|"Complex" | {"Vector": <dim>} | {"Matrix": [<rows>,
+  <cols>]}, "shape": {"dims": [...]}, "nullable": bool}`.
 - `stats.json` — per-column min/max/mean/null_count/sparsity, row count.
 - `data.parquet` — the actual data.
 
@@ -163,6 +163,16 @@ be of size=N but index M had size=0`) — a cross-library Parquet encoding
 disagreement, not a bug in either reader in isolation. See the v0.1.72
 `CHANGELOG.md` entry for the full root-cause.
 
+### `Complex` column encoding in `data.parquet` (Phase 3)
+
+A `schema.json` column with `value_type: "Complex"` has **no native Arrow
+encoding at all** (unlike Vector/Matrix's `FixedSizeList` above) — it
+always uses the legacy JSON-string fallback: an Arrow `Utf8` column where
+each non-null cell is the literal text `{"Complex":[re,im]}`. A client
+must always take the JSON-parsing path for a `Complex` column, never the
+native-list path (there is no "common case" native encoding to fall back
+from, unlike Vector/Matrix).
+
 ## 3. The tagged `Value` encoding (used throughout `/execute` results)
 
 `core::value::Value` derives plain (externally-tagged) serde
@@ -171,18 +181,35 @@ of:
 
 | Wire form | Client-native equivalent |
 |---|---|
-| `{"Float": 1.5}` | float |
+| `{"Float": 1.5}` | float (32-bit) |
+| `{"Float64": 1.5}` | float (64-bit / double) |
 | `{"Int": 5}` | int |
 | `{"String": "x"}` | string |
 | `{"Bool": true}` | bool |
 | `{"Vector": [1.0, 2.0, 3.0]}` | list/array of floats |
 | `{"Matrix": [[1.0, 0.0], [0.0, 1.0]]}` | nested list / 2D array |
+| `{"Complex": [3.0, 4.0]}` | `[re, im]` pair — see below |
 | `"Null"` | null / NA / None (unit variant — **not** `{"Null": ...}`) |
 
 Note the last row: `Value::Null` is a unit enum variant, so serde emits
 the bare string `"Null"`, not an object — a client's unwrapper must check
 for that string form specifically, not assume every cell is a
 single-key object.
+
+**`Complex` (added Phase 3 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`)**: wraps
+`num_complex::Complex64` (`num-complex`'s own `Serialize`, `(re, im).serialize(...)`),
+so the payload is a plain 2-element JSON array `[re, im]` — **not** an
+object with `re`/`im` keys. `re`/`im` are always full `f64`. A client with
+no native complex type should represent this as a `(float, float)` pair or
+an equivalent small struct; there is no dedicated complex type in the wire
+contract beyond this array shape. `Value::equals()`'s real-equality
+semantics apply (`3+4i == 3+4i`), but there is **no ordering** — a
+`Complex` cell can never be the sort key for a client-side sort matching
+this engine's own (`ORDER BY <complex column>` is a hard server-side
+error, not a silently arbitrary order). The corresponding `ValueType` tag
+is the bare string `"Complex"` (a unit variant, same convention as
+`"Null"` in `schema.json`'s `value_type` field), not `{"Vector": n}`/
+`{"Matrix": [r, c]}`'s parameterized object form.
 
 ## 4. Error semantics
 
