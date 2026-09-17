@@ -291,8 +291,20 @@ impl NetCdfConnector {
     }
 }
 
+/// `scale_factor`/`add_offset`/`_FillValue`/`missing_value` are declared as true 0-d HDF5
+/// scalars in some NetCDF4 files, but real-world reanalysis products (verified against NCEP/
+/// NCAR Reanalysis's own `air.mon.mean.nc`/`slp.mon.mean.nc`) commonly store them as 1-element
+/// 1-D arrays instead -- `read_scalar` hard-errors on that shape (`ndim mismatch: expected
+/// scalar, got 1`), which `.ok()` then silently swallowed here, disabling CF unpacking/masking
+/// entirely against real files without so much as a warning. `read_raw` flattens either shape
+/// into a `Vec<T>` uniformly, so this covers both.
 fn read_f64_attr(ds: &Dataset, name: &str) -> Option<f64> {
-    ds.attr(name).ok()?.read_scalar::<f64>().ok()
+    ds.attr(name)
+        .ok()?
+        .read_raw::<f64>()
+        .ok()?
+        .into_iter()
+        .next()
 }
 
 fn read_string_attr(ds: &Dataset, name: &str) -> Option<String> {
