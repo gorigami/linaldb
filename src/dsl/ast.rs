@@ -414,6 +414,16 @@ pub enum AggFuncAst {
     Median,
 }
 
+/// The window function named in an `FFT`/`PSD` `WINDOW ... HANN|HAMMING`
+/// clause -- maps 1:1 to `core::signal::WindowFunction`'s non-`Rectangular`
+/// variants (kept as a separate AST-local type so this module doesn't need
+/// to depend on `core::signal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFnAst {
+    Hann,
+    Hamming,
+}
+
 /// What `SHOW` should display.
 #[derive(Debug, Clone)]
 pub enum ShowTarget {
@@ -826,10 +836,16 @@ pub enum CallExpr {
     /// `COVARIANCE a WITH b` by the `MATRIX` keyword immediately after
     /// `COVARIANCE`.
     CovarianceMatrix(Box<Expr>),
-    /// `FFT a` — real-to-complex forward FFT. `a` must be a rank-1 Vector;
-    /// result is a `Matrix(2, N/2+1)` (row 0 = real parts, row 1 =
-    /// imaginary parts). See SIGNAL_PROCESSING_PLAN.md for the convention.
-    Fft(Box<Expr>),
+    /// `FFT a [WINDOW HANN|HAMMING]` — real-to-complex forward FFT,
+    /// optionally windowed first to reduce spectral leakage (`window:
+    /// None` is the original unwindowed/rectangular behavior). `a` must be
+    /// a rank-1 Vector; result is a `Matrix(2, N/2+1)` (row 0 = real
+    /// parts, row 1 = imaginary parts). See SIGNAL_PROCESSING_PLAN.md for
+    /// the convention.
+    Fft {
+        input: Box<Expr>,
+        window: Option<WindowFnAst>,
+    },
     /// `IFFT a` — complex-to-real inverse FFT. `a` must be a `Matrix(2, M)`
     /// spectrum (as `FFT` produces); result is a real `Vector`. Assumes the
     /// original signal length was even (`2*(M-1)`) -- the spectrum alone
@@ -842,11 +858,17 @@ pub enum CallExpr {
     /// result is a real `Vector(M)`. The convenience most whitening/PSD
     /// work needs without touching phase.
     Magnitude(Box<Expr>),
-    /// `PSD a WINDOW <n>` — power spectral density estimate via averaged
-    /// periodograms (simplified: non-overlapping chunks, no window
-    /// function -- see `core::signal::psd`'s doc comment). `a` must be a
-    /// rank-1 Vector; result is a real `Vector(n/2+1)`.
-    Psd { input: Box<Expr>, window: usize },
+    /// `PSD a WINDOW <n> [HANN|HAMMING]` — power spectral density estimate
+    /// via averaged periodograms (simplified: non-overlapping chunks; a
+    /// window function is applied per-chunk when given, `window_fn: None`
+    /// is the original unwindowed/rectangular behavior -- see
+    /// `core::signal::psd`'s doc comment). `a` must be a rank-1 Vector;
+    /// result is a real `Vector(n/2+1)`.
+    Psd {
+        input: Box<Expr>,
+        window: usize,
+        window_fn: Option<WindowFnAst>,
+    },
     /// `WHITEN a WITH b` — flattens `a`'s noise spectrum against a PSD
     /// estimate `b` (as `PSD` produces). `b` must have exactly
     /// `a.len()/2+1` entries (see `core::signal::whiten`'s doc comment for

@@ -25,6 +25,53 @@
 
 use realfft::RealFftPlanner;
 
+/// Window function applied to a signal (or PSD chunk) before FFT, to
+/// reduce spectral leakage -- the gap `psd`'s own doc comment used to flag
+/// ("no window function applied ... this uses an implicit rectangular
+/// window"). `Rectangular` is the previous, still-default behavior: every
+/// sample weighted equally (i.e. genuinely no windowing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFunction {
+    Rectangular,
+    /// `0.5 * (1 - cos(2*pi*n / (N-1)))`
+    Hann,
+    /// `0.54 - 0.46 * cos(2*pi*n / (N-1))`
+    Hamming,
+}
+
+impl WindowFunction {
+    /// Element-wise multiplies `signal` by this window's coefficients,
+    /// returning a new `Vec` (never mutates in place -- callers always go
+    /// on to FFT the result, which needs an owned buffer anyway).
+    /// `Rectangular` is a plain copy. A window's coefficients summing to
+    /// less than `len` for `Hann`/`Hamming` is expected (it's the whole
+    /// point -- taper the edges to reduce leakage), not a bug to "fix" by
+    /// renormalizing back up to unit gain.
+    pub fn apply(&self, signal: &[f32]) -> Vec<f32> {
+        let n = signal.len();
+        let (a0, a1) = match self {
+            WindowFunction::Rectangular => return signal.to_vec(),
+            WindowFunction::Hann => (0.5, 0.5),
+            WindowFunction::Hamming => (0.54, 0.46),
+        };
+        if n <= 1 {
+            // A single-sample (or empty) window has no well-defined
+            // N-1 denominator -- every real caller windows a chunk of at
+            // least a few samples, so this just avoids a division by zero.
+            return signal.to_vec();
+        }
+        signal
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                let coeff =
+                    a0 - a1 * (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos();
+                x * coeff
+            })
+            .collect()
+    }
+}
+
 /// Forward real-to-complex FFT. Returns `(real_parts, imag_parts)`, each of
 /// length `signal.len() / 2 + 1`.
 pub fn fft_forward(signal: &[f32]) -> (Vec<f32>, Vec<f32>) {
@@ -79,6 +126,17 @@ pub fn fft_inverse(re: &[f32], im: &[f32], original_len: usize) -> Vec<f32> {
     outdata.iter().map(|x| x * scale).collect()
 }
 
+/// Forward FFT with a window function applied first (`FFT a WINDOW HANN`/
+/// `WINDOW HAMMING`). `fft_forward` itself stays unwindowed (rectangular)
+/// -- every other caller in this module (`whiten`/`bandpass`/
+/// `matched_filter`) depends on that exact rectangular behavior for their
+/// analysis/synthesis round-trips, so windowing is opt-in at this separate
+/// entry point rather than a parameter threaded through `fft_forward`.
+pub fn fft_forward_windowed(signal: &[f32], window_fn: WindowFunction) -> (Vec<f32>, Vec<f32>) {
+    let windowed = window_fn.apply(signal);
+    fft_forward(&windowed)
+}
+
 /// Magnitude spectrum: `sqrt(re^2 + im^2)` per bin. The convenience most
 /// whitening/PSD work actually needs without touching phase.
 pub fn magnitude(re: &[f32], im: &[f32]) -> Vec<f32> {
@@ -95,14 +153,14 @@ pub fn magnitude(re: &[f32], im: &[f32]) -> Vec<f32> {
 /// `Vec<f32>` of length `window / 2 + 1`.
 ///
 /// **Simplified vs. textbook Welch's method**: no overlap between chunks
-/// (Welch's method typically uses 50% overlap to use more of the data) and
-/// no window function applied to each chunk before FFT (Welch's method
-/// typically applies a Hann/Hamming window to reduce spectral leakage;
-/// this uses an implicit rectangular window). Good enough for the
-/// noise-floor estimation `WHITEN` needs; not a research-grade PSD
-/// estimator. Documented here and in `DSL_REFERENCE.md` rather than
-/// silently claiming full Welch's method.
-pub fn psd(signal: &[f32], window: usize) -> Vec<f32> {
+/// (Welch's method typically uses 50% overlap to use more of the data).
+/// `window_fn` closes the other half of the original gap (a Hann/Hamming
+/// window applied to each chunk before FFT, to reduce spectral leakage);
+/// pass `WindowFunction::Rectangular` for the original, unwindowed
+/// behavior. Good enough for the noise-floor estimation `WHITEN` needs;
+/// not a research-grade PSD estimator. Documented here and in
+/// `DSL_REFERENCE.md` rather than silently claiming full Welch's method.
+pub fn psd(signal: &[f32], window: usize, window_fn: WindowFunction) -> Vec<f32> {
     assert!(window > 0, "psd: window must be non-zero");
     assert!(
         signal.len() >= window,
@@ -116,7 +174,7 @@ pub fn psd(signal: &[f32], window: usize) -> Vec<f32> {
     let mut sum_power = vec![0.0f32; bins];
 
     for chunk in signal.chunks_exact(window).take(num_chunks) {
-        let (re, im) = fft_forward(chunk);
+        let (re, im) = fft_forward_windowed(chunk, window_fn);
         for i in 0..bins {
             sum_power[i] += re[i] * re[i] + im[i] * im[i];
         }
@@ -359,7 +417,7 @@ mod tests {
                     .sin()
             })
             .collect();
-        let spectrum = psd(&signal, window);
+        let spectrum = psd(&signal, window, WindowFunction::Rectangular);
         assert_eq!(spectrum.len(), window / 2 + 1);
         let (peak_bin, _) = spectrum
             .iter()
@@ -383,7 +441,7 @@ mod tests {
         // is concentrated.
         let window = 64;
         let noise = xorshift_noise(window * 200, 0x2026_0721);
-        let spectrum = psd(&noise, window);
+        let spectrum = psd(&noise, window, WindowFunction::Rectangular);
         let mean: f32 = spectrum.iter().sum::<f32>() / spectrum.len() as f32;
         let max = spectrum.iter().cloned().fold(0.0f32, f32::max);
         assert!(
@@ -396,7 +454,60 @@ mod tests {
     #[should_panic(expected = "shorter than window")]
     fn psd_panics_on_signal_shorter_than_window() {
         let signal = vec![0.0f32; 10];
-        let _ = psd(&signal, 64);
+        let _ = psd(&signal, 64, WindowFunction::Rectangular);
+    }
+
+    #[test]
+    fn hann_window_tapers_to_zero_at_both_edges() {
+        let signal = vec![1.0f32; 8];
+        let windowed = WindowFunction::Hann.apply(&signal);
+        assert!(windowed[0].abs() < 1e-6, "first sample: {}", windowed[0]);
+        assert!(windowed[7].abs() < 1e-6, "last sample: {}", windowed[7]);
+        // Midpoint of a constant-1.0 signal under Hann should be near the
+        // window's peak (coefficient 1.0), unlike the tapered edges.
+        assert!(windowed[3] > 0.8, "midpoint: {}", windowed[3]);
+    }
+
+    #[test]
+    fn hamming_window_does_not_taper_fully_to_zero() {
+        // Hamming's whole point vs. Hann is a nonzero edge coefficient
+        // (0.54 - 0.46 = 0.08) -- the two should visibly differ at the
+        // edges, not just be Hann under another name.
+        let signal = vec![1.0f32; 8];
+        let windowed = WindowFunction::Hamming.apply(&signal);
+        assert!(
+            (windowed[0] - 0.08).abs() < 1e-3,
+            "first sample: {}",
+            windowed[0]
+        );
+    }
+
+    #[test]
+    fn rectangular_window_is_a_no_op() {
+        let signal = vec![3.0f32, -1.0, 2.5];
+        assert_eq!(WindowFunction::Rectangular.apply(&signal), signal);
+    }
+
+    #[test]
+    fn psd_with_hann_window_still_peaks_at_expected_bin() {
+        // Windowing changes bin magnitudes but shouldn't move a clean
+        // single-frequency signal's peak bin.
+        let window = 64;
+        let target_bin = 5;
+        let signal: Vec<f32> = (0..window * 8)
+            .map(|i| {
+                (2.0 * std::f32::consts::PI * target_bin as f32 * (i % window) as f32
+                    / window as f32)
+                    .sin()
+            })
+            .collect();
+        let spectrum = psd(&signal, window, WindowFunction::Hann);
+        let (peak_bin, _) = spectrum
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        assert_eq!(peak_bin, target_bin);
     }
 
     /// A simple first-order low-pass ("leaky integrator") applied to white
@@ -421,11 +532,11 @@ mod tests {
     fn whiten_flattens_colored_noise_spectrum() {
         let n = 4096;
         let colored = colored_noise(n, 0x2026_0721);
-        let original_psd = psd(&colored, n); // single-chunk, matches WHITEN's required length
+        let original_psd = psd(&colored, n, WindowFunction::Rectangular); // single-chunk, matches WHITEN's required length
         let whitened = whiten(&colored, &original_psd);
         assert_eq!(whitened.len(), n);
 
-        let whitened_psd = psd(&whitened, n);
+        let whitened_psd = psd(&whitened, n, WindowFunction::Rectangular);
 
         let ratio = |spectrum: &[f32]| -> f32 {
             let mean: f32 = spectrum.iter().sum::<f32>() / spectrum.len() as f32;

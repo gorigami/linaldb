@@ -329,9 +329,10 @@ fn eval_call(
         // FFT/IFFT bypass eval_unary/UnaryOp (see eval_fft's doc comment)
         // and have no lazy form yet, mirroring Transpose/Correlate/
         // Similarity/Distance above.
-        CallExpr::Fft(a) => {
-            let a = operand!(a, "a");
-            db.eval_fft(ctx, output, &a).map_err(eng)
+        CallExpr::Fft { input, window } => {
+            let a = operand!(input, "a");
+            db.eval_fft(ctx, output, &a, window_fn_to_signal(window.as_ref()))
+                .map_err(eng)
         }
         CallExpr::Ifft(a) => {
             let a = operand!(a, "a");
@@ -341,9 +342,20 @@ fn eval_call(
             let a = operand!(a, "a");
             db.eval_magnitude(ctx, output, &a).map_err(eng)
         }
-        CallExpr::Psd { input, window } => {
+        CallExpr::Psd {
+            input,
+            window,
+            window_fn,
+        } => {
             let a = operand!(input, "a");
-            db.eval_psd(ctx, output, &a, *window).map_err(eng)
+            db.eval_psd(
+                ctx,
+                output,
+                &a,
+                *window,
+                window_fn_to_signal(window_fn.as_ref()),
+            )
+            .map_err(eng)
         }
         CallExpr::Whiten { signal, psd } => {
             let (signal, psd) = (operand!(signal, "signal"), operand!(psd, "psd"));
@@ -582,6 +594,26 @@ pub(super) fn infix_to_binary_op(op: InfixOp) -> BinaryOp {
     }
 }
 
+/// Converts the DSL-layer `WindowFnAst` (or its absence) into the
+/// engine-layer `core::signal::WindowFunction` -- the same
+/// parse-AST-to-engine-type conversion pattern `agg_func_to_logical` uses
+/// for `AggFuncAst`/`AggregateFunction`, kept at this DSL/engine boundary
+/// so `core::signal` doesn't need to depend on `dsl::ast`.
+fn window_fn_to_signal(w: Option<&WindowFnAst>) -> crate::core::signal::WindowFunction {
+    match w {
+        None => crate::core::signal::WindowFunction::Rectangular,
+        Some(WindowFnAst::Hann) => crate::core::signal::WindowFunction::Hann,
+        Some(WindowFnAst::Hamming) => crate::core::signal::WindowFunction::Hamming,
+    }
+}
+
+fn window_fn_ast_to_string(w: &WindowFnAst) -> &'static str {
+    match w {
+        WindowFnAst::Hann => "HANN",
+        WindowFnAst::Hamming => "HAMMING",
+    }
+}
+
 pub(super) fn fresh_temp(hint: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -768,12 +800,29 @@ fn call_to_string(c: &CallExpr) -> String {
             )
         }
         CallExpr::CovarianceMatrix(a) => format!("COVARIANCE MATRIX {}", expr_to_string(a)),
-        CallExpr::Fft(a) => format!("FFT {}", expr_to_string(a)),
+        CallExpr::Fft { input, window } => match window {
+            Some(w) => format!(
+                "FFT {} WINDOW {}",
+                expr_to_string(input),
+                window_fn_ast_to_string(w)
+            ),
+            None => format!("FFT {}", expr_to_string(input)),
+        },
         CallExpr::Ifft(a) => format!("IFFT {}", expr_to_string(a)),
         CallExpr::Magnitude(a) => format!("MAGNITUDE {}", expr_to_string(a)),
-        CallExpr::Psd { input, window } => {
-            format!("PSD {} WINDOW {}", expr_to_string(input), window)
-        }
+        CallExpr::Psd {
+            input,
+            window,
+            window_fn,
+        } => match window_fn {
+            Some(w) => format!(
+                "PSD {} WINDOW {} {}",
+                expr_to_string(input),
+                window,
+                window_fn_ast_to_string(w)
+            ),
+            None => format!("PSD {} WINDOW {}", expr_to_string(input), window),
+        },
         CallExpr::Whiten { signal, psd } => {
             format!(
                 "WHITEN {} WITH {}",

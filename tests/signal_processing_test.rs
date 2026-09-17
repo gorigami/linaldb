@@ -452,3 +452,79 @@ LET bad = MATCHED_FILTER m WITH t
         "MATCHED_FILTER on a Matrix data input should be a hard error"
     );
 }
+
+#[test]
+fn fft_with_window_clause_still_produces_matrix_2_by_n_half_plus_1() {
+    // Windowing changes the spectrum's values, not its shape.
+    let mut db = TensorDb::new();
+    execute_script(
+        &mut db,
+        r#"
+VECTOR sig = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
+LET spectrum = FFT sig WINDOW HANN
+"#,
+    )
+    .expect("FFT WINDOW HANN should succeed on a rank-1 Vector");
+
+    let spectrum = db.get("spectrum").expect("spectrum should exist");
+    assert_eq!(spectrum.shape.dims, vec![2, 5], "N=8 -> Matrix(2, 8/2+1)");
+}
+
+#[test]
+fn fft_window_hann_differs_from_unwindowed_fft() {
+    let mut db = TensorDb::new();
+    execute_script(
+        &mut db,
+        r#"
+VECTOR sig = [0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0]
+LET plain = FFT sig
+LET windowed = FFT sig WINDOW HANN
+"#,
+    )
+    .expect("both FFT forms should succeed");
+
+    let plain = db
+        .get("plain")
+        .expect("plain should exist")
+        .to_logical_vec();
+    let windowed = db
+        .get("windowed")
+        .expect("windowed should exist")
+        .to_logical_vec();
+    assert_ne!(
+        plain, windowed,
+        "a Hann-windowed FFT should differ from the unwindowed one"
+    );
+}
+
+#[test]
+fn fft_window_rejects_unknown_function_name() {
+    let mut db = TensorDb::new();
+    let result = execute_script(
+        &mut db,
+        r#"
+VECTOR sig = [0.0, 1.0, 0.0, -1.0]
+LET bad = FFT sig WINDOW BLACKMAN
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "FFT WINDOW with an unrecognized function name should be a parse error"
+    );
+}
+
+#[test]
+fn psd_with_window_function_still_produces_expected_bin_count() {
+    let mut db = TensorDb::new();
+    let script = format!(
+        "VECTOR sig = [{}]\nLET spectrum = PSD sig WINDOW 8 HAMMING\n",
+        (0..64)
+            .map(|i| ((i as f32) * 0.3).sin().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    execute_script(&mut db, &script).expect("PSD WINDOW <n> HAMMING should succeed");
+
+    let spectrum = db.get("spectrum").expect("spectrum should exist");
+    assert_eq!(spectrum.shape.dims, vec![5], "window=8 -> 8/2+1 = 5 bins");
+}

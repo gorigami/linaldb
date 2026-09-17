@@ -779,9 +779,10 @@ impl TensorDb {
         ctx: &mut ExecutionContext,
         output_name: impl Into<String>,
         input_name: &str,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         self.active_instance_mut()
-            .eval_fft(ctx, output_name, input_name)
+            .eval_fft(ctx, output_name, input_name, window_fn)
     }
 
     pub fn eval_trace(
@@ -953,9 +954,10 @@ impl TensorDb {
         output_name: impl Into<String>,
         input_name: &str,
         window: usize,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         self.active_instance_mut()
-            .eval_psd(ctx, output_name, input_name, window)
+            .eval_psd(ctx, output_name, input_name, window, window_fn)
     }
 
     pub fn eval_whiten(
@@ -2182,6 +2184,7 @@ impl DatabaseInstance {
         ctx: &mut ExecutionContext,
         output_name: impl Into<String>,
         input_name: &str,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
         let in_tensor = in_tensor_ref.clone();
@@ -2194,7 +2197,7 @@ impl DatabaseInstance {
         }
 
         let signal = in_tensor.to_logical_vec();
-        let (re, im) = crate::core::signal::fft_forward(&signal);
+        let (re, im) = crate::core::signal::fft_forward_windowed(&signal, window_fn);
         let m = re.len();
         let mut data = re;
         data.extend(im);
@@ -2203,7 +2206,10 @@ impl DatabaseInstance {
         let shape = Shape::new(vec![2, m]);
         let lineage = Lineage {
             execution_id: ctx.execution_id(),
-            operation: "FFT".to_string(),
+            operation: match window_fn {
+                crate::core::signal::WindowFunction::Rectangular => "FFT".to_string(),
+                w => format!("FFT(window={w:?})"),
+            },
             inputs: vec![in_tensor.id],
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
@@ -2332,6 +2338,7 @@ impl DatabaseInstance {
         output_name: impl Into<String>,
         input_name: &str,
         window: usize,
+        window_fn: crate::core::signal::WindowFunction,
     ) -> Result<(), EngineError> {
         let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
         let in_tensor = in_tensor_ref.clone();
@@ -2355,14 +2362,19 @@ impl DatabaseInstance {
         }
 
         let signal = in_tensor.to_logical_vec();
-        let spectrum = crate::core::signal::psd(&signal, window);
+        let spectrum = crate::core::signal::psd(&signal, window, window_fn);
         let bins = spectrum.len();
 
         let new_id = self.store.gen_id();
         let shape = Shape::new(vec![bins]);
         let lineage = Lineage {
             execution_id: ctx.execution_id(),
-            operation: format!("PSD(window={})", window),
+            operation: match window_fn {
+                crate::core::signal::WindowFunction::Rectangular => {
+                    format!("PSD(window={})", window)
+                }
+                w => format!("PSD(window={window}, window_fn={w:?})"),
+            },
             inputs: vec![in_tensor.id],
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
