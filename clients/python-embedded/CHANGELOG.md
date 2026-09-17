@@ -4,6 +4,25 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.10] - 2026-09-16
+
+Picks up the root engine's `v0.1.83` (linked directly in via the `linal` path
+dependency — no wire contract or Python-side API changes here). Two real
+correctness fixes, both found via a deep audit of `docs/DSL_REFERENCE.md`
+against a real build of the engine, and both now flow straight through to
+`Db.execute()`:
+
+- `WHERE <bool_col> = 1` and a bare `WHERE <bool_col>` (no explicit `=
+  true`) used to silently match zero rows instead of comparing correctly —
+  now fixed. Affects every `SELECT`/pipeline/`TRANSFORM` query run through
+  `execute()`.
+- In-place `TRANSFORM <source> SELECT ...` (no `INTO`) used to corrupt the
+  dataset's schema when the projection changed the column set, breaking
+  every later read. Now fixed.
+
+See the root repository's `CHANGELOG.md` (`[0.1.83]`) for the full
+root-cause writeups.
+
 ## [0.1.9] - 2026-09-16
 
 Documentation-only release, no functional changes:
