@@ -17,6 +17,7 @@ LINAL supports both standard relational types and multi-dimensional numeric stru
 - `Double` (aliases: `FLOAT64`): 64-bit floating point. Use this for real-world large-magnitude scalar values (GPS/Unix timestamps, etc.) that exceed `Float`'s ~7 significant digits — a plain `Float` column silently rounds these. Arithmetic mixing a `Double` with a `Float`/`Int` always promotes the result to `Double`. Not available for `Vector`/`Matrix`/`Tensor` elements, which remain `Float`-only.
 - `String`: UTF-8 character sequence.
 - `Bool`: `true` or `false`.
+- `Complex`: Scalar complex number (`f64` real + imaginary parts, wrapping `num_complex::Complex64`). No dedicated literal syntax — construct one with `COMPLEX(re, im)` (§3). Fully usable as a column type, `SELECT`/`WHERE` expression, and `SUM`/`AVG` aggregate (both well-defined for complex numbers), but **has no ordering**: `MIN`/`MAX`, `ORDER BY`, and `<`/`>`/`<=`/`>=` all error loudly on a `Complex` operand rather than guessing one (`=`/`!=` work — equality is well-defined even without an order). Scalar-only — there is no `Vector`/`Matrix` of `Complex` (a genuine `Tensor<Complex>` type is a separate, larger initiative); a *collection* of complex numbers (e.g. `EIGENVALUES_GENERAL`'s output) is instead a `Matrix(2, N)` with real parts in row 0 and imaginary parts in row 1, the same convention `FFT` already uses for its spectrum.
 - `Null`: Represents a missing value. Use the `?` suffix in `DATASET` definitions for nullable columns (e.g., `score: Float?`).
 
 ### Tensor Types
@@ -168,6 +169,31 @@ MATRIX samples = [[1,2],[2,1],[3,4],[4,3],[5,6]]
 LET cm = COVARIANCE MATRIX samples   -- Matrix(2, 2), sample covariance
 ```
 
+### Complex Numbers
+
+`Complex` (§1) is a scalar SQL/relational type, not a tensor-DSL keyword — these are SQL-callable functions (usable in `SELECT`/`WHERE`/computed columns), not standalone `LET`-bound operators.
+
+- `COMPLEX(re, im)`: constructs a `Complex` scalar. The only way to write a complex value directly — there is no `3+4i`-style literal syntax.
+- `REAL(z)` / `IMAG(z)`: real / imaginary part. Result: `Double`.
+- `ABS(z)`: magnitude (`sqrt(re² + im²)`). Named `ABS`, not `MAGNITUDE`, to avoid any confusion with the unrelated `MAGNITUDE a` tensor-DSL keyword (§3, FFT spectrum magnitude — a different operator on a different type). Result: `Double`.
+- `PHASE(z)`: phase angle (`atan2(im, re)`, radians). Result: `Double`.
+- `CONJ(z)`: complex conjugate (`re - im·i`). Result: `Complex`.
+
+Arithmetic (`+`, `-`, `*`, `/`) works between two `Complex` values, or a `Complex` and any real numeric type (`Int`/`Float`/`Double`), promoting the real operand to a zero-imaginary-part complex number first — the same "mixed arithmetic always promotes" convention `Double` itself uses. `SUM`/`AVG` aggregates (plain and windowed, `OVER (...)`) are well-defined and fully supported for a `Complex` column. `=`/`!=` compare by real equality. **`Complex` has no ordering** — `MIN`/`MAX`, `ORDER BY`, and `<`/`>`/`<=`/`>=` all error loudly rather than silently picking an arbitrary "winner" or leaving rows unsorted.
+
+```sql
+DATASET nums COLUMNS (id: Int, re: Double, im: Double)
+INSERT INTO nums (id = 1, re = 3.0, im = 4.0)
+INSERT INTO nums (id = 2, re = 1.0, im = -1.0)
+
+SELECT id, COMPLEX(re, im) AS z FROM nums          -- z: 3+4i, 1-1i
+SELECT REAL(COMPLEX(re, im)), ABS(COMPLEX(re, im)) FROM nums WHERE id = 1  -- 3, 5
+
+TRANSFORM nums SELECT id, COMPLEX(re, im) AS val INTO cnums
+SELECT SUM(val) AS s FROM cnums                    -- s: 4+3i
+SELECT MIN(val) FROM cnums                         -- error: no ordering
+```
+
 ### Lazy Evaluation
 
 Prefix a `LET` with `LAZY` (either word order is accepted) to defer computation. The expression is stored as a computation graph and materialized only when `SHOW` is called.
@@ -214,12 +240,15 @@ LET filtered = BANDPASS signal FROM 35.0 TO 350.0 WITH RATE 4096.0  -- keep only
 LET correlation = MATCHED_FILTER whitened WITH template  -- Vector(8): correlation-vs-lag
 ```
 
-No new `Value`/`ValueType::Complex` variant exists to represent a complex
-spectrum — it is an ordinary `Matrix(2, N)` value by convention, so every
-existing `Matrix`-handling feature (`SHOW`, persistence, `TRANSPOSE`, row
-indexing) already works on it unmodified. See `SIGNAL_PROCESSING_PLAN.md`
-at the repo root for the full design history — this is the last operator
-that plan calls for, though the plan may grow in future rounds.
+A complex *spectrum* (many complex numbers) stays an ordinary `Matrix(2,
+N)` value by convention, even though the scalar `Complex` type (§1) now
+exists — so every existing `Matrix`-handling feature (`SHOW`, persistence,
+`TRANSPOSE`, row indexing) already works on it unmodified, and `Complex`
+stays genuinely scalar-only (a locked design decision, not an oversight —
+see `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md` Phase 3). `EIGENVALUES_GENERAL`
+below uses the identical `Matrix(2, N)` convention for the same reason.
+See `SIGNAL_PROCESSING_PLAN.md` at the repo root for `FFT`'s own full
+design history.
 
 ### Classical Linear Algebra
 
@@ -237,7 +266,8 @@ history.
 - `INVERSE a`: `a` must be a square `Matrix`. Result is a `Matrix` the same shape. **Errors if `a` is singular** — never returns a matrix full of `NaN`/`Inf`.
 - `SOLVE a b`: Solves `a x = b` for `x` via LU decomposition with partial pivoting. `a` must be square; `b` a `Vector` with length matching `a`'s row count. Result is a `Vector`. **Errors if `a` is singular.**
 - `LSTSQ a b`: Least-squares (minimum-norm) solve of `a x = b` for **any** shape of `a` — over-determined, under-determined, or square-but-singular — via the Moore-Penrose pseudo-inverse (SVD-based). `b` a `Vector` with length matching `a`'s row count. Result is a `Vector`. **Never errors on a non-square or singular `a`**, unlike `SOLVE` — the two are deliberately distinct keywords, not one polymorphic operator, so `SOLVE` keeps erroring loudly on non-square input rather than silently falling back to least-squares.
-- `EIGENVALUES a`: Real eigenvalues of a **symmetric** matrix only (guarantees real results — no complex-number `Value` support exists). `a` must be square and symmetric (checked within a relative numerical tolerance; a non-symmetric input errors rather than silently producing a wrong answer). Result is a `Vector` of eigenvalues in no particular guaranteed order.
+- `EIGENVALUES a`: Real eigenvalues of a **symmetric** matrix only (guarantees real results — see `EIGENVALUES_GENERAL` below for a non-symmetric matrix, whose eigenvalues can be genuinely complex). `a` must be square and symmetric (checked within a relative numerical tolerance; a non-symmetric input errors rather than silently producing a wrong answer). Result is a `Vector` of eigenvalues in no particular guaranteed order.
+- `EIGENVALUES_GENERAL a`: Eigenvalues of a **general** (not necessarily symmetric) square matrix, via Schur decomposition — no symmetry requirement, and the result can be genuinely complex. Result is a `Matrix(2, N)` (row 0 = real parts, row 1 = imaginary parts), the same convention `FFT` uses. `EIGENVALUES` itself is unchanged, still symmetric-only.
 - `CHOLESKY a`: Cholesky decomposition (`a = L * Lᵗ`) of a symmetric **positive-definite** matrix. Result is the lower-triangular `Matrix` `L`. **Errors if `a` isn't positive-definite.**
 - `PCA a COMPONENTS k`: Projects `a`'s rows (samples) onto their top-`k` principal components — mean-centers each column, then keeps the top-`k` components of the centered data's SVD. `k` must be between 1 and `a`'s column count. Result is a `Matrix` with the same row count as `a` and `k` columns. Built directly on `SVD` below.
 
@@ -245,7 +275,8 @@ history.
 
 - `QR a`: QR decomposition (`a = Q * R`) of any rectangular `Matrix`. Two outputs, bind order `Q`, `R`.
 - `LU a`: LU decomposition with partial pivoting (`P * a = L * U`). `a` must be square. Three outputs, bind order `P`, `L`, `U` — `P` is included specifically so `P @ a == L @ U` actually holds; a caller that only kept `L`/`U` and dropped `P` would find that equality silently false for any input that needs row pivoting.
-- `EIGEN a`: Full eigendecomposition (eigenvalues + eigenvectors) of a **symmetric** matrix only — deliberately narrower than "the general case," since a truly general eigendecomposition can have complex eigenvalues/eigenvectors and this engine has no complex `Value` support (the same constraint `EIGENVALUES` already has). Two outputs, bind order eigenvalues (`Vector`), eigenvectors (`Matrix`, as columns).
+- `EIGEN a`: Full eigendecomposition (eigenvalues + eigenvectors) of a **symmetric** matrix only. Two outputs, bind order eigenvalues (`Vector`), eigenvectors (`Matrix`, as columns). Unchanged — see `EIGEN_GENERAL` below for the non-symmetric case.
+- `EIGEN_GENERAL a`: Full eigendecomposition of a **general** square matrix. Two outputs, bind order eigenvalues (`Vector`), eigenvectors (`Matrix`, as columns) — same shape as `EIGEN`. **Real eigenvalues only**: there is no general complex-eigenvector solver here, so this **errors loudly** if any eigenvalue is genuinely complex (use `EIGENVALUES_GENERAL` for the eigenvalues alone in that case). Not exact for a *defective* matrix (a repeated eigenvalue with no full eigenvector basis) — documented, not silently claimed exact.
 - `SVD a`: Singular value decomposition (`a = U * diag(s) * Vᵗ`) of any rectangular `Matrix`. Three outputs, bind order `U`, `s` (`Vector` of singular values), `Vᵗ`.
 
 ```sql
@@ -265,6 +296,11 @@ LET p, l, u = LU m
 MATRIX sym = [[2, 1], [1, 2]]
 LET vals, vecs = EIGEN sym
 LET u, s, vt = SVD m
+
+MATRIX rot = [[0, -1], [1, 0]]       -- eigenvalues are +-i, genuinely complex
+LET spec = EIGENVALUES_GENERAL rot   -- Matrix(2, 2): real row [0, 0], imag row [1, -1]
+MATRIX tri = [[2, 1], [0, 3]]        -- non-symmetric, but real eigenvalues (2, 3)
+LET gvals, gvecs = EIGEN_GENERAL tri
 ```
 
 #### Multi-output `LET`
@@ -272,7 +308,7 @@ LET u, s, vt = SVD m
 `LET a, b[, c] = <expr>` binds more than one name from a single expression
 in one statement — the only expressions that support this are the
 decompositions above with more than one natural output (`QR`/`LU`/`EIGEN`/
-`SVD`). The number of names must match that expression's real output count
+`EIGEN_GENERAL`/`SVD`). The number of names must match that expression's real output count
 exactly; a mismatch (either direction) is a clear error, not a silent
 truncation or `NULL`-fill. Using a single-output operator (e.g. `CHOLESKY`)
 with multi-output `LET`, or a multi-output operator with a plain single-name
@@ -366,6 +402,7 @@ LIMIT 10
 
 - **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `AVG_VEC`, `SUM_VEC`, `VARIANCE`, `MEDIAN`. A `SELECT` with an aggregate and no `GROUP BY` computes a single "global" aggregate row over the whole result set (e.g. `SELECT COUNT(*) FROM t`).
 - **`VARIANCE(col)`/`MEDIAN(col)`**: population variance and median of a scalar (`Int`/`Float`/`Float64`) column, computed per group (or globally, with no `GROUP BY`) exactly like `SUM`/`AVG`. Both always produce a `DOUBLE` result regardless of the input column's own numeric type. Neither is supported as a window function (`OVER`) — `SELECT VARIANCE(x) OVER (...)` is a parse error, not a silently wrong result.
+- **`SUM`/`AVG` on a `Complex` column**: well-defined and fully supported, plain or windowed (`OVER (...)`). **`MIN`/`MAX` on a `Complex` column are a hard error** — `Complex` has no ordering (§3), so there is no "smallest"/"largest" value to silently guess at.
 - **`HAVING` on an aliased aggregate**: `HAVING` resolves an aggregate by alias too, not just by its bare call — `SELECT region, AVG(score) AS avg_score FROM diagnostics GROUP BY region HAVING avg_score > 0.5` matches rows the same as `HAVING AVG(score) > 0.5` would.
 - **Filtering**: `WHERE` or `FILTER` can be used interchangeably.
 - **`DISTINCT`**: `SELECT DISTINCT <cols> FROM ...` removes duplicate rows from the result.

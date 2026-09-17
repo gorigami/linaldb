@@ -131,23 +131,40 @@ notebook in a genuinely uncovered scientific field, with full documentation upda
       `docs/ERROR_REFERENCE.md` describes error *types*, nothing to add there for this phase)
 
 ### Phase 3 — Complex-number foundation
-- [ ] `Value::Complex(f64, f64)` / `ValueType::Complex` (scalar-only), promote `num-complex` to a
-      direct dependency
-- [ ] `EIGENVALUES_GENERAL`/`EIGEN_GENERAL` (`src/core/linalg.rs`, nalgebra's `Schur`/general
-      `.eigenvalues()`) — `EIGENVALUES`/`EIGEN` stay symmetric-only, unchanged
-- [ ] Complex arithmetic (`+`/`-`/`*`/`/`, magnitude/phase)
-- [ ] `clients/CONTRACT.md` + `clients/EMBEDDED_CONTRACT.md` updated for the new wire type;
-      `clients/python-embedded`/`clients/r-embedded` compatibility pass
-- [ ] **Dedicated, proactive wildcard-arm consistency-audit checkpoint** on `Value`/`ValueType`
+- [x] `Value::Complex(Complex64)` / `ValueType::Complex` (scalar-only, wraps `num_complex::Complex64`
+      rather than a bare `(f64, f64)` tuple), promoted `num-complex` to a direct dependency
+      (`features = ["serde"]`)
+- [x] `EIGENVALUES_GENERAL`/`EIGEN_GENERAL` (`src/core/linalg.rs`, nalgebra's `Schur`/
+      `.complex_eigenvalues()`) — `EIGENVALUES`/`EIGEN` stay symmetric-only, unchanged.
+      `EIGENVALUES_GENERAL` returns `Matrix(2,N)` (FFT's complex-spectrum convention), not a
+      `Complex` collection, per the scalar-only design decision. `EIGEN_GENERAL` (multi-output
+      `LET`) is scoped to the real-eigenvalue case only (nalgebra has no public general
+      complex-eigenvector API); it errors loudly rather than guessing when eigenvalues turn out
+      genuinely complex.
+- [x] Complex arithmetic (`+`/`-`/`*`/`/`, magnitude/phase via `ABS`/`PHASE`/`REAL`/`IMAG`/`CONJ`,
+      constructed via `COMPLEX(re, im)`) — promote-and-never-demote, checked before `Float64`
+- [x] `clients/CONTRACT.md` + `clients/EMBEDDED_CONTRACT.md` updated for the new wire type;
+      `clients/python-embedded`/`clients/r-embedded` compatibility pass (verified via `cargo
+      check`, since PyO3 extension-module crates don't link outside `maturin` — pre-existing,
+      unrelated to this change)
+- [x] **Dedicated, proactive wildcard-arm consistency-audit checkpoint** on `Value`/`ValueType`
       across the whole codebase, before declaring the phase done (this is the exact bug class
       the `f64` scalar rollout only found after shipping — `Field::is_compatible`,
-      arithmetic/aggregate evaluators, computed-column per-row typing)
+      arithmetic/aggregate evaluators, computed-column per-row typing). Found and fixed 8 real
+      bugs: `=`/`!=` on `Complex` always false (fixed via new `Value::equals()` primitive),
+      `ORDER BY` on `Complex` silently unsorted, plain and windowed `MIN`/`MAX` silently frozen
+      on the first row, plain and windowed `SUM`/`AVG` silently stuck at `Int(0)`, and `AVG`'s
+      schema type inference silently reporting `Float` (causing a real runtime type-mismatch
+      error). See `docs/ARCHITECTURE.md`'s `value.rs` section for the full list.
 - [ ] Full 11-notebook regression (highest-risk phase — `Value` touches comparison, table
-      rendering, all four connectors' type inference, both wire formats)
-- [ ] New notebook: `14_control_systems_stability.ipynb`
-- [ ] Docs: `docs/DSL_REFERENCE.md`, `docs/ARCHITECTURE.md` (forward-reference to this phase's
-      grep discipline), `README.md`, `CHANGELOG.md`, `docs/ERROR_REFERENCE.md`,
-      `clients/CONTRACT.md`, `clients/EMBEDDED_CONTRACT.md`
+      rendering, all four connectors' type inference, both wire formats) — **deferred**:
+      `linal-hub`'s notebooks install the released PyPI wheel, not this branch's source; same
+      rationale as Phase 1/2. Follow-up after this phase is released.
+- [ ] New notebook: `14_control_systems_stability.ipynb` — **deferred**, same reason as above
+- [x] Docs: `docs/DSL_REFERENCE.md`, `docs/ARCHITECTURE.md` (forward-reference to this phase's
+      grep discipline), `README.md`, `CHANGELOG.md`, `docs/ERROR_REFERENCE.md` (checked — describes
+      error *types*, not per-keyword messages; nothing to add), `clients/CONTRACT.md`,
+      `clients/EMBEDDED_CONTRACT.md`
 
 ## Backlog (greenfield, scoping notes only — separate future rounds)
 

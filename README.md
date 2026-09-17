@@ -13,7 +13,7 @@ LINALDB is designed for developers and researchers who need the structure of a d
 - **Vector Aggregates**: `AVG_VEC` and `SUM_VEC` compute element-wise centroid or sum across row groups in a single GROUP BY query.
 - **Lazy Evaluation Engine**: Define computation graphs using `LAZY LET` and materialize them on-demand via `SHOW`.
 - **Numerical Aggregations**: Native `SUM`, `MEAN`, `STDEV`, `VARIANCE`, `MEDIAN`, `QUANTILE`, and `COVARIANCE`/`COVARIANCE MATRIX` operations for powerful statistical analysis.
-- **Classical Linear Algebra**: `TRACE`, `DETERMINANT`, `RANK`, `INVERSE`, `SOLVE`, `LSTSQ`, `EIGENVALUES`, `CHOLESKY`, `PCA`, and the decompositions `QR`/`LU`/`EIGEN`/`SVD` — real matrix math, natively in the DSL.
+- **Classical Linear Algebra**: `TRACE`, `DETERMINANT`, `RANK`, `INVERSE`, `SOLVE`, `LSTSQ`, `EIGENVALUES`/`EIGENVALUES_GENERAL`, `CHOLESKY`, `PCA`, and the decompositions `QR`/`LU`/`EIGEN`/`EIGEN_GENERAL`/`SVD` — real matrix math, natively in the DSL, including a scalar `Complex` value type (`COMPLEX`/`REAL`/`IMAG`/`ABS`/`PHASE`/`CONJ`) for non-symmetric matrices' complex eigenvalues.
 - **Semantic Transformations**: Build zero-copy views using Reference Graphs, with real, persisted, restart-surviving lineage via `EXPLAIN LINEAGE`.
 - **Local-First & Portable**: Use it as an embedded library (like SQLite) or a multi-tenant managed server.
 - **High-Performance Ingestion**: Native zero-copy ingestion for scientific data (CSV, HDF5, NetCDF, NumPy, Parquet, Zarr) via the connector-based architecture — including real CF-convention semantics for NetCDF, not just opaque bytes.
@@ -128,6 +128,10 @@ LET q, r = QR m
 LET p, l, u = LU m
 MATRIX sym = [[2, 1], [1, 2]]
 LET vals, vecs = EIGEN sym    -- symmetric matrices: real eigenvalues guaranteed
+
+-- Non-symmetric matrices: eigenvalues may be complex
+MATRIX rot = [[0, -1], [1, 0]]
+LET eigs = EIGENVALUES_GENERAL rot   -- Matrix(2,N): row 0 = real parts, row 1 = imaginary parts
 
 -- Dimensionality reduction, built on SVD
 LET projected = PCA m COMPONENTS 1
