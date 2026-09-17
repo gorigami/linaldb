@@ -141,6 +141,47 @@ pub trait ComputeBackend: std::fmt::Debug + Send + Sync {
         a: &Tensor,
         new_id: TensorId,
     ) -> Result<Tensor, String>;
+    /// Population variance -- default implementation shared by every backend
+    /// (like `correlate` above), no SIMD-specific fast path.
+    fn variance(
+        &self,
+        _ctx: &mut ExecutionContext,
+        a: &Tensor,
+        new_id: TensorId,
+    ) -> Result<Tensor, String> {
+        kernels::variance(a, new_id)
+    }
+    /// Median (sorts all elements) -- default implementation shared by
+    /// every backend, no SIMD-specific fast path.
+    fn median(
+        &self,
+        _ctx: &mut ExecutionContext,
+        a: &Tensor,
+        new_id: TensorId,
+    ) -> Result<Tensor, String> {
+        kernels::median(a, new_id)
+    }
+    /// `p`-th quantile (sorts all elements) -- default implementation
+    /// shared by every backend, no SIMD-specific fast path.
+    fn quantile(
+        &self,
+        _ctx: &mut ExecutionContext,
+        a: &Tensor,
+        p: f64,
+        new_id: TensorId,
+    ) -> Result<Tensor, String> {
+        kernels::quantile(a, p, new_id)
+    }
+    /// Population covariance between two same-shape tensors -- default
+    /// implementation shared by every backend, no SIMD-specific fast path.
+    fn covariance(
+        &self,
+        _ctx: &mut ExecutionContext,
+        a: &Tensor,
+        b: &Tensor,
+    ) -> Result<f32, String> {
+        kernels::covariance(a, b)
+    }
 
     // Layout operations
     fn reshape(

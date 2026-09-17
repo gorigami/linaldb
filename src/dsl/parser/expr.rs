@@ -377,6 +377,10 @@ impl Parser {
             | Some(Token::Sum)
             | Some(Token::Mean)
             | Some(Token::Stdev)
+            | Some(Token::Variance)
+            | Some(Token::Median)
+            | Some(Token::Quantile)
+            | Some(Token::Covariance)
             | Some(Token::Fft)
             | Some(Token::Ifft)
             | Some(Token::Magnitude)
@@ -403,6 +407,7 @@ impl Parser {
             | Some(Token::Rank)
             | Some(Token::Inverse)
             | Some(Token::Solve)
+            | Some(Token::Lstsq)
             | Some(Token::Eigenvalues)
             | Some(Token::Qr)
             | Some(Token::Lu)
@@ -421,6 +426,7 @@ impl Parser {
             | Some(Token::Rank)
             | Some(Token::Inverse)
             | Some(Token::Solve)
+            | Some(Token::Lstsq)
             | Some(Token::Eigenvalues)
             | Some(Token::Qr)
             | Some(Token::Lu)
@@ -643,6 +649,29 @@ impl Parser {
             Some(Token::Sum) => CallExpr::Sum(Box::new(self.parse_simple_expr()?)),
             Some(Token::Mean) => CallExpr::Mean(Box::new(self.parse_simple_expr()?)),
             Some(Token::Stdev) => CallExpr::Stdev(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Variance) => CallExpr::Variance(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Median) => CallExpr::Median(Box::new(self.parse_simple_expr()?)),
+            Some(Token::Quantile) => {
+                let input = self.parse_simple_expr()?;
+                self.eat(&Token::At)?;
+                let p = self.eat_number()?;
+                CallExpr::Quantile {
+                    input: Box::new(input),
+                    p,
+                }
+            }
+            Some(Token::Covariance) => {
+                if self.at(&Token::Matrix) {
+                    self.advance();
+                    let input = self.parse_simple_expr()?;
+                    CallExpr::CovarianceMatrix(Box::new(input))
+                } else {
+                    let a = self.parse_simple_expr()?;
+                    self.eat(&Token::With)?;
+                    let b = self.parse_simple_expr()?;
+                    CallExpr::Covariance(Box::new(a), Box::new(b))
+                }
+            }
             Some(Token::Fft) => CallExpr::Fft(Box::new(self.parse_simple_expr()?)),
             Some(Token::Ifft) => CallExpr::Ifft(Box::new(self.parse_simple_expr()?)),
             Some(Token::Magnitude) => CallExpr::Magnitude(Box::new(self.parse_simple_expr()?)),
@@ -725,6 +754,11 @@ impl Parser {
                 let a = self.parse_simple_expr()?;
                 let b = self.parse_simple_expr()?;
                 CallExpr::Solve(Box::new(a), Box::new(b))
+            }
+            Some(Token::Lstsq) => {
+                let a = self.parse_simple_expr()?;
+                let b = self.parse_simple_expr()?;
+                CallExpr::Lstsq(Box::new(a), Box::new(b))
             }
             Some(Token::Eigenvalues) => CallExpr::Eigenvalues(Box::new(self.parse_simple_expr()?)),
             Some(Token::Qr) => CallExpr::Qr(Box::new(self.parse_simple_expr()?)),

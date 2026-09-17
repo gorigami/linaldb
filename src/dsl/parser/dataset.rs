@@ -790,6 +790,8 @@ impl Parser {
         // Check for aggregate functions or window-capable functions
         let agg_func = match self.peek() {
             Some(Token::Sum) => Some(AggFuncAst::Sum),
+            Some(Token::Variance) => Some(AggFuncAst::Variance),
+            Some(Token::Median) => Some(AggFuncAst::Median),
             Some(Token::Ident(s)) if s == "AVG" => Some(AggFuncAst::Avg),
             Some(Token::Ident(s)) if s == "COUNT" => Some(AggFuncAst::Count),
             Some(Token::Ident(s)) if s == "MIN" => Some(AggFuncAst::Min),
@@ -825,6 +827,11 @@ impl Parser {
                     AggFuncAst::Count => WindowFunc::Count(Box::new(inner_expr)),
                     AggFuncAst::Min => WindowFunc::Min(Box::new(inner_expr)),
                     AggFuncAst::Max => WindowFunc::Max(Box::new(inner_expr)),
+                    AggFuncAst::Variance | AggFuncAst::Median => {
+                        return Err(self.error(
+                            "VARIANCE/MEDIAN cannot be used as a window function (OVER) -- only as a regular or GROUP BY aggregate",
+                        ));
+                    }
                 };
                 return Ok(SelectExpr::Window {
                     func: wfunc,

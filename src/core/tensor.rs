@@ -510,6 +510,8 @@ pub enum Expression {
     Mean(Box<Expression>),
     /// Desviación estándar
     Stdev(Box<Expression>),
+    /// Varianza poblacional
+    Variance(Box<Expression>),
 }
 
 /// Un tensor que aún no ha sido evaluado

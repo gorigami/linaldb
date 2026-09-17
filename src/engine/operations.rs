@@ -17,6 +17,8 @@ pub enum BinaryOp {
     Similarity,
     /// DISTANCE a TO b -> distancia L2 (rank-1)
     Distance,
+    /// COVARIANCE a WITH b -> population covariance(a, b), any matching shape
+    Covariance,
 }
 
 impl fmt::Display for BinaryOp {
@@ -29,6 +31,7 @@ impl fmt::Display for BinaryOp {
             BinaryOp::Correlate => "CORRELATE",
             BinaryOp::Similarity => "SIMILARITY",
             BinaryOp::Distance => "DISTANCE",
+            BinaryOp::Covariance => "COVARIANCE",
         };
         write!(f, "{}", s)
     }
@@ -51,6 +54,12 @@ pub enum UnaryOp {
     Mean,
     /// STDEV a (standard deviation)
     Stdev,
+    /// VARIANCE a (population variance)
+    Variance,
+    /// MEDIAN a (median of all elements)
+    Median,
+    /// QUANTILE a AT p (p-th quantile of all elements, 0.0..=1.0)
+    Quantile(f64),
 }
 
 impl fmt::Display for UnaryOp {
@@ -63,6 +72,9 @@ impl fmt::Display for UnaryOp {
             UnaryOp::Sum => write!(f, "SUM"),
             UnaryOp::Mean => write!(f, "MEAN"),
             UnaryOp::Stdev => write!(f, "STDEV"),
+            UnaryOp::Variance => write!(f, "VARIANCE"),
+            UnaryOp::Median => write!(f, "MEDIAN"),
+            UnaryOp::Quantile(p) => write!(f, "QUANTILE(p={:.4})", p),
         }
     }
 }

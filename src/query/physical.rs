@@ -357,7 +357,38 @@ impl PhysicalPlan for AggregateExec {
         // Indexed by position in aggr_expr
         type AvgAccumulators = Vec<(Value, usize)>; // (sum, count) for AVG
 
-        let mut groups: HashMap<GroupKey, (Accumulators, AvgAccumulators)> = HashMap::new();
+        // VARIANCE: Welford's online algorithm (mean, M2, count) per group
+        // per aggregate position -- a single pass, no need to retain raw
+        // values (unlike MEDIAN below). Population variance = M2 / count.
+        type VarianceAccumulators = Vec<(f64, f64, u64)>;
+
+        // MEDIAN: no online algorithm computes an exact median, so this
+        // collects every scalar value seen per group per aggregate
+        // position, sorted at finalization time.
+        type MedianAccumulators = Vec<Vec<f64>>;
+
+        let mut groups: HashMap<
+            GroupKey,
+            (
+                Accumulators,
+                AvgAccumulators,
+                VarianceAccumulators,
+                MedianAccumulators,
+            ),
+        > = HashMap::new();
+
+        // VARIANCE/MEDIAN are scalar-only (Int/Float/Float64) -- promotes
+        // any of the three to `f64`, or `None` for a non-scalar `Value`
+        // (Vector/Matrix/String/Bool/Null), which callers turn into a real
+        // engine error rather than silently skipping the row.
+        fn scalar_as_f64(v: &Value) -> Option<f64> {
+            match v {
+                Value::Int(i) => Some(*i as f64),
+                Value::Float(f) => Some(*f as f64),
+                Value::Float64(f) => Some(*f),
+                _ => None,
+            }
+        }
 
         // 1. Initialize groups
         // Iterate rows
@@ -369,10 +400,12 @@ impl PhysicalPlan for AggregateExec {
                 .map(|expr| evaluate_expression(expr, &row))
                 .collect();
 
-            let (accs, avg_accs) = groups.entry(key).or_insert_with(|| {
+            let (accs, avg_accs, var_accs, median_accs) = groups.entry(key).or_insert_with(|| {
                 // Init accumulators
                 let mut regular_accs = Vec::new();
                 let mut avg_accumulators = Vec::new();
+                let mut var_accumulators: VarianceAccumulators = Vec::new();
+                let mut median_accumulators: MedianAccumulators = Vec::new();
 
                 for expr in &self.aggr_expr {
                     match expr {
@@ -382,6 +415,8 @@ impl PhysicalPlan for AggregateExec {
                             crate::query::logical::AggregateFunction::Count => {
                                 regular_accs.push(Value::Int(0));
                                 avg_accumulators.push((Value::Null, 0));
+                                var_accumulators.push((0.0, 0.0, 0));
+                                median_accumulators.push(Vec::new());
                             }
                             crate::query::logical::AggregateFunction::Sum
                             | crate::query::logical::AggregateFunction::SumVec => {
@@ -400,14 +435,20 @@ impl PhysicalPlan for AggregateExec {
                                     regular_accs.push(Value::Int(0));
                                 }
                                 avg_accumulators.push((Value::Null, 0));
+                                var_accumulators.push((0.0, 0.0, 0));
+                                median_accumulators.push(Vec::new());
                             }
                             crate::query::logical::AggregateFunction::Min => {
                                 regular_accs.push(Value::Null);
                                 avg_accumulators.push((Value::Null, 0));
+                                var_accumulators.push((0.0, 0.0, 0));
+                                median_accumulators.push(Vec::new());
                             }
                             crate::query::logical::AggregateFunction::Max => {
                                 regular_accs.push(Value::Null);
                                 avg_accumulators.push((Value::Null, 0));
+                                var_accumulators.push((0.0, 0.0, 0));
+                                median_accumulators.push(Vec::new());
                             }
                             crate::query::logical::AggregateFunction::Avg
                             | crate::query::logical::AggregateFunction::AvgVec => {
@@ -429,16 +470,37 @@ impl PhysicalPlan for AggregateExec {
                                 };
                                 avg_accumulators.push((initial_sum, 0));
                                 regular_accs.push(Value::Null);
+                                var_accumulators.push((0.0, 0.0, 0));
+                                median_accumulators.push(Vec::new());
+                            }
+                            crate::query::logical::AggregateFunction::Variance => {
+                                regular_accs.push(Value::Null);
+                                avg_accumulators.push((Value::Null, 0));
+                                var_accumulators.push((0.0, 0.0, 0));
+                                median_accumulators.push(Vec::new());
+                            }
+                            crate::query::logical::AggregateFunction::Median => {
+                                regular_accs.push(Value::Null);
+                                avg_accumulators.push((Value::Null, 0));
+                                var_accumulators.push((0.0, 0.0, 0));
+                                median_accumulators.push(Vec::new());
                             }
                         },
                         _ => {
                             regular_accs.push(Value::Null);
                             avg_accumulators.push((Value::Null, 0));
+                            var_accumulators.push((0.0, 0.0, 0));
+                            median_accumulators.push(Vec::new());
                         }
                     }
                 }
 
-                (regular_accs, avg_accumulators)
+                (
+                    regular_accs,
+                    avg_accumulators,
+                    var_accumulators,
+                    median_accumulators,
+                )
             });
 
             // Update accumulators
@@ -644,17 +706,42 @@ impl PhysicalPlan for AggregateExec {
                                 _ => {}
                             }
                         }
+                        crate::query::logical::AggregateFunction::Variance => {
+                            let x = scalar_as_f64(&val).ok_or_else(|| {
+                                EngineError::InvalidOp(format!(
+                                    "VARIANCE: expected a scalar (Int/Float/Float64) column, got {:?}",
+                                    val.value_type()
+                                ))
+                            })?;
+                            // Welford's online algorithm.
+                            let (mean, m2, count) = &mut var_accs[i];
+                            *count += 1;
+                            let delta = x - *mean;
+                            *mean += delta / *count as f64;
+                            let delta2 = x - *mean;
+                            *m2 += delta * delta2;
+                        }
+                        crate::query::logical::AggregateFunction::Median => {
+                            let x = scalar_as_f64(&val).ok_or_else(|| {
+                                EngineError::InvalidOp(format!(
+                                    "MEDIAN: expected a scalar (Int/Float/Float64) column, got {:?}",
+                                    val.value_type()
+                                ))
+                            })?;
+                            median_accs[i].push(x);
+                        }
                     }
                 }
             }
         }
 
-        // Output rows - compute AVG from sum/count before outputting
+        // Output rows - compute AVG/VARIANCE/MEDIAN from their accumulators
+        // before outputting
         let mut output_rows = Vec::new();
-        for (key, (accs, avg_accs)) in groups {
+        for (key, (accs, avg_accs, var_accs, median_accs)) in groups {
             let mut values = key; // Group keys first
 
-            // Build final accumulator values, computing AVG where needed
+            // Build final accumulator values, computing AVG/VARIANCE/MEDIAN where needed
             let mut final_accs = Vec::new();
             for (i, expr) in self.aggr_expr.iter().enumerate() {
                 if let crate::query::logical::Expr::AggregateExpr { func, .. } = expr {
@@ -683,6 +770,28 @@ impl PhysicalPlan for AggregateExec {
                             final_accs.push(avg);
                         } else {
                             final_accs.push(Value::Null);
+                        }
+                    } else if matches!(func, crate::query::logical::AggregateFunction::Variance) {
+                        let (_, m2, count) = &var_accs[i];
+                        if *count > 0 {
+                            final_accs.push(Value::Float64(m2 / *count as f64));
+                        } else {
+                            final_accs.push(Value::Null);
+                        }
+                    } else if matches!(func, crate::query::logical::AggregateFunction::Median) {
+                        let mut sorted = median_accs[i].clone();
+                        if sorted.is_empty() {
+                            final_accs.push(Value::Null);
+                        } else {
+                            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                            let n = sorted.len();
+                            let mid = n / 2;
+                            let median = if n.is_multiple_of(2) {
+                                (sorted[mid - 1] + sorted[mid]) / 2.0
+                            } else {
+                                sorted[mid]
+                            };
+                            final_accs.push(Value::Float64(median));
                         }
                     } else {
                         final_accs.push(accs[i].clone());

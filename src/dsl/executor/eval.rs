@@ -290,6 +290,42 @@ fn eval_call(
             }
             .map_err(eng)
         }
+        CallExpr::Variance(a) => {
+            let a = operand!(a, "a");
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Variance)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Variance)
+            }
+            .map_err(eng)
+        }
+        CallExpr::Median(a) => {
+            let a = operand!(a, "a");
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Median)
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Median)
+            }
+            .map_err(eng)
+        }
+        CallExpr::Quantile { input, p } => {
+            let a = operand!(input, "a");
+            if lazy {
+                db.eval_lazy_unary(ctx, output, &a, UnaryOp::Quantile(*p))
+            } else {
+                db.eval_unary(ctx, output, &a, UnaryOp::Quantile(*p))
+            }
+            .map_err(eng)
+        }
+        CallExpr::Covariance(a, b) => {
+            let (a, b) = (operand!(a, "a"), operand!(b, "b"));
+            db.eval_binary(ctx, output, &a, &b, BinaryOp::Covariance)
+                .map_err(eng)
+        }
+        CallExpr::CovarianceMatrix(a) => {
+            let a = operand!(a, "a");
+            db.eval_covariance_matrix(ctx, output, &a).map_err(eng)
+        }
         // FFT/IFFT bypass eval_unary/UnaryOp (see eval_fft's doc comment)
         // and have no lazy form yet, mirroring Transpose/Correlate/
         // Similarity/Distance above.
@@ -374,6 +410,10 @@ fn eval_call(
         CallExpr::Solve(a, b) => {
             let (a, b) = (operand!(a, "a"), operand!(b, "b"));
             db.eval_solve(ctx, output, &a, &b).map_err(eng)
+        }
+        CallExpr::Lstsq(a, b) => {
+            let (a, b) = (operand!(a, "a"), operand!(b, "b"));
+            db.eval_lstsq(ctx, output, &a, &b).map_err(eng)
         }
         CallExpr::Eigenvalues(a) => {
             let a = operand!(a, "a");
@@ -468,9 +508,15 @@ pub(super) fn eval_let_multi(
         CallExpr::Rank(_) => return not_multi_output("RANK"),
         CallExpr::Inverse(_) => return not_multi_output("INVERSE"),
         CallExpr::Solve(_, _) => return not_multi_output("SOLVE"),
+        CallExpr::Lstsq(_, _) => return not_multi_output("LSTSQ"),
         CallExpr::Eigenvalues(_) => return not_multi_output("EIGENVALUES"),
         CallExpr::Cholesky(_) => return not_multi_output("CHOLESKY"),
         CallExpr::Pca { .. } => return not_multi_output("PCA"),
+        CallExpr::Variance(_) => return not_multi_output("VARIANCE"),
+        CallExpr::Median(_) => return not_multi_output("MEDIAN"),
+        CallExpr::Quantile { .. } => return not_multi_output("QUANTILE"),
+        CallExpr::Covariance(_, _) => return not_multi_output("COVARIANCE"),
+        CallExpr::CovarianceMatrix(_) => return not_multi_output("COVARIANCE MATRIX"),
         _ => {
             return Err(DslError::Parse {
                 line: line_no,
@@ -711,6 +757,17 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Sum(a) => format!("SUM {}", expr_to_string(a)),
         CallExpr::Mean(a) => format!("MEAN {}", expr_to_string(a)),
         CallExpr::Stdev(a) => format!("STDEV {}", expr_to_string(a)),
+        CallExpr::Variance(a) => format!("VARIANCE {}", expr_to_string(a)),
+        CallExpr::Median(a) => format!("MEDIAN {}", expr_to_string(a)),
+        CallExpr::Quantile { input, p } => format!("QUANTILE {} AT {}", expr_to_string(input), p),
+        CallExpr::Covariance(a, b) => {
+            format!(
+                "COVARIANCE {} WITH {}",
+                expr_to_string(a),
+                expr_to_string(b)
+            )
+        }
+        CallExpr::CovarianceMatrix(a) => format!("COVARIANCE MATRIX {}", expr_to_string(a)),
         CallExpr::Fft(a) => format!("FFT {}", expr_to_string(a)),
         CallExpr::Ifft(a) => format!("IFFT {}", expr_to_string(a)),
         CallExpr::Magnitude(a) => format!("MAGNITUDE {}", expr_to_string(a)),
@@ -757,6 +814,7 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Rank(a) => format!("RANK {}", expr_to_string(a)),
         CallExpr::Inverse(a) => format!("INVERSE {}", expr_to_string(a)),
         CallExpr::Solve(a, b) => format!("SOLVE {} {}", expr_to_string(a), expr_to_string(b)),
+        CallExpr::Lstsq(a, b) => format!("LSTSQ {} {}", expr_to_string(a), expr_to_string(b)),
         CallExpr::Eigenvalues(a) => format!("EIGENVALUES {}", expr_to_string(a)),
         CallExpr::Qr(a) => format!("QR {}", expr_to_string(a)),
         CallExpr::Lu(a) => format!("LU {}", expr_to_string(a)),

@@ -405,6 +405,13 @@ pub enum AggFuncAst {
     AvgVec,
     /// Element-wise vector sum: `SUM_VEC(embedding)`
     SumVec,
+    /// `VARIANCE(col)` -- population variance of a scalar (Int/Float/
+    /// Float64) column. Not supported as a window function (`OVER`).
+    Variance,
+    /// `MEDIAN(col)` -- median of a scalar (Int/Float/Float64) column,
+    /// computed by sorting the group's collected values. Not supported as
+    /// a window function (`OVER`).
+    Median,
 }
 
 /// What `SHOW` should display.
@@ -800,6 +807,25 @@ pub enum CallExpr {
     Mean(Box<Expr>),
     /// `STDEV a`
     Stdev(Box<Expr>),
+    /// `VARIANCE a` — population variance of all elements (any rank).
+    Variance(Box<Expr>),
+    /// `MEDIAN a` — median of all elements, flattened and sorted (any
+    /// rank). Even element count averages the two middle values.
+    Median(Box<Expr>),
+    /// `QUANTILE a AT p` — the `p`-th quantile (`0.0..=1.0`) of all
+    /// elements, flattened and sorted, via linear interpolation between the
+    /// two nearest ranks (the same convention as numpy's default
+    /// `linear` interpolation).
+    Quantile { input: Box<Expr>, p: f64 },
+    /// `COVARIANCE a WITH b` — scalar covariance between two same-shape
+    /// tensors, treating corresponding elements as paired samples.
+    Covariance(Box<Expr>, Box<Expr>),
+    /// `COVARIANCE MATRIX a` — feature covariance matrix of `a` (rows =
+    /// samples, columns = features): a `Matrix(cols, cols)` result, the
+    /// same convention `PCA`'s mean-centering uses. Distinguished from
+    /// `COVARIANCE a WITH b` by the `MATRIX` keyword immediately after
+    /// `COVARIANCE`.
+    CovarianceMatrix(Box<Expr>),
     /// `FFT a` — real-to-complex forward FFT. `a` must be a rank-1 Vector;
     /// result is a `Matrix(2, N/2+1)` (row 0 = real parts, row 1 =
     /// imaginary parts). See SIGNAL_PROCESSING_PLAN.md for the convention.
@@ -869,6 +895,11 @@ pub enum CallExpr {
     /// `SOLVE a b` — solves `a x = b` for `x`. Vector result; errors (never
     /// `NaN`) if `a` is singular.
     Solve(Box<Expr>, Box<Expr>),
+    /// `LSTSQ a b` — least-squares/minimum-norm solve of `a x = b` for any
+    /// shape `a` (over/under-determined, or rank-deficient), via SVD's
+    /// pseudo-inverse. Unlike `SOLVE`, never errors on a non-square or
+    /// singular `a` — see `core::linalg::lstsq`. Vector result.
+    Lstsq(Box<Expr>, Box<Expr>),
     /// `EIGENVALUES a` — real eigenvalues of a **symmetric** matrix only
     /// (Phase 8.3: real eigenvalues guaranteed, no complex `Value` support
     /// needed yet). Vector result.

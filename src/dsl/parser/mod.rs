@@ -49,6 +49,7 @@ fn keyword_token_as_ident(tok: &Token) -> Option<&'static str> {
         Token::Rank => "RANK",
         Token::Inverse => "INVERSE",
         Token::Solve => "SOLVE",
+        Token::Lstsq => "LSTSQ",
         Token::Eigenvalues => "EIGENVALUES",
         Token::Qr => "QR",
         Token::Lu => "LU",
