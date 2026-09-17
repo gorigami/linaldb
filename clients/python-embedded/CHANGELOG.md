@@ -4,6 +4,19 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.11] - 2026-09-17
+
+Picks up the root engine's `v0.1.84` (linked directly in via the `linal` path
+dependency), which adds Phase 3 of the scientific-engine expansion plan — a
+scalar `Value::Complex` type and `EIGENVALUES_GENERAL`/`EIGEN_GENERAL` for
+non-symmetric matrices. `value_to_py` now converts `Value::Complex` to
+Python's own native `complex` type (`pyo3::types::PyComplex::from_doubles`)
+— one new line in `src/lib.rs`, no other Python-side API changes. Also picks
+up Phase 1 (`LSTSQ`, `VARIANCE`/`MEDIAN`/`QUANTILE`/`COVARIANCE`, FFT
+windowing, NetCDF/external-Parquet connectors) and Phase 2 (filtered/hybrid
+vector search + index persistence) from `v0.1.84`, none of which touch this
+binding's own conversion code.
+
 ## [0.1.10] - 2026-09-16
 
 Picks up the root engine's `v0.1.83` (linked directly in via the `linal` path
