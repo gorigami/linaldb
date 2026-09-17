@@ -35,6 +35,7 @@ impl HashIndex {
             Value::Bool(b) => b.to_string(),
             Value::Vector(v) => format!("{:?}", v),
             Value::Matrix(m) => format!("{:?}", m),
+            Value::Complex(c) => format!("{:?}", c),
             Value::Null => "NULL".to_string(),
         }
     }

@@ -409,10 +409,12 @@ impl Parser {
             | Some(Token::Solve)
             | Some(Token::Lstsq)
             | Some(Token::Eigenvalues)
+            | Some(Token::EigenvaluesGeneral)
             | Some(Token::Qr)
             | Some(Token::Lu)
             | Some(Token::Cholesky)
             | Some(Token::Eigen)
+            | Some(Token::EigenGeneral)
             | Some(Token::Svd)
             | Some(Token::Pca)
                 if self
@@ -428,10 +430,12 @@ impl Parser {
             | Some(Token::Solve)
             | Some(Token::Lstsq)
             | Some(Token::Eigenvalues)
+            | Some(Token::EigenvaluesGeneral)
             | Some(Token::Qr)
             | Some(Token::Lu)
             | Some(Token::Cholesky)
             | Some(Token::Eigen)
+            | Some(Token::EigenGeneral)
             | Some(Token::Svd)
             | Some(Token::Pca) => return Ok(Expr::Ref(self.eat_ident()?)),
             Some(Token::Ident(_)) => {
@@ -569,6 +573,7 @@ impl Parser {
                     }
                     // Vector scalar functions (SQL-style with parens)
                     "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE" | "MAT_SHAPE"
+                    | "REAL" | "IMAG" | "ABS" | "PHASE" | "CONJ" | "COMPLEX"
                         if self.at(&Token::LParen) =>
                     {
                         let func = match upper.as_str() {
@@ -578,6 +583,12 @@ impl Parser {
                             "VEC_ADD" => VectorFnKind::VecAdd,
                             "VEC_SCALE" => VectorFnKind::VecScale,
                             "MAT_SHAPE" => VectorFnKind::MatShape,
+                            "REAL" => VectorFnKind::Real,
+                            "IMAG" => VectorFnKind::Imag,
+                            "ABS" => VectorFnKind::ComplexAbs,
+                            "PHASE" => VectorFnKind::Phase,
+                            "CONJ" => VectorFnKind::Conj,
+                            "COMPLEX" => VectorFnKind::ComplexNew,
                             _ => unreachable!(),
                         };
                         self.advance(); // consume '('
@@ -775,10 +786,16 @@ impl Parser {
                 CallExpr::Lstsq(Box::new(a), Box::new(b))
             }
             Some(Token::Eigenvalues) => CallExpr::Eigenvalues(Box::new(self.parse_simple_expr()?)),
+            Some(Token::EigenvaluesGeneral) => {
+                CallExpr::EigenvaluesGeneral(Box::new(self.parse_simple_expr()?))
+            }
             Some(Token::Qr) => CallExpr::Qr(Box::new(self.parse_simple_expr()?)),
             Some(Token::Lu) => CallExpr::Lu(Box::new(self.parse_simple_expr()?)),
             Some(Token::Cholesky) => CallExpr::Cholesky(Box::new(self.parse_simple_expr()?)),
             Some(Token::Eigen) => CallExpr::Eigen(Box::new(self.parse_simple_expr()?)),
+            Some(Token::EigenGeneral) => {
+                CallExpr::EigenGeneral(Box::new(self.parse_simple_expr()?))
+            }
             Some(Token::Svd) => CallExpr::Svd(Box::new(self.parse_simple_expr()?)),
             Some(Token::Pca) => {
                 let input = self.parse_simple_expr()?;

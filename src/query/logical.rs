@@ -79,6 +79,12 @@ pub enum VectorFnKind {
     /// `DISTANCE(a, b)` — Euclidean distance, SQL-callable form of the
     /// standalone `DISTANCE a TO b` tensor-DSL keyword (§3).
     Distance,
+    Real,
+    Imag,
+    ComplexAbs,
+    Phase,
+    Conj,
+    ComplexNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +405,11 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             | VectorFnKind::Distance => ValueType::Float,
             VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
             VectorFnKind::MatShape => ValueType::String,
+            VectorFnKind::Real
+            | VectorFnKind::Imag
+            | VectorFnKind::ComplexAbs
+            | VectorFnKind::Phase => ValueType::Float64,
+            VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
         },
         Expr::Case {
             else_expr,

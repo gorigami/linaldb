@@ -595,7 +595,7 @@ fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
             if let Some(val) = eval_value(expr, row) {
                 list.iter().any(|item| {
                     eval_value(item, row)
-                        .map(|v| val.compare(&v) == Some(std::cmp::Ordering::Equal))
+                        .map(|v| val.equals(&v) == Some(true))
                         .unwrap_or(false)
                 })
             } else {
@@ -625,10 +625,18 @@ fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
             let right_val = eval_value(right, row);
 
             if let (Some(l), Some(r)) = (left_val, right_val) {
+                if op == "=" || op == "!=" {
+                    // Value::equals(), not compare()'s Ordering -- see its
+                    // doc comment (Complex has real equality but no order).
+                    let eq = l.equals(&r);
+                    return if op == "=" {
+                        eq == Some(true)
+                    } else {
+                        eq == Some(false)
+                    };
+                }
                 let ord = l.compare(&r);
                 match op.as_str() {
-                    "=" => ord == Some(std::cmp::Ordering::Equal),
-                    "!=" => ord.is_some() && ord != Some(std::cmp::Ordering::Equal),
                     ">" => ord == Some(std::cmp::Ordering::Greater),
                     "<" => ord == Some(std::cmp::Ordering::Less),
                     ">=" => matches!(

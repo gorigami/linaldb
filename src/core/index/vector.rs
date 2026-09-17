@@ -290,6 +290,7 @@ impl Index for VectorIndex {
             Value::Float(_) => Err("Cannot index Float as Vector".to_string()),
             Value::Float64(_) => Err("Cannot index Double as Vector".to_string()),
             Value::Matrix(_) => Err("Cannot index Matrix as Vector".to_string()),
+            Value::Complex(_) => Err("Cannot index Complex as Vector".to_string()),
         }
     }
 

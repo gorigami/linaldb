@@ -904,11 +904,23 @@ pub fn evaluate_expression(
             // always taking the ELSE branch instead of erroring or evaluating
             // correctly. WHERE clauses were unaffected: they route through
             // `evaluate_expr`, not this function.
-            if matches!(op.as_str(), "=" | "!=" | ">" | "<" | ">=" | "<=") {
+            if op == "=" || op == "!=" {
+                // Value::equals() (not compare()'s Ordering) -- handles
+                // Complex's real equality-without-order correctly; see its
+                // doc comment. compare()-based Ordering is still exactly
+                // right for every other type's = / != (its own cross-type
+                // numeric/bool promotions are unchanged), equals() just
+                // delegates to it for anything that isn't Complex.
+                let eq = left_val.equals(&right_val);
+                return Value::Bool(if op == "=" {
+                    eq == Some(true)
+                } else {
+                    eq == Some(false)
+                });
+            }
+            if matches!(op.as_str(), ">" | "<" | ">=" | "<=") {
                 let ord = left_val.compare(&right_val);
                 return Value::Bool(match op.as_str() {
-                    "=" => ord == Some(std::cmp::Ordering::Equal),
-                    "!=" => ord.is_some() && ord != Some(std::cmp::Ordering::Equal),
                     ">" => ord == Some(std::cmp::Ordering::Greater),
                     "<" => ord == Some(std::cmp::Ordering::Less),
                     ">=" => matches!(
@@ -920,6 +932,24 @@ pub fn evaluate_expression(
                         Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
                     ), // "<="
                 });
+            }
+
+            // Any pairing touching Complex promotes to Complex (num_complex's
+            // own +/-/*// impls, real numbers zero-extended via as_complex())
+            // -- checked before the Float64 promotion below so it always
+            // takes priority: Complex is strictly wider, Int/Float/Float64
+            // all promote into it, never the reverse.
+            if matches!(left_val, Value::Complex(_)) || matches!(right_val, Value::Complex(_)) {
+                return match (left_val.as_complex(), right_val.as_complex()) {
+                    (Some(l), Some(r)) => match op.as_str() {
+                        "+" => Value::Complex(l + r),
+                        "-" => Value::Complex(l - r),
+                        "*" => Value::Complex(l * r),
+                        "/" => Value::Complex(l / r),
+                        _ => Value::Null,
+                    },
+                    _ => Value::Null,
+                };
             }
 
             // Any pairing touching Float64 promotes to Float64 (widening the
@@ -1352,6 +1382,35 @@ pub fn evaluate_expression(
                 VectorFnKind::Flatten => match vals.first() {
                     Some(Value::Vector(v)) => Value::Vector(v.clone()),
                     Some(Value::Matrix(m)) => Value::Vector(m.iter().flatten().copied().collect()),
+                    _ => Value::Null,
+                },
+                VectorFnKind::Real => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.re),
+                    None => Value::Null,
+                },
+                VectorFnKind::Imag => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.im),
+                    None => Value::Null,
+                },
+                VectorFnKind::ComplexAbs => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.norm()),
+                    None => Value::Null,
+                },
+                VectorFnKind::Phase => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.arg()),
+                    None => Value::Null,
+                },
+                VectorFnKind::Conj => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Complex(c.conj()),
+                    None => Value::Null,
+                },
+                VectorFnKind::ComplexNew => match (
+                    vals.first().and_then(|v| v.as_float64()),
+                    vals.get(1).and_then(|v| v.as_float64()),
+                ) {
+                    (Some(re), Some(im)) => {
+                        Value::Complex(crate::core::value::Complex64::new(re, im))
+                    }
                     _ => Value::Null,
                 },
             }

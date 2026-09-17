@@ -311,3 +311,59 @@ fn rank_operator_and_rank_over_window_function_still_work() {
     assert_eq!(ds.rows[0].values[1], linal::core::value::Value::Int(2));
     assert_eq!(ds.rows[1].values[1], linal::core::value::Value::Int(1));
 }
+
+#[test]
+fn eigenvalues_general_of_rotation_matrix_is_purely_imaginary() {
+    // SCIENTIFIC_ENGINE_EXPANSION_PLAN.md Phase 3. [[0,-1],[1,0]] has
+    // eigenvalues +-i -- EIGENVALUES (symmetric-only) can't even accept
+    // this matrix; EIGENVALUES_GENERAL must, returning Matrix(2, N).
+    let mut db = TensorDb::new();
+    run(&mut db, "MATRIX rot = [[0, -1], [1, 0]]", 1);
+    run(&mut db, "LET spec = EIGENVALUES_GENERAL rot", 2);
+    let spec = tensor_data(&db, "spec");
+    assert_eq!(spec.len(), 4); // Matrix(2, 2): row 0 real, row 1 imag
+    assert!(
+        spec[0].abs() < 1e-4 && spec[1].abs() < 1e-4,
+        "real parts should be ~0"
+    );
+    let mut imags = [spec[2], spec[3]];
+    imags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!((imags[0] - (-1.0)).abs() < 1e-4);
+    assert!((imags[1] - 1.0).abs() < 1e-4);
+
+    // EIGENVALUES itself must still reject this non-symmetric matrix.
+    let err = run_err(&mut db, "LET bad = EIGENVALUES rot", 3);
+    assert!(format!("{err:?}").contains("symmetric"));
+}
+
+#[test]
+fn eigen_general_multi_output_let_binds_real_eigendecomposition() {
+    let mut db = TensorDb::new();
+    // Upper-triangular, non-symmetric (EIGEN would reject it): eigenvalues
+    // are the diagonal, 2 and 3.
+    run(&mut db, "MATRIX tri = [[2, 1], [0, 3]]", 1);
+    run(&mut db, "LET vals, vecs = EIGEN_GENERAL tri", 2);
+    let mut vals = tensor_data(&db, "vals");
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!((vals[0] - 2.0).abs() < 1e-4);
+    assert!((vals[1] - 3.0).abs() < 1e-4);
+    assert_eq!(tensor_data(&db, "vecs").len(), 4);
+}
+
+#[test]
+fn eigen_general_errors_loudly_on_complex_eigenvalues_not_silently_wrong() {
+    let mut db = TensorDb::new();
+    run(&mut db, "MATRIX rot = [[0, -1], [1, 0]]", 1);
+    let err = run_err(&mut db, "LET vals, vecs = EIGEN_GENERAL rot", 2);
+    assert!(format!("{err:?}").contains("complex eigenvalues"));
+}
+
+#[test]
+fn eigenvalues_general_single_output_and_eigen_general_multi_output_are_not_interchangeable() {
+    let mut db = TensorDb::new();
+    run(&mut db, "MATRIX m = [[2, 1], [0, 3]]", 1);
+    let err = run_err(&mut db, "LET a, b = EIGENVALUES_GENERAL m", 2);
+    assert!(format!("{err:?}").contains("single output"));
+    let err = run_err(&mut db, "LET only_one = EIGEN_GENERAL m", 3);
+    assert!(format!("{err:?}").contains("EIGEN_GENERAL"));
+}

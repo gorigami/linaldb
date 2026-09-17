@@ -284,11 +284,11 @@ pub fn cholesky(tensor: &Tensor) -> Result<MatrixData, String> {
 /// `EIGEN a` -- full eigendecomposition (eigenvalues + eigenvectors) of a
 /// **symmetric** matrix. Deliberately narrower than the plan's original
 /// "general case" wording: a truly general (non-symmetric) eigendecomposition
-/// can have complex eigenvalues/eigenvectors, and this engine has no
-/// `Value`/`ValueType::Complex` (a locked constraint from `EIGENVALUES`,
-/// Phase 8.3, that a "general case" here would silently contradict) --
-/// so this stays symmetric-only, consistent with `EIGENVALUES`, and returns
-/// real eigenvectors as columns of the second output matrix.
+/// can have complex eigenvalues/eigenvectors. Stays symmetric-only,
+/// unchanged, even now that `Value::Complex` exists (Phase 3) --
+/// `EIGENVALUES_GENERAL`/`EIGEN_GENERAL` below are the new, separate,
+/// complex-aware siblings, so `EIGEN`/`EIGENVALUES` keep their existing
+/// (real-guaranteed) contract for every caller already relying on it.
 pub fn eigen_symmetric(tensor: &Tensor) -> Result<(Vec<f32>, MatrixData), String> {
     let m = tensor_to_matrix(tensor)?;
     require_square(&m, "EIGEN")?;
@@ -296,6 +296,96 @@ pub fn eigen_symmetric(tensor: &Tensor) -> Result<(Vec<f32>, MatrixData), String
     let eigen = nalgebra::linalg::SymmetricEigen::new(m);
     let values: Vec<f32> = eigen.eigenvalues.iter().map(|&v| v as f32).collect();
     Ok((values, matrix_to_tensor_data(&eigen.eigenvectors)))
+}
+
+/// `EIGENVALUES_GENERAL a` -- eigenvalues of a **general** (not necessarily
+/// symmetric) square matrix, via nalgebra's Schur decomposition
+/// (`Schur::complex_eigenvalues`). Unlike `EIGENVALUES`, a general matrix's
+/// eigenvalues can be genuinely complex -- returned as a `Matrix(2, N)`
+/// (row 0 = real parts, row 1 = imaginary parts), the exact same convention
+/// `FFT` already uses for a complex spectrum (`core::signal`'s module doc).
+/// This is deliberate, not incidental: `Value::Complex` is scalar-only (this
+/// plan's own locked design decision), so a *collection* of complex numbers
+/// is always this two-row-`Matrix` convention here, never a `Value::Complex`
+/// collection.
+pub fn eigenvalues_general(tensor: &Tensor) -> Result<MatrixData, String> {
+    let m = tensor_to_matrix(tensor)?;
+    require_square(&m, "EIGENVALUES_GENERAL")?;
+    let schur = m.schur();
+    let eigs = schur.complex_eigenvalues();
+    let n = eigs.len();
+    let mut data = Vec::with_capacity(2 * n);
+    data.extend(eigs.iter().map(|e| e.re as f32));
+    data.extend(eigs.iter().map(|e| e.im as f32));
+    Ok((data, Shape::new(vec![2, n])))
+}
+
+/// `EIGEN_GENERAL a` -- full eigendecomposition of a general square matrix:
+/// eigenvalues (as `EIGENVALUES_GENERAL` above, but real-only here -- see
+/// below) plus eigenvectors.
+///
+/// **Real eigenvalues only.** nalgebra has no built-in general
+/// complex-eigenvector solver (only `Schur::complex_eigenvalues`, values
+/// alone) -- hand-rolling one (complex Schur-vector back-substitution) is
+/// out of scope here. When every eigenvalue is real (common even for
+/// asymmetric matrices -- e.g. many real-world control-system state
+/// matrices), each eigenvector is the null space of `a - lambda*I`, found
+/// via the smallest-singular-value right-singular vector of its SVD (the
+/// standard, numerically stable way to find a null-space vector -- the
+/// same technique `rank` above already uses the *count* of small singular
+/// values for). **Errors loudly** (never a silently wrong/partial answer,
+/// same philosophy as every other operator here) if any eigenvalue is
+/// genuinely complex -- use `EIGENVALUES_GENERAL` for the eigenvalues alone
+/// in that case.
+///
+/// Not exact for a *defective* matrix (a repeated eigenvalue whose null
+/// space has smaller dimension than its algebraic multiplicity, i.e. no
+/// full eigenvector basis exists) -- each occurrence in the eigenvalue list
+/// independently finds *a* null-space vector, which can repeat rather than
+/// forming a true basis. Documented, not silently claimed exact.
+pub fn eigen_general(tensor: &Tensor) -> Result<(Vec<f32>, MatrixData), String> {
+    let m = tensor_to_matrix(tensor)?;
+    require_square(&m, "EIGEN_GENERAL")?;
+    let n = m.nrows();
+
+    let schur = m.clone().schur();
+    let complex_eigs = schur.complex_eigenvalues();
+
+    let mut real_eigs = Vec::with_capacity(n);
+    for e in complex_eigs.iter() {
+        let im_tol = REL_EPSILON * e.re.abs().max(1.0);
+        if e.im.abs() > im_tol {
+            return Err(
+                "EIGEN_GENERAL: matrix has complex eigenvalues -- eigenvector computation for \
+                 the complex case is not implemented; use EIGENVALUES_GENERAL for the \
+                 eigenvalues alone"
+                    .to_string(),
+            );
+        }
+        real_eigs.push(e.re);
+    }
+
+    let mut eigenvectors = DMatrix::<f64>::zeros(n, n);
+    for (j, &lambda) in real_eigs.iter().enumerate() {
+        let mut shifted = m.clone();
+        for i in 0..n {
+            shifted[(i, i)] -= lambda;
+        }
+        let svd = shifted.svd(true, true);
+        let v_t = svd
+            .v_t
+            .ok_or_else(|| "EIGEN_GENERAL: failed to compute V^T (unexpected)".to_string())?;
+        // nalgebra's SVD sorts singular values in non-increasing order, so
+        // the *last* row of V^T is the smallest-singular-value right
+        // singular vector -- the null-space direction of `shifted`.
+        let eigenvector = v_t.row(n - 1).transpose();
+        for i in 0..n {
+            eigenvectors[(i, j)] = eigenvector[i];
+        }
+    }
+
+    let values: Vec<f32> = real_eigs.iter().map(|&v| v as f32).collect();
+    Ok((values, matrix_to_tensor_data(&eigenvectors)))
 }
 
 /// `QR a` as a uniform `Vec` of (data, shape) pairs, in bind order (`q`,
@@ -315,6 +405,14 @@ pub fn lu_outputs(tensor: &Tensor) -> Result<Vec<MatrixData>, String> {
 /// `EIGEN a` as a uniform `Vec`, in bind order (eigenvalues, eigenvectors).
 pub fn eigen_outputs(tensor: &Tensor) -> Result<Vec<MatrixData>, String> {
     let (values, vectors) = eigen_symmetric(tensor)?;
+    let n = values.len();
+    Ok(vec![(values, Shape::new(vec![n])), vectors])
+}
+
+/// `EIGEN_GENERAL a` as a uniform `Vec`, in bind order (eigenvalues,
+/// eigenvectors) -- mirrors `eigen_outputs` above.
+pub fn eigen_general_outputs(tensor: &Tensor) -> Result<Vec<MatrixData>, String> {
+    let (values, vectors) = eigen_general(tensor)?;
     let n = values.len();
     Ok(vec![(values, Shape::new(vec![n])), vectors])
 }
@@ -674,5 +772,70 @@ mod tests {
     fn pca_rejects_too_many_components() {
         let a_t = matrix_tensor(4, 2, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         assert!(pca(&a_t, 5).is_err());
+    }
+
+    #[test]
+    fn eigenvalues_general_of_diagonal_matrix_matches_diagonal() {
+        let t = matrix_tensor(2, 2, vec![2.0, 0.0, 0.0, 3.0]);
+        let (data, shape) = eigenvalues_general(&t).unwrap();
+        assert_eq!(shape.dims, vec![2, 2]);
+        let mut reals: Vec<f32> = data[0..2].to_vec();
+        reals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((reals[0] - 2.0).abs() < 1e-4);
+        assert!((reals[1] - 3.0).abs() < 1e-4);
+        for &im in &data[2..4] {
+            assert!(im.abs() < 1e-4, "expected imaginary part ~0, got {im}");
+        }
+    }
+
+    #[test]
+    fn eigenvalues_general_of_rotation_matrix_is_purely_imaginary() {
+        // [[0,-1],[1,0]]: characteristic polynomial lambda^2 + 1 = 0 -> +-i
+        let t = matrix_tensor(2, 2, vec![0.0, -1.0, 1.0, 0.0]);
+        let (data, shape) = eigenvalues_general(&t).unwrap();
+        assert_eq!(shape.dims, vec![2, 2]);
+        for &re in &data[0..2] {
+            assert!(re.abs() < 1e-4, "expected real part ~0, got {re}");
+        }
+        let mut imags: Vec<f32> = data[2..4].to_vec();
+        imags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((imags[0] - (-1.0)).abs() < 1e-4);
+        assert!((imags[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn eigen_general_reconstructs_av_eq_lambda_v_for_triangular_matrix() {
+        // Upper-triangular, non-symmetric: eigenvalues are the diagonal (2, 3).
+        let a_t = matrix_tensor(2, 2, vec![2.0, 1.0, 0.0, 3.0]);
+        let (values, (vec_data, vec_shape)) = eigen_general(&a_t).unwrap();
+        assert_eq!(values.len(), 2);
+        let a_m = tensor_to_matrix(&a_t).unwrap();
+        let v_m = matrix_from(&vec_shape, &vec_data);
+        for (j, &value) in values.iter().enumerate() {
+            let lambda = value as f64;
+            let v_col = v_m.column(j);
+            let av = &a_m * v_col;
+            for i in 0..2 {
+                assert!(
+                    (av[i] - lambda * v_col[i]).abs() < 1e-3,
+                    "A*v != lambda*v at row {i}, col {j}: {} vs {}",
+                    av[i],
+                    lambda * v_col[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eigen_general_errors_loudly_on_complex_eigenvalues() {
+        let t = matrix_tensor(2, 2, vec![0.0, -1.0, 1.0, 0.0]);
+        let err = eigen_general(&t).unwrap_err();
+        assert!(err.contains("complex eigenvalues"));
+    }
+
+    #[test]
+    fn eigenvalues_general_requires_square() {
+        let t = matrix_tensor(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert!(eigenvalues_general(&t).is_err());
     }
 }

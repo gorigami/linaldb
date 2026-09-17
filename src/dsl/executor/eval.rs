@@ -431,6 +431,10 @@ fn eval_call(
             let a = operand!(a, "a");
             db.eval_eigenvalues(ctx, output, &a).map_err(eng)
         }
+        CallExpr::EigenvaluesGeneral(a) => {
+            let a = operand!(a, "a");
+            db.eval_eigenvalues_general(ctx, output, &a).map_err(eng)
+        }
         CallExpr::Cholesky(a) => {
             let a = operand!(a, "a");
             db.eval_cholesky(ctx, output, &a).map_err(eng)
@@ -453,6 +457,11 @@ fn eval_call(
         CallExpr::Eigen(_) => Err(DslError::Parse {
             line: line_no,
             msg: "EIGEN produces two outputs -- use `LET vals, vecs = EIGEN a`".into(),
+        }),
+        CallExpr::EigenGeneral(_) => Err(DslError::Parse {
+            line: line_no,
+            msg: "EIGEN_GENERAL produces two outputs -- use `LET vals, vecs = EIGEN_GENERAL a`"
+                .into(),
         }),
         CallExpr::Svd(_) => Err(DslError::Parse {
             line: line_no,
@@ -510,6 +519,11 @@ pub(super) fn eval_let_multi(
             let a_name = eval_expr_to_name(db, ctx, &tmp, a, false, line_no)?;
             db.eval_eigen(ctx, names, &a_name).map_err(eng)?;
         }
+        CallExpr::EigenGeneral(a) => {
+            let tmp = fresh_temp("a");
+            let a_name = eval_expr_to_name(db, ctx, &tmp, a, false, line_no)?;
+            db.eval_eigen_general(ctx, names, &a_name).map_err(eng)?;
+        }
         CallExpr::Svd(a) => {
             let tmp = fresh_temp("a");
             let a_name = eval_expr_to_name(db, ctx, &tmp, a, false, line_no)?;
@@ -522,6 +536,7 @@ pub(super) fn eval_let_multi(
         CallExpr::Solve(_, _) => return not_multi_output("SOLVE"),
         CallExpr::Lstsq(_, _) => return not_multi_output("LSTSQ"),
         CallExpr::Eigenvalues(_) => return not_multi_output("EIGENVALUES"),
+        CallExpr::EigenvaluesGeneral(_) => return not_multi_output("EIGENVALUES_GENERAL"),
         CallExpr::Cholesky(_) => return not_multi_output("CHOLESKY"),
         CallExpr::Pca { .. } => return not_multi_output("PCA"),
         CallExpr::Variance(_) => return not_multi_output("VARIANCE"),
@@ -754,6 +769,12 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 VectorFnKind::MatShape => "MAT_SHAPE",
                 VectorFnKind::Flatten => "FLATTEN",
                 VectorFnKind::Distance => "DISTANCE",
+                VectorFnKind::Real => "REAL",
+                VectorFnKind::Imag => "IMAG",
+                VectorFnKind::ComplexAbs => "ABS",
+                VectorFnKind::Phase => "PHASE",
+                VectorFnKind::Conj => "CONJ",
+                VectorFnKind::ComplexNew => "COMPLEX",
             };
             let items: Vec<String> = args.iter().map(expr_to_string).collect();
             format!("{}({})", name, items.join(", "))
@@ -865,10 +886,14 @@ fn call_to_string(c: &CallExpr) -> String {
         CallExpr::Solve(a, b) => format!("SOLVE {} {}", expr_to_string(a), expr_to_string(b)),
         CallExpr::Lstsq(a, b) => format!("LSTSQ {} {}", expr_to_string(a), expr_to_string(b)),
         CallExpr::Eigenvalues(a) => format!("EIGENVALUES {}", expr_to_string(a)),
+        CallExpr::EigenvaluesGeneral(a) => {
+            format!("EIGENVALUES_GENERAL {}", expr_to_string(a))
+        }
         CallExpr::Qr(a) => format!("QR {}", expr_to_string(a)),
         CallExpr::Lu(a) => format!("LU {}", expr_to_string(a)),
         CallExpr::Cholesky(a) => format!("CHOLESKY {}", expr_to_string(a)),
         CallExpr::Eigen(a) => format!("EIGEN {}", expr_to_string(a)),
+        CallExpr::EigenGeneral(a) => format!("EIGEN_GENERAL {}", expr_to_string(a)),
         CallExpr::Svd(a) => format!("SVD {}", expr_to_string(a)),
         CallExpr::Pca { input, components } => {
             format!("PCA {} COMPONENTS {}", expr_to_string(input), components)

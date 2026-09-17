@@ -51,10 +51,12 @@ fn keyword_token_as_ident(tok: &Token) -> Option<&'static str> {
         Token::Solve => "SOLVE",
         Token::Lstsq => "LSTSQ",
         Token::Eigenvalues => "EIGENVALUES",
+        Token::EigenvaluesGeneral => "EIGENVALUES_GENERAL",
         Token::Qr => "QR",
         Token::Lu => "LU",
         Token::Cholesky => "CHOLESKY",
         Token::Eigen => "EIGEN",
+        Token::EigenGeneral => "EIGEN_GENERAL",
         Token::Svd => "SVD",
         Token::Pca => "PCA",
         Token::Components => "COMPONENTS",
@@ -955,6 +957,7 @@ impl Parser {
                     "DOUBLE" | "FLOAT64" => Ok(ColType::Double),
                     "STRING" | "TEXT" | "VARCHAR" => Ok(ColType::String),
                     "BOOL" | "BOOLEAN" => Ok(ColType::Bool),
+                    "COMPLEX" => Ok(ColType::Complex),
                     "VECTOR" => {
                         self.eat(&Token::LParen)?;
                         let n = self.eat_usize()?;

@@ -544,11 +544,21 @@ fn encode_logical_value_type(vt: &ValueType) -> Option<String> {
     match vt {
         ValueType::Vector(dim) => Some(format!("Vector:{}", dim)),
         ValueType::Matrix(rows, cols) => Some(format!("Matrix:{},{}", rows, cols)),
+        // Complex has no native Arrow encoding (unlike Vector/Matrix's
+        // FixedSizeList) -- it always goes through the legacy JSON-string
+        // fallback (see build_legacy_json_column below), so it needs this
+        // same "what's the real logical type behind this Utf8 column"
+        // metadata every time, not just when a shape-mismatch forces a
+        // Vector/Matrix column to fall back.
+        ValueType::Complex => Some("Complex".to_string()),
         _ => None,
     }
 }
 
 fn decode_logical_value_type(raw: &str) -> Option<ValueType> {
+    if raw == "Complex" {
+        return Some(ValueType::Complex);
+    }
     let (kind, rest) = raw.split_once(':')?;
     match kind {
         "Vector" => rest.parse::<usize>().ok().map(ValueType::Vector),
@@ -766,6 +776,9 @@ fn arrow_array_to_values(
             DataType::FixedSizeList(_, _) => matrix_array_to_values(array, num_rows),
             _ => legacy_json_column_to_values(array, num_rows, "Matrix"),
         },
+        // No native Arrow encoding for Complex (unlike Vector/Matrix's
+        // FixedSizeList) -- always the legacy JSON-string fallback.
+        ValueType::Complex => legacy_json_column_to_values(array, num_rows, "Complex"),
         ValueType::Null => Ok(vec![Value::Null; num_rows]),
     }
 }
@@ -1068,6 +1081,10 @@ fn dataset_to_record_batch_with_options(
                 }
                 VectorEncoding::AlwaysJsonFallback => build_legacy_json_column(&column_data),
             },
+            // No native Arrow encoding for Complex -- always JSON fallback,
+            // same as Null (see encode_logical_value_type's doc comment for
+            // why this still needs the field-metadata stashing below).
+            ValueType::Complex => build_legacy_json_column(&column_data),
             ValueType::Null => build_legacy_json_column(&column_data),
         };
 
