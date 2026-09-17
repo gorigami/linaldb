@@ -609,6 +609,13 @@ pub struct SearchStmt {
     pub query: SearchQuery,
     /// Number of nearest neighbours to return.
     pub top_k: usize,
+    /// Optional `FILTER <predicate>` clause (modern syntax only, see
+    /// `Parser::parse_search`) -- applied to the `top_k` nearest-neighbor
+    /// results as a post-filter, so a highly selective predicate can return
+    /// fewer than `top_k` rows. Not a pre-filtered/expanded search (which
+    /// would need the vector index itself to understand predicates) --
+    /// documented as a real limitation rather than silently claiming more.
+    pub filter: Option<Expr>,
     /// Optional output dataset name (defaults to `"search_results"`).
     pub target: Option<String>,
 }

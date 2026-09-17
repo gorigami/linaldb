@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — filtered/hybrid vector search + vector index clustering persistence
+
+Phase 2 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`. `SEARCH`'s modern syntax gains an optional
+`FILTER <predicate>` clause, applied as a post-filter over the top-`k` nearest-neighbor results
+(a distinct keyword from `WHERE`, already claimed by `SEARCH`'s legacy alternate query-vector
+syntax; legacy `SEARCH` forms are untouched). The query planner now decomposes a top-level `AND`
+to find a `COSINE_SIM(...) > threshold` conjunct anywhere in it, index-accelerates that conjunct,
+and applies the remaining conjuncts as a post-filter — fixes `WHERE COSINE_SIM(...) > t AND
+category = 'x'` identically for a plain `SELECT` and for `SEARCH`'s new `FILTER` clause (both
+route through the same planner path), where previously the whole predicate fell back to full
+scan+filter brute force the moment it wasn't *exactly* the cosine comparison alone. `EXPLAIN`
+visibly reports whether this fired (`CosineFilterExec` present in the physical plan).
+
+Separately, `CREATE VECTOR INDEX`'s k-means clustering is now persisted (`SAVE DATASET` writes
+`vector_index_clusters.json`) and restored directly on `LOAD DATASET` instead of being
+recomputed from scratch every time — closing the "full rebuild + blocking k-means on every ...
+LOAD DATASET" gap the plan's audit flagged. A content hash travels with the snapshot; a mismatch
+against the freshly loaded column falls back to a full rebuild rather than trusting stale
+clustering.
+
 ### Added — `LSTSQ` least-squares/pseudo-inverse solve
 
 `LSTSQ a b` solves `a x = b` for any shape of `a` (over-determined, under-determined, or

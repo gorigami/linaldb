@@ -100,23 +100,35 @@ notebook in a genuinely uncovered scientific field, with full documentation upda
       nothing to add there for this phase)
 
 ### Phase 2 — Filtered/hybrid vector search + index persistence (RAG composability)
-- [ ] `SEARCH` grammar: `FILTER <predicate>` clause on the "modern" syntax only
-      (`src/dsl/ast.rs`'s `SearchStmt`, `src/dsl/parser/dataset.rs:1093-1120`) — legacy `SEARCH`
-      forms untouched
-- [ ] New `LogicalPlan::FilteredVectorSearch` variant; `try_optimize_filter` decomposes a
-      top-level `AND`, routing the `COSINE_SIM(...) > threshold` conjunct to the existing
-      index-accelerated path, remaining conjuncts as post-filter (fixes plain
-      `SELECT ... WHERE COSINE_SIM(...) > t AND ...` identically, not just `SEARCH`)
-- [ ] `EXPLAIN` reports whether index acceleration was actually used
-- [ ] Index persistence: serialize `VectorIndex` clusters/centroids/assignments into the dataset
-      package, load on `LOAD DATASET`, invalidate via content-hash on the underlying vector
-      column
-- [ ] Wildcard-arm grep for the new `LogicalPlan` variant
+- [x] `SEARCH` grammar: `FILTER <predicate>` clause on the "modern" syntax only
+      (`src/dsl/ast.rs`'s `SearchStmt`, `src/dsl/parser/dataset.rs`) — legacy `SEARCH`
+      forms untouched (regression-tested)
+- [x] `try_optimize_filter` decomposes a top-level `AND`, routing the `COSINE_SIM(...) >
+      threshold` conjunct to the existing index-accelerated path, remaining conjuncts as
+      post-filter (fixes plain `SELECT ... WHERE COSINE_SIM(...) > t AND ...` identically, not
+      just `SEARCH`). **Design deviation from this plan's original wording**: implemented as
+      physical-plan-only composition (`CosineFilterExec` wrapped in `FilterExec`), not a new
+      `LogicalPlan::FilteredVectorSearch` variant — matches this planner's existing convention
+      for every other index optimization here (`IndexScanExec`/`CosineFilterExec`/
+      `PartitionPrunedScanExec` are all physical-only too); whether an index exists is runtime
+      state the logical plan shouldn't need to know about. See `query/planner.rs`'s
+      `try_optimize_filter` doc comment for the full reasoning.
+- [x] `EXPLAIN` reports whether index acceleration was actually used (`CosineFilterExec` visible
+      in the printed physical plan)
+- [x] Index persistence: serialize `VectorIndex` clusters/`clustered_count` into the dataset
+      package (`vector_index_clusters.json`), load on `LOAD DATASET`, invalidate via
+      content-hash on the underlying vector column
+- [x] Wildcard-arm grep for the new `LogicalPlan` variant — **not applicable**, no new variant
+      was added (see the design-deviation note above)
 - [ ] Full 11-notebook regression (watch notebooks 07/08/09 — shared `try_optimize_filter` path)
+      — **deferred**, same reason as Phase 1: nothing in this phase is released to PyPI yet for
+      `linal-hub`'s notebooks (PyPI-only installs) to exercise. Run after this phase's
+      version-bump/release PR.
 - [ ] New notebook: `13_astronomy_catalog_hybrid_search.ipynb` (ingested via Phase 1's Parquet
-      connector)
-- [ ] Docs: `docs/DSL_REFERENCE.md`, `docs/ARCHITECTURE.md`, `README.md`, `CHANGELOG.md`,
-      `docs/ERROR_REFERENCE.md`
+      connector) — **deferred**, same reason as above
+- [x] Docs: `docs/DSL_REFERENCE.md`, `docs/ARCHITECTURE.md`, `CHANGELOG.md` updated
+      (`README.md` has no existing `SEARCH`/vector-index Core Capabilities section to extend;
+      `docs/ERROR_REFERENCE.md` describes error *types*, nothing to add there for this phase)
 
 ### Phase 3 — Complex-number foundation
 - [ ] `Value::Complex(f64, f64)` / `ValueType::Complex` (scalar-only), promote `num-complex` to a

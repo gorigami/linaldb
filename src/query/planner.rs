@@ -8,6 +8,16 @@ use crate::query::physical::{
 };
 use std::sync::Arc;
 
+/// The parts of a `COSINE_SIM(col, query_vec) <op> threshold` conjunct
+/// `Planner::match_cosine_threshold` extracts, once a matching `VECTOR`
+/// index on `column` is confirmed to exist.
+struct CosineThresholdMatch {
+    column: String,
+    query: Vec<f32>,
+    threshold: f32,
+    strict: bool,
+}
+
 pub struct Planner<'a> {
     db: &'a TensorDb,
 }
@@ -267,48 +277,127 @@ impl<'a> Planner<'a> {
                 }
             }
 
-            // Pattern 2: COSINE_SIM(col, query_vec) > threshold → vector index
-            if op == ">" || op == ">=" {
-                if let Expr::VectorFn {
-                    func: crate::query::logical::VectorFnKind::CosineSim,
-                    args,
-                } = left.as_ref()
-                {
-                    if args.len() == 2 {
-                        if let (
-                            Expr::Column(col_name),
-                            Expr::Literal(crate::core::value::Value::Vector(qvec)),
-                        ) = (&args[0], &args[1])
-                        {
-                            let threshold = match right.as_ref() {
-                                Expr::Literal(crate::core::value::Value::Float(f)) => Some(*f),
-                                Expr::Literal(crate::core::value::Value::Int(i)) => Some(*i as f32),
-                                _ => None,
-                            };
-                            if let Some(threshold) = threshold {
-                                if let Ok(dataset) = self.db.get_dataset(dataset_name) {
-                                    if let Some(index) = dataset.get_index(col_name) {
-                                        if index.index_type()
-                                            == crate::core::index::IndexType::Vector
-                                        {
-                                            return Some(Box::new(CosineFilterExec {
-                                                dataset_name: dataset_name.to_string(),
-                                                schema: Arc::new(schema.clone()),
-                                                column: col_name.clone(),
-                                                query: qvec.clone(),
-                                                threshold,
-                                                strict: op == ">",
-                                            }));
-                                        }
-                                    }
-                                }
-                            }
+            // Pattern 2: COSINE_SIM(col, query_vec) > threshold → vector index,
+            // the predicate's only conjunct.
+            if let Some(m) = self.match_cosine_threshold(dataset_name, predicate) {
+                return Some(Box::new(CosineFilterExec {
+                    dataset_name: dataset_name.to_string(),
+                    schema: Arc::new(schema.clone()),
+                    column: m.column,
+                    query: m.query,
+                    threshold: m.threshold,
+                    strict: m.strict,
+                }));
+            }
+        }
+
+        // Pattern 3: a top-level AND with a COSINE_SIM(...) > threshold conjunct
+        // anywhere in it, index-accelerated, remaining conjuncts applied as a
+        // post-filter -- fixes `WHERE COSINE_SIM(...) > t AND category = 'x'`
+        // identically for a plain SELECT and for SEARCH's FILTER clause (both
+        // route through this same LogicalPlan::Filter path), where previously
+        // the whole predicate fell through to full SeqScanExec+FilterExec
+        // brute force the moment it wasn't *exactly* the cosine comparison
+        // alone. Deliberately implemented as physical-plan-only composition
+        // (CosineFilterExec wrapped in FilterExec) rather than a new
+        // LogicalPlan variant, matching this planner's existing convention
+        // for every other index optimization here (IndexScanExec/
+        // CosineFilterExec/PartitionPrunedScanExec are all physical-only too)
+        // -- whether an index exists is runtime state the *logical* plan
+        // shouldn't need to know about.
+        if matches!(predicate, Expr::And(_, _)) {
+            let conjuncts = flatten_and(predicate);
+            for (i, conjunct) in conjuncts.iter().enumerate() {
+                if let Some(m) = self.match_cosine_threshold(dataset_name, conjunct) {
+                    let cosine_exec = Box::new(CosineFilterExec {
+                        dataset_name: dataset_name.to_string(),
+                        schema: Arc::new(schema.clone()),
+                        column: m.column,
+                        query: m.query,
+                        threshold: m.threshold,
+                        strict: m.strict,
+                    });
+
+                    let remaining: Vec<Expr> = conjuncts
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, e)| (*e).clone())
+                        .collect();
+
+                    return Some(match rebuild_and(remaining) {
+                        Some(post_filter) => {
+                            let predicate_fn = Box::new(move |row: &crate::core::tuple::Tuple| {
+                                evaluate_expr(&post_filter, row)
+                            });
+                            Box::new(FilterExec {
+                                input: cosine_exec,
+                                predicate: predicate_fn,
+                            })
                         }
-                    }
+                        // Every other conjunct was itself trivially always-true
+                        // (shouldn't happen from real DSL input, but `flatten_and`
+                        // doesn't assume it can't) -- the cosine exec alone is
+                        // already the complete answer.
+                        None => cosine_exec,
+                    });
                 }
             }
         }
+
         None
+    }
+
+    /// Recognizes `COSINE_SIM(col, query_vec) <op> threshold` (`>`/`>=`) against
+    /// a column with an existing `VECTOR` index -- the shape both the
+    /// single-predicate case and the AND-decomposition case above need to
+    /// match identically. Returns `None` on any shape mismatch *or* a missing/
+    /// wrong-type index (the caller falls back to brute force either way, same
+    /// as before this existed).
+    fn match_cosine_threshold(
+        &self,
+        dataset_name: &str,
+        conjunct: &Expr,
+    ) -> Option<CosineThresholdMatch> {
+        let Expr::BinaryExpr { left, op, right } = conjunct else {
+            return None;
+        };
+        if op != ">" && op != ">=" {
+            return None;
+        }
+        let Expr::VectorFn {
+            func: crate::query::logical::VectorFnKind::CosineSim,
+            args,
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        if args.len() != 2 {
+            return None;
+        }
+        let (Expr::Column(col_name), Expr::Literal(crate::core::value::Value::Vector(qvec))) =
+            (&args[0], &args[1])
+        else {
+            return None;
+        };
+        let threshold = match right.as_ref() {
+            Expr::Literal(crate::core::value::Value::Float(f)) => *f,
+            Expr::Literal(crate::core::value::Value::Int(i)) => *i as f32,
+            _ => return None,
+        };
+
+        let dataset = self.db.get_dataset(dataset_name).ok()?;
+        let index = dataset.get_index(col_name)?;
+        if index.index_type() != crate::core::index::IndexType::Vector {
+            return None;
+        }
+
+        Some(CosineThresholdMatch {
+            column: col_name.clone(),
+            query: qvec.clone(),
+            threshold,
+            strict: op == ">",
+        })
     }
 
     /// Recognizes `col <op> literal` (`<`, `<=`, `>`, `>=`, either operand
@@ -408,6 +497,33 @@ fn extract_range_constraints(
         }
         _ => None,
     }
+}
+
+/// Flattens a (possibly nested, left-associative) `AND` tree into its
+/// individual conjuncts, e.g. `And(And(a, b), c)` (how `a AND b AND c`
+/// parses) becomes `[a, b, c]`. A non-`And` expression flattens to the
+/// single-element `[expr]`.
+fn flatten_and(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::And(left, right) => {
+            let mut conjuncts = flatten_and(left);
+            conjuncts.extend(flatten_and(right));
+            conjuncts
+        }
+        other => vec![other],
+    }
+}
+
+/// Inverse of `flatten_and` (on owned conjuncts): rebuilds one predicate
+/// `Expr` from a list, right-folding into nested `And`s. `None` for an
+/// empty list (nothing left to filter by), the single element itself for a
+/// one-element list (no `And` wrapper needed).
+fn rebuild_and(mut conjuncts: Vec<Expr>) -> Option<Expr> {
+    let mut result = conjuncts.pop()?;
+    while let Some(next) = conjuncts.pop() {
+        result = Expr::And(Box::new(next), Box::new(result));
+    }
+    Some(result)
 }
 
 /// Flips a comparison operator to restate `literal <op> col` as `col <op'>
@@ -760,5 +876,164 @@ mod partition_pruning_tests {
         // partition pruning fired: pruning only narrows what the wrapping
         // FilterExec has to look at, it never changes the answer.
         assert_eq!(rows.len(), 99);
+    }
+}
+
+#[cfg(test)]
+mod filtered_vector_search_tests {
+    use super::*;
+    use crate::core::value::Value;
+
+    fn col(name: &str) -> Expr {
+        Expr::Column(name.to_string())
+    }
+
+    fn lit_str(s: &str) -> Expr {
+        Expr::Literal(Value::String(s.to_string()))
+    }
+
+    fn cosine_gt(threshold: f32) -> Expr {
+        Expr::BinaryExpr {
+            left: Box::new(Expr::VectorFn {
+                func: crate::query::logical::VectorFnKind::CosineSim,
+                args: vec![col("emb"), Expr::Literal(Value::Vector(vec![1.0, 0.0]))],
+            }),
+            op: ">".to_string(),
+            right: Box::new(Expr::Literal(Value::Float(threshold))),
+        }
+    }
+
+    #[test]
+    fn flatten_and_flattens_left_associative_chain() {
+        // a AND b AND c parses left-associative: And(And(a, b), c)
+        let a = col("a");
+        let b = col("b");
+        let c = col("c");
+        let tree = Expr::And(
+            Box::new(Expr::And(Box::new(a.clone()), Box::new(b.clone()))),
+            Box::new(c.clone()),
+        );
+        let flat = flatten_and(&tree);
+        assert_eq!(flat.len(), 3);
+        assert!(matches!(flat[0], Expr::Column(n) if n == "a"));
+        assert!(matches!(flat[1], Expr::Column(n) if n == "b"));
+        assert!(matches!(flat[2], Expr::Column(n) if n == "c"));
+    }
+
+    #[test]
+    fn flatten_and_of_non_and_is_single_element() {
+        let e = col("x");
+        assert_eq!(flatten_and(&e).len(), 1);
+    }
+
+    #[test]
+    fn rebuild_and_round_trips_through_flatten() {
+        let a = col("a");
+        let b = col("b");
+        let c = col("c");
+        let tree = Expr::And(
+            Box::new(Expr::And(Box::new(a.clone()), Box::new(b.clone()))),
+            Box::new(c.clone()),
+        );
+        let flat: Vec<Expr> = flatten_and(&tree).into_iter().cloned().collect();
+        let rebuilt = rebuild_and(flat).unwrap();
+        assert_eq!(flatten_and(&rebuilt).len(), 3);
+    }
+
+    #[test]
+    fn rebuild_and_of_empty_is_none() {
+        assert!(rebuild_and(vec![]).is_none());
+    }
+
+    #[test]
+    fn rebuild_and_of_one_is_that_element_unwrapped() {
+        let single = rebuild_and(vec![col("a")]).unwrap();
+        assert!(!matches!(single, Expr::And(_, _)));
+    }
+
+    fn dataset_with_vector_index(db: &mut TensorDb, name: &str) {
+        let schema = std::sync::Arc::new(crate::core::tuple::Schema::new(vec![
+            crate::core::tuple::Field::new("category", crate::core::value::ValueType::String),
+            crate::core::tuple::Field::new("emb", crate::core::value::ValueType::Vector(2)),
+        ]));
+        db.create_dataset(name.to_string(), schema.clone()).unwrap();
+        for (cat, v) in [("a", vec![1.0, 0.0]), ("b", vec![0.0, 1.0])] {
+            db.insert_row(
+                name,
+                crate::core::tuple::Tuple::new(
+                    schema.clone(),
+                    vec![Value::String(cat.to_string()), Value::Vector(v)],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        db.create_vector_index(name, "emb").unwrap();
+    }
+
+    #[test]
+    fn match_cosine_threshold_finds_it_anywhere_in_an_and_chain() {
+        let mut db = TensorDb::new();
+        dataset_with_vector_index(&mut db, "docs");
+
+        let planner = Planner::new(&db);
+
+        // Cosine conjunct first.
+        let and1 = Expr::And(Box::new(cosine_gt(0.5)), Box::new(lit_str("a")));
+        assert!(planner.match_cosine_threshold("docs", &and1).is_none()); // the AND itself isn't a BinaryExpr
+        assert!(planner
+            .match_cosine_threshold("docs", flatten_and(&and1)[0])
+            .is_some());
+
+        // Cosine conjunct second -- order must not matter for try_optimize_filter.
+        let and2 = Expr::And(
+            Box::new(Expr::BinaryExpr {
+                left: Box::new(col("category")),
+                op: "=".to_string(),
+                right: Box::new(lit_str("a")),
+            }),
+            Box::new(cosine_gt(0.5)),
+        );
+        let plan =
+            planner.try_optimize_filter("docs", &db.get_dataset("docs").unwrap().schema, &and2);
+        assert!(
+            plan.is_some(),
+            "AND with the cosine conjunct in second position should still be accelerated"
+        );
+        let debug = format!("{:?}", plan.unwrap());
+        assert!(
+            debug.contains("CosineFilterExec"),
+            "expected the accelerated exec nested inside, got: {debug}"
+        );
+    }
+
+    #[test]
+    fn and_without_a_cosine_conjunct_or_without_an_index_falls_back() {
+        let mut db = TensorDb::new();
+        let schema = std::sync::Arc::new(crate::core::tuple::Schema::new(vec![
+            crate::core::tuple::Field::new("category", crate::core::value::ValueType::String),
+            crate::core::tuple::Field::new("region", crate::core::value::ValueType::String),
+        ]));
+        db.create_dataset("plain".to_string(), schema).unwrap();
+
+        let and = Expr::And(
+            Box::new(Expr::BinaryExpr {
+                left: Box::new(col("category")),
+                op: "=".to_string(),
+                right: Box::new(lit_str("a")),
+            }),
+            Box::new(Expr::BinaryExpr {
+                left: Box::new(col("region")),
+                op: "=".to_string(),
+                right: Box::new(lit_str("us")),
+            }),
+        );
+        let planner = Planner::new(&db);
+        let plan =
+            planner.try_optimize_filter("plain", &db.get_dataset("plain").unwrap().schema, &and);
+        assert!(
+            plan.is_none(),
+            "no cosine conjunct at all -- nothing to accelerate"
+        );
     }
 }

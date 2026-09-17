@@ -1082,6 +1082,7 @@ impl Parser {
                 column,
                 query,
                 top_k,
+                filter: None,
                 target: Some(first),
             }))
         } else if self.at(&Token::Where) {
@@ -1097,10 +1098,12 @@ impl Parser {
                 column,
                 query,
                 top_k,
+                filter: None,
                 target: None,
             }))
         } else {
-            // Modern syntax: SEARCH dataset ON col QUERY [...|name] LIMIT k [INTO target]
+            // Modern syntax: SEARCH dataset ON col QUERY [...|name] LIMIT k
+            //   [FILTER <predicate>] [INTO target]
             if !self.at(&Token::On) {
                 return Err(self.error("Expected FROM, ON, or WHERE after dataset name in SEARCH"));
             }
@@ -1117,6 +1120,16 @@ impl Parser {
             };
             self.eat(&Token::Limit)?;
             let top_k = self.eat_usize()?;
+            // FILTER, not WHERE: WHERE is already claimed by this statement's
+            // legacy alternate query-vector syntax (`SEARCH source WHERE col
+            // ~= [...] LIMIT k`, handled above) -- reusing it here for a
+            // second, unrelated purpose would silently break those scripts.
+            let filter = if self.at(&Token::Filter) {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
             let target = if self.at(&Token::Into) {
                 self.advance();
                 Some(self.eat_ident()?)
@@ -1128,6 +1141,7 @@ impl Parser {
                 column,
                 query,
                 top_k,
+                filter,
                 target,
             }))
         }

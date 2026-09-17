@@ -522,15 +522,25 @@ pub fn execute_statement(
                         })?
                 }
             };
-            let plan = LogicalPlan::VectorSearch {
+            let mut plan = LogicalPlan::VectorSearch {
                 input: Box::new(LogicalPlan::Scan {
                     dataset_name: s.dataset.clone(),
-                    schema,
+                    schema: schema.clone(),
                 }),
                 column: s.column.clone(),
                 query: query_tensor,
                 k: s.top_k,
             };
+            if let Some(filter_expr) = &s.filter {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: query::dsl_expr_to_logical_expr(
+                        filter_expr,
+                        &schema,
+                        &std::collections::HashSet::new(),
+                    ),
+                };
+            }
             let planner = Planner::new(db);
             let physical_plan =
                 planner

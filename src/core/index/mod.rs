@@ -77,6 +77,17 @@ pub trait Index: Send + Sync + Debug {
     fn build(&mut self) -> Result<(), String> {
         Ok(())
     }
+
+    /// Exports whatever expensive-to-recompute derived state `build()`
+    /// produces, as opaque JSON, so `SAVE DATASET` can persist it and
+    /// `LOAD DATASET` can restore it without recomputing (e.g.
+    /// `VectorIndex`'s k-means clusters -- the actual cost `build()`
+    /// pays). `None` by default: most index types (e.g. `HashIndex`) have
+    /// no derived state worth persisting, since `add()` alone already
+    /// gives them everything `build()` would.
+    fn export_snapshot(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 impl Clone for Box<dyn Index> {
