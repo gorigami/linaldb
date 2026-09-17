@@ -647,6 +647,8 @@ pub enum ColType {
     Matrix(usize, usize),
     /// `Tensor(dims)` — N-D tensor
     Tensor(Vec<usize>),
+    /// `Complex` — scalar complex number (`f64` real/imaginary parts).
+    Complex,
 }
 
 /// Tensor kind as expressed in the DSL. Decoupled from `engine::TensorKind`.
@@ -748,6 +750,26 @@ pub enum VectorFnKind {
     /// `DISTANCE(a, b)` — Euclidean distance, SQL-callable form of the
     /// standalone `DISTANCE a TO b` tensor-DSL keyword (§3).
     Distance,
+    /// `REAL(z)` — real part of a `Complex` scalar. Result: `Float64`.
+    Real,
+    /// `IMAG(z)` — imaginary part of a `Complex` scalar. Result: `Float64`.
+    Imag,
+    /// `ABS(z)` — magnitude (`sqrt(re² + im²)`) of a `Complex` scalar.
+    /// Named `ABS`, not `MAGNITUDE`, to avoid any ambiguity with the
+    /// existing `MAGNITUDE a` tensor-DSL keyword (FFT spectrum magnitude,
+    /// a wholly different operator on a wholly different type). Result:
+    /// `Float64`.
+    ComplexAbs,
+    /// `PHASE(z)` — phase angle (`atan2(im, re)`, radians) of a `Complex`
+    /// scalar. Result: `Float64`.
+    Phase,
+    /// `CONJ(z)` — complex conjugate (`re - im*i`). Result: `Complex`.
+    Conj,
+    /// `COMPLEX(re, im)` — constructs a `Complex` scalar from two real
+    /// number expressions. The only way to write a Complex literal today
+    /// (no dedicated `3+2i`-style token syntax) -- every other producer
+    /// (`EIGENVALUES_GENERAL`, arithmetic promotion) makes one internally.
+    ComplexNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -933,6 +955,12 @@ pub enum CallExpr {
     /// (Phase 8.3: real eigenvalues guaranteed, no complex `Value` support
     /// needed yet). Vector result.
     Eigenvalues(Box<Expr>),
+    /// `EIGENVALUES_GENERAL a` — eigenvalues of a **general** (not
+    /// necessarily symmetric) square matrix, which can be genuinely
+    /// complex. Single output: `Matrix(2, N)` (row 0 = real parts, row 1 =
+    /// imaginary parts), the same convention `FFT` uses for a complex
+    /// spectrum — see `core::linalg::eigenvalues_general`.
+    EigenvaluesGeneral(Box<Expr>),
     /// `QR a` — QR decomposition. Two-output (`Q`, `R`); bind with
     /// `LET q, r = QR a`.
     Qr(Box<Expr>),
@@ -950,6 +978,14 @@ pub enum CallExpr {
     /// plan's original "general case" wording). Two-output (eigenvalues
     /// vector, eigenvector matrix); bind with `LET vals, vecs = EIGEN a`.
     Eigen(Box<Expr>),
+    /// `EIGEN_GENERAL a` — full eigendecomposition of a general square
+    /// matrix; two-output (eigenvalues vector, eigenvector matrix), bind
+    /// with `LET vals, vecs = EIGEN_GENERAL a`. **Real eigenvalues only**
+    /// -- errors loudly if any eigenvalue is genuinely complex (no general
+    /// complex-eigenvector solver here); use `EIGENVALUES_GENERAL` for the
+    /// eigenvalues alone in that case. See
+    /// `core::linalg::eigen_general`'s doc comment for the full scope.
+    EigenGeneral(Box<Expr>),
     /// `SVD a` — singular value decomposition. Three-output (`U`, `S`,
     /// `Vt`); bind with `LET u, s, vt = SVD a`.
     Svd(Box<Expr>),

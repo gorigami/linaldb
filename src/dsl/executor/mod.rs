@@ -224,6 +224,9 @@ pub fn execute_statement(
                         ValueType::Bool => Value::Bool(false),
                         ValueType::Vector(dim) => Value::Vector(vec![0.0; *dim]),
                         ValueType::Matrix(r, c) => Value::Matrix(vec![vec![0.0; *c]; *r]),
+                        ValueType::Complex => {
+                            Value::Complex(crate::core::value::Complex64::new(0.0, 0.0))
+                        }
                         ValueType::Null => Value::Null,
                     },
                 };
@@ -647,5 +650,6 @@ pub(super) fn col_type_to_value_type(ct: &ColType) -> ValueType {
             [r, c] => ValueType::Matrix(*r, *c),
             _ => ValueType::Vector(0),
         },
+        ColType::Complex => ValueType::Complex,
     }
 }

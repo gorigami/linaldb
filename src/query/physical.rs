@@ -297,6 +297,18 @@ pub fn sort_tuples(
                         col
                     )))
                 }
+                // Complex has real equality (Value::equals()) but, like
+                // Vector/Matrix, no total order -- Value::compare() already
+                // correctly returns None for it, but silently treating that
+                // as "tied" here (the `unwrap_or(Equal)` below) would leave
+                // rows in an arbitrary, not-actually-sorted order instead of
+                // the same clear error Vector/Matrix already get. Caught by
+                // this phase's proactive wildcard-arm audit.
+                crate::core::value::ValueType::Complex => Err(EngineError::InvalidOp(format!(
+                    "Cannot ORDER BY column '{}': Complex values have no defined ordering. \
+                     Sort by REAL(...)/IMAG(...)/ABS(...) instead.",
+                    col
+                ))),
                 _ => Ok((idx, *asc)),
             }
         })
@@ -431,6 +443,10 @@ impl PhysicalPlan for AggregateExec {
                                         let c = m[0].len();
                                         regular_accs.push(Value::Matrix(vec![vec![0.0; c]; r]));
                                     }
+                                } else if let Value::Complex(_) = val {
+                                    regular_accs.push(Value::Complex(
+                                        crate::core::value::Complex64::new(0.0, 0.0),
+                                    ));
                                 } else {
                                     regular_accs.push(Value::Int(0));
                                 }
@@ -465,6 +481,8 @@ impl PhysicalPlan for AggregateExec {
                                     }
                                 } else if let Value::Float64(_) = val {
                                     Value::Float64(0.0)
+                                } else if let Value::Complex(_) = val {
+                                    Value::Complex(crate::core::value::Complex64::new(0.0, 0.0))
                                 } else {
                                     Value::Float(0.0)
                                 };
@@ -544,6 +562,28 @@ impl PhysicalPlan for AggregateExec {
                                     let new_val = *sum as f64 + v;
                                     accs[i] = Value::Float64(new_val);
                                 }
+                                // Complex is checked before the generic
+                                // catch-all below (never silently dropped,
+                                // per this phase's wildcard-arm audit): SUM
+                                // of a Complex column is well-defined (unlike
+                                // MIN/MAX), same promote-and-never-demote
+                                // policy Float64 above already has.
+                                (Value::Complex(ref mut sum), Value::Complex(v)) => *sum += v,
+                                (Value::Complex(ref mut sum), v) => {
+                                    if let Some(addend) = v.as_complex() {
+                                        *sum += addend;
+                                    }
+                                }
+                                (
+                                    Value::Int(_) | Value::Float(_) | Value::Float64(_),
+                                    Value::Complex(_),
+                                ) => {
+                                    let sum_so_far = accs[i]
+                                        .as_complex()
+                                        .unwrap_or(crate::core::value::Complex64::new(0.0, 0.0));
+                                    let addend = val.as_complex().unwrap();
+                                    accs[i] = Value::Complex(sum_so_far + addend);
+                                }
                                 (Value::Vector(sum_vec), Value::Vector(v)) => {
                                     if sum_vec.len() != v.len() {
                                         return Err(EngineError::InvalidOp(format!(
@@ -592,14 +632,36 @@ impl PhysicalPlan for AggregateExec {
                                     Value::Float64(v) => {
                                         *sum_ref = Value::Float64(*sum as f64 + v);
                                     }
+                                    Value::Complex(v) => {
+                                        *sum_ref = Value::Complex(
+                                            crate::core::value::Complex64::new(*sum as f64, 0.0)
+                                                + v,
+                                        );
+                                    }
                                     _ => {}
                                 },
                                 Value::Float64(ref mut sum) => match &val {
                                     Value::Int(v) => *sum += *v as f64,
                                     Value::Float(v) => *sum += *v as f64,
                                     Value::Float64(v) => *sum += v,
+                                    // Complex is checked before the generic
+                                    // catch-all (never silently dropped, per
+                                    // this phase's wildcard-arm audit) --
+                                    // AVG of a Complex column is
+                                    // well-defined, same promote-and-never-
+                                    // demote policy as Float64 above.
+                                    Value::Complex(v) => {
+                                        *sum_ref = Value::Complex(
+                                            crate::core::value::Complex64::new(*sum, 0.0) + v,
+                                        );
+                                    }
                                     _ => {}
                                 },
+                                Value::Complex(ref mut sum) => {
+                                    if let Some(addend) = val.as_complex() {
+                                        *sum += addend;
+                                    }
+                                }
                                 Value::Int(ref mut sum) => {
                                     match &val {
                                         Value::Int(v) => {
@@ -611,6 +673,14 @@ impl PhysicalPlan for AggregateExec {
                                         }
                                         Value::Float64(v) => {
                                             *sum_ref = Value::Float64(*sum as f64 + v);
+                                        }
+                                        Value::Complex(v) => {
+                                            *sum_ref = Value::Complex(
+                                                crate::core::value::Complex64::new(
+                                                    *sum as f64,
+                                                    0.0,
+                                                ) + v,
+                                            );
                                         }
                                         _ => {}
                                     }
@@ -673,6 +743,25 @@ impl PhysicalPlan for AggregateExec {
                                                 }
                                             }
                                         }
+                                        // Complex has no total order (see
+                                        // Value::compare()'s doc comment) --
+                                        // silently letting it fall to the
+                                        // generic compare()-based arm below
+                                        // would always report the *first*
+                                        // row's value as "the max" (compare()
+                                        // returns None, so the update never
+                                        // fires), which looks like a real
+                                        // answer but isn't one. Loud error
+                                        // instead, same philosophy as every
+                                        // other genuinely-undefined operation
+                                        // in this codebase. Caught by this
+                                        // phase's wildcard-arm audit.
+                                        (Value::Complex(_), _) | (_, Value::Complex(_)) => {
+                                            return Err(EngineError::InvalidOp(
+                                                "MAX: Complex values have no defined ordering"
+                                                    .to_string(),
+                                            ));
+                                        }
                                         (c, n) => {
                                             if let Some(std::cmp::Ordering::Greater) = n.compare(c)
                                             {
@@ -696,6 +785,13 @@ impl PhysicalPlan for AggregateExec {
                                                 }
                                             }
                                         }
+                                    }
+                                    // See the matching MAX comment above.
+                                    (Value::Complex(_), _) | (_, Value::Complex(_)) => {
+                                        return Err(EngineError::InvalidOp(
+                                            "MIN: Complex values have no defined ordering"
+                                                .to_string(),
+                                        ));
                                     }
                                     (c, n) => {
                                         if let Some(std::cmp::Ordering::Less) = n.compare(c) {
@@ -765,6 +861,12 @@ impl PhysicalPlan for AggregateExec {
                                         .map(|row| row.iter().map(|x| x / *count as f32).collect())
                                         .collect(),
                                 ),
+                                // Caught by this phase's wildcard-arm audit
+                                // -- without this, AVG of a Complex column
+                                // would finalize to Null despite the sum
+                                // accumulator having correctly tracked a
+                                // real Complex sum above.
+                                Value::Complex(c) => Value::Complex(c / *count as f64),
                                 _ => Value::Null,
                             };
                             final_accs.push(avg);
@@ -904,11 +1006,23 @@ pub fn evaluate_expression(
             // always taking the ELSE branch instead of erroring or evaluating
             // correctly. WHERE clauses were unaffected: they route through
             // `evaluate_expr`, not this function.
-            if matches!(op.as_str(), "=" | "!=" | ">" | "<" | ">=" | "<=") {
+            if op == "=" || op == "!=" {
+                // Value::equals() (not compare()'s Ordering) -- handles
+                // Complex's real equality-without-order correctly; see its
+                // doc comment. compare()-based Ordering is still exactly
+                // right for every other type's = / != (its own cross-type
+                // numeric/bool promotions are unchanged), equals() just
+                // delegates to it for anything that isn't Complex.
+                let eq = left_val.equals(&right_val);
+                return Value::Bool(if op == "=" {
+                    eq == Some(true)
+                } else {
+                    eq == Some(false)
+                });
+            }
+            if matches!(op.as_str(), ">" | "<" | ">=" | "<=") {
                 let ord = left_val.compare(&right_val);
                 return Value::Bool(match op.as_str() {
-                    "=" => ord == Some(std::cmp::Ordering::Equal),
-                    "!=" => ord.is_some() && ord != Some(std::cmp::Ordering::Equal),
                     ">" => ord == Some(std::cmp::Ordering::Greater),
                     "<" => ord == Some(std::cmp::Ordering::Less),
                     ">=" => matches!(
@@ -920,6 +1034,24 @@ pub fn evaluate_expression(
                         Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
                     ), // "<="
                 });
+            }
+
+            // Any pairing touching Complex promotes to Complex (num_complex's
+            // own +/-/*// impls, real numbers zero-extended via as_complex())
+            // -- checked before the Float64 promotion below so it always
+            // takes priority: Complex is strictly wider, Int/Float/Float64
+            // all promote into it, never the reverse.
+            if matches!(left_val, Value::Complex(_)) || matches!(right_val, Value::Complex(_)) {
+                return match (left_val.as_complex(), right_val.as_complex()) {
+                    (Some(l), Some(r)) => match op.as_str() {
+                        "+" => Value::Complex(l + r),
+                        "-" => Value::Complex(l - r),
+                        "*" => Value::Complex(l * r),
+                        "/" => Value::Complex(l / r),
+                        _ => Value::Null,
+                    },
+                    _ => Value::Null,
+                };
             }
 
             // Any pairing touching Float64 promotes to Float64 (widening the
@@ -1352,6 +1484,35 @@ pub fn evaluate_expression(
                 VectorFnKind::Flatten => match vals.first() {
                     Some(Value::Vector(v)) => Value::Vector(v.clone()),
                     Some(Value::Matrix(m)) => Value::Vector(m.iter().flatten().copied().collect()),
+                    _ => Value::Null,
+                },
+                VectorFnKind::Real => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.re),
+                    None => Value::Null,
+                },
+                VectorFnKind::Imag => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.im),
+                    None => Value::Null,
+                },
+                VectorFnKind::ComplexAbs => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.norm()),
+                    None => Value::Null,
+                },
+                VectorFnKind::Phase => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Float64(c.arg()),
+                    None => Value::Null,
+                },
+                VectorFnKind::Conj => match vals.first().and_then(|v| v.as_complex()) {
+                    Some(c) => Value::Complex(c.conj()),
+                    None => Value::Null,
+                },
+                VectorFnKind::ComplexNew => match (
+                    vals.first().and_then(|v| v.as_float64()),
+                    vals.get(1).and_then(|v| v.as_float64()),
+                ) {
+                    (Some(re), Some(im)) => {
+                        Value::Complex(crate::core::value::Complex64::new(re, im))
+                    }
                     _ => Value::Null,
                 },
             }

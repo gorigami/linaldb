@@ -857,6 +857,16 @@ impl TensorDb {
             .eval_eigenvalues(ctx, output_name, input_name)
     }
 
+    pub fn eval_eigenvalues_general(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_eigenvalues_general(ctx, output_name, input_name)
+    }
+
     pub fn eval_qr(
         &mut self,
         ctx: &mut ExecutionContext,
@@ -895,6 +905,16 @@ impl TensorDb {
     ) -> Result<(), EngineError> {
         self.active_instance_mut()
             .eval_eigen(ctx, output_names, input_name)
+    }
+
+    pub fn eval_eigen_general(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .eval_eigen_general(ctx, output_names, input_name)
     }
 
     pub fn eval_svd(
@@ -1945,6 +1965,42 @@ impl DatabaseInstance {
         Ok(())
     }
 
+    /// `EIGENVALUES_GENERAL a` -- eigenvalues of a general (not necessarily
+    /// symmetric) square matrix, possibly complex. `Matrix(2, N)` result
+    /// (row 0 = real parts, row 1 = imaginary parts) -- see
+    /// `core::linalg::eigenvalues_general`'s doc comment.
+    pub fn eval_eigenvalues_general(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_name: impl Into<String>,
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        let (in_tensor_ref, in_kind) = self.get_with_kind(input_name)?;
+        let in_tensor = in_tensor_ref.clone();
+        let (data, shape) =
+            crate::core::linalg::eigenvalues_general(&in_tensor).map_err(EngineError::InvalidOp)?;
+
+        let new_id = self.store.gen_id();
+        let lineage = Lineage {
+            execution_id: ctx.execution_id(),
+            operation: "EIGENVALUES_GENERAL".to_string(),
+            inputs: vec![in_tensor.id],
+        };
+        let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
+        let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+        self.record_tensor_provenance(&result, &lineage);
+
+        let out_id = self.store.insert_existing_tensor(result)?;
+        self.names.insert(
+            output_name.into(),
+            NameEntry {
+                id: out_id,
+                kind: in_kind,
+            },
+        );
+        Ok(())
+    }
+
     /// Shared plumbing for the "one matrix in, several matrices/vectors out"
     /// decompositions (`QR`/`LU`/`EIGEN`/`SVD`) bound via Phase 8.4's
     /// multi-output `LET a, b[, c] = ...`. `compute` returns its outputs in
@@ -2097,6 +2153,25 @@ impl DatabaseInstance {
             input_name,
             "EIGEN",
             crate::core::linalg::eigen_outputs,
+        )
+    }
+
+    /// `EIGEN_GENERAL a` -- full eigendecomposition of a general square
+    /// matrix (real eigenvalues only -- see `core::linalg::eigen_general`'s
+    /// doc comment for the scope and why it errors on genuinely complex
+    /// eigenvalues). Bind with `LET vals, vecs = EIGEN_GENERAL a`.
+    pub fn eval_eigen_general(
+        &mut self,
+        ctx: &mut ExecutionContext,
+        output_names: &[String],
+        input_name: &str,
+    ) -> Result<(), EngineError> {
+        self.eval_linalg_multi(
+            ctx,
+            output_names,
+            input_name,
+            "EIGEN_GENERAL",
+            crate::core::linalg::eigen_general_outputs,
         )
     }
 

@@ -41,6 +41,9 @@ fn value_to_py(py: Python<'_>, value: &Value) -> PyObject {
                 .collect();
             PyList::new(py, rows).unwrap().into_any().unbind()
         }
+        Value::Complex(c) => pyo3::types::PyComplex::from_doubles(py, c.re, c.im)
+            .into_any()
+            .unbind(),
         Value::Null => py.None(),
     }
 }

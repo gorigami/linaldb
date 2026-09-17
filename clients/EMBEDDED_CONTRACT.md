@@ -47,7 +47,16 @@ directly, no JSON round-trip):
 | `Bool` | `bool` | `logical` |
 | `Vector(Vec<f32>)` | `list[float]` | numeric vector |
 | `Matrix(Vec<Vec<f32>>)` | `list[list[float]]` | list of numeric vectors (row-major) |
+| `Complex(Complex64)` | native Python `complex` (`pyo3::types::PyComplex::from_doubles`) | native R `complex` (`extendr_api::scalar::Rcplx` — its `c64` is `num_complex::Complex<f64>` itself, the exact same type `Value::Complex` uses, so this is a lossless zero-conversion wrap) |
 | `Null` | `None` | `NA_real_` (satisfies `is.na()`, same rule `CONTRACT.md` §3 documents for the HTTP client's `Value::Null`) |
+
+`Complex` (Phase 3 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`) is the one
+`Value` variant both embedded bindings convert to each language's own
+*native* complex type, unlike `CONTRACT.md`'s HTTP contract (a `[re, im]`
+JSON array — JSON has no complex type). There is no ordering (same `Value::
+equals()`-not-`compare()` semantics as the HTTP contract) — sorting or
+`ORDER BY` on a `Complex` column is a hard DSL-level error before it ever
+reaches this conversion layer.
 
 ## 2. Dataset export — no `/delivery`, direct filesystem reads
 

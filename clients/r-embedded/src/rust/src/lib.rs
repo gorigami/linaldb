@@ -33,6 +33,11 @@ fn value_to_robj(value: &Value) -> Robj {
                 .collect();
             List::from_values(rows).into_robj()
         }
+        // extendr's `Rcplx` wraps `num_complex::Complex<f64>` (its `c64`
+        // alias) directly -- the exact same type `Value::Complex` itself
+        // uses, so this is a lossless, zero-conversion wrap into R's
+        // native `complex` scalar type.
+        Value::Complex(c) => Robj::from(extendr_api::scalar::Rcplx::new(c.re, c.im)),
         Value::Null => Robj::from(f64::na()),
     }
 }

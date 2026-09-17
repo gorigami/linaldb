@@ -271,6 +271,8 @@ pub enum Token {
     Lstsq,
     #[token("EIGENVALUES")]
     Eigenvalues,
+    #[token("EIGENVALUES_GENERAL")]
+    EigenvaluesGeneral,
     #[token("QR")]
     Qr,
     #[token("LU")]
@@ -279,6 +281,8 @@ pub enum Token {
     Cholesky,
     #[token("EIGEN")]
     Eigen,
+    #[token("EIGEN_GENERAL")]
+    EigenGeneral,
     #[token("SVD")]
     Svd,
     #[token("PCA")]

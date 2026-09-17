@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — scalar `Complex` value type, `EIGENVALUES_GENERAL`/`EIGEN_GENERAL`
+
+Phase 3 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`. A new scalar `Value::Complex` (DSL type
+`COMPLEX`, wrapping `num_complex::Complex64`) rounds out the type system for matrices with
+complex eigenvalues — deliberately scalar-only, mirroring `Float64`; a genuine `Tensor<Complex>`
+remains out of scope. Construct with `COMPLEX(re, im)`; decompose with the new `REAL`/`IMAG`/
+`ABS`/`PHASE`/`CONJ` scalar functions (`ABS` rather than `MAGNITUDE`, matching the name already
+used for `Value::Float`). Arithmetic promotes any operand pairing that touches `Complex` to
+`Complex`, following the engine's existing promote-and-never-demote convention. `SUM`/`AVG`
+aggregates (plain and windowed) work correctly on `Complex` columns; `MIN`/`MAX`/`ORDER BY` error
+loudly instead of returning a silently-wrong answer, since `Complex` has equality but no total
+order — a new `Value::equals()` primitive (distinct from the ordering-based `Value::compare()`)
+gives it correct `=`/`!=`/`IN` semantics despite that. `Complex` columns persist through `SAVE
+DATASET`/`LOAD DATASET` via the existing legacy-JSON-fallback Parquet encoding (no native Arrow
+complex type). Both native client bindings convert `Value::Complex` to each host language's own
+native complex type (Python's `complex`, R's `complex`) — see `clients/EMBEDDED_CONTRACT.md`.
+
+`EIGENVALUES_GENERAL`/`EIGEN_GENERAL` extend `EIGENVALUES`/`EIGEN` to non-symmetric square
+matrices, whose eigenvalues may be complex (via nalgebra's Schur decomposition).
+`EIGENVALUES_GENERAL` returns a `Matrix(2,N)` (row 0 = real parts, row 1 = imaginary parts),
+mirroring the existing `FFT` complex-spectrum convention rather than a collection of `Complex`
+values. `EIGEN_GENERAL` (multi-output `LET`, paired eigenvalues + eigenvectors) is scoped to the
+real-eigenvalue case only — nalgebra has no public general complex-eigenvector API — and errors
+loudly, pointing at `EIGENVALUES_GENERAL`, if the matrix's eigenvalues turn out to be genuinely
+complex, rather than silently returning nonsense real vectors.
+
+This phase's implementation also included a dedicated audit for `Value`/`ValueType` wildcard
+match arms (which `cargo build`'s exhaustive-match errors cannot catch when adding a new
+variant) — see `docs/ARCHITECTURE.md`'s `value.rs` section for the full list of pre-existing
+bugs this surfaced and fixed (`ORDER BY`/`MIN`/`MAX`/`SUM`/`AVG` on `Complex`, and `AVG`'s schema
+type inference).
+
 ### Added — filtered/hybrid vector search + vector index clustering persistence
 
 Phase 2 of `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`. `SEARCH`'s modern syntax gains an optional

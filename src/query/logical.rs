@@ -79,6 +79,12 @@ pub enum VectorFnKind {
     /// `DISTANCE(a, b)` — Euclidean distance, SQL-callable form of the
     /// standalone `DISTANCE a TO b` tensor-DSL keyword (§3).
     Distance,
+    Real,
+    Imag,
+    ComplexAbs,
+    Phase,
+    Conj,
+    ComplexNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +297,16 @@ impl LogicalPlan {
                                     crate::core::value::ValueType::Float64 => {
                                         crate::core::value::ValueType::Float64
                                     }
+                                    // Caught by Phase 3's wildcard-arm audit
+                                    // -- without this, AVG(complex_col) would
+                                    // report ValueType::Float in its schema
+                                    // even though AggregateExec's real
+                                    // finalization above correctly produces
+                                    // a Value::Complex, a schema/value
+                                    // mismatch that fails Tuple construction.
+                                    crate::core::value::ValueType::Complex => {
+                                        crate::core::value::ValueType::Complex
+                                    }
                                     _ => crate::core::value::ValueType::Float,
                                 };
                             }
@@ -370,6 +386,7 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             AggregateFunction::Avg => match infer_expr_type_full(inner, schema) {
                 t @ (ValueType::Vector(_) | ValueType::Matrix(_, _)) => t,
                 ValueType::Float64 => ValueType::Float64,
+                ValueType::Complex => ValueType::Complex,
                 _ => ValueType::Float,
             },
             AggregateFunction::Count => ValueType::Int,
@@ -399,6 +416,11 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             | VectorFnKind::Distance => ValueType::Float,
             VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
             VectorFnKind::MatShape => ValueType::String,
+            VectorFnKind::Real
+            | VectorFnKind::Imag
+            | VectorFnKind::ComplexAbs
+            | VectorFnKind::Phase => ValueType::Float64,
+            VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
         },
         Expr::Case {
             else_expr,

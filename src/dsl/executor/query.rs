@@ -785,6 +785,11 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             | VectorFnKind::Distance => ValueType::Float,
             VectorFnKind::Matmul | VectorFnKind::Transpose => ValueType::Matrix(0, 0),
             VectorFnKind::MatShape => ValueType::String,
+            VectorFnKind::Real
+            | VectorFnKind::Imag
+            | VectorFnKind::ComplexAbs
+            | VectorFnKind::Phase => ValueType::Float64,
+            VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
         },
         _ => ValueType::Float,
     }
@@ -1039,6 +1044,11 @@ fn apply_window_func(
                                 .map(|row| row.iter().map(|x| x / count).collect())
                                 .collect(),
                         ),
+                        // Caught by Phase 3's wildcard-arm audit -- without
+                        // this, window AVG(complex_col) would silently
+                        // return the running *sum* (undivided), not the
+                        // average.
+                        Value::Complex(s) => Value::Complex(s / count as f64),
                         other => other,
                     }
                 }
@@ -1054,19 +1064,46 @@ fn apply_window_func(
                 }
                 WindowFunc::Min(inner) => {
                     let logical = dsl_expr_to_logical_expr(inner, &window_schema, right_tables);
-                    sorted_indices[..=rank_0]
+                    let window_vals: Vec<Value> = sorted_indices[..=rank_0]
                         .iter()
                         .map(|&i| evaluate_expression(&logical, &rows[i]))
                         .filter(|v| !matches!(v, Value::Null))
+                        .collect();
+                    // Complex has no total order -- see the matching
+                    // AggregateExec comment (query/physical.rs) for why a
+                    // compare()-based min_by/max_by would silently return
+                    // an arbitrary value here instead of erroring. Caught
+                    // by Phase 3's wildcard-arm audit.
+                    if window_vals.iter().any(|v| matches!(v, Value::Complex(_))) {
+                        return Err(DslError::Engine {
+                            line: line_no,
+                            source: crate::engine::EngineError::InvalidOp(
+                                "Window MIN: Complex values have no defined ordering".to_string(),
+                            ),
+                        });
+                    }
+                    window_vals
+                        .into_iter()
                         .min_by(|a, b| a.compare(b).unwrap_or(std::cmp::Ordering::Equal))
                         .unwrap_or(Value::Null)
                 }
                 WindowFunc::Max(inner) => {
                     let logical = dsl_expr_to_logical_expr(inner, &window_schema, right_tables);
-                    sorted_indices[..=rank_0]
+                    let window_vals: Vec<Value> = sorted_indices[..=rank_0]
                         .iter()
                         .map(|&i| evaluate_expression(&logical, &rows[i]))
                         .filter(|v| !matches!(v, Value::Null))
+                        .collect();
+                    if window_vals.iter().any(|v| matches!(v, Value::Complex(_))) {
+                        return Err(DslError::Engine {
+                            line: line_no,
+                            source: crate::engine::EngineError::InvalidOp(
+                                "Window MAX: Complex values have no defined ordering".to_string(),
+                            ),
+                        });
+                    }
+                    window_vals
+                        .into_iter()
                         .max_by(|a, b| a.compare(b).unwrap_or(std::cmp::Ordering::Equal))
                         .unwrap_or(Value::Null)
                 }
@@ -1121,6 +1158,13 @@ fn window_running_sum(vals: &[Value], line_no: usize) -> Result<Value, DslError>
             (None, Value::Float64(f)) => Value::Float64(f),
             (None, Value::Vector(vec)) => Value::Vector(vec),
             (None, Value::Matrix(m)) => Value::Matrix(m),
+            // Caught by Phase 3's wildcard-arm audit -- without this arm
+            // (and the Some(Complex) continuation arm below), the first
+            // Complex value in a window would silently seed the running
+            // sum at Float(0.0), and every later Complex value would fall
+            // to the `(Some(other), _) => other` catch-all below, silently
+            // dropped instead of accumulated.
+            (None, Value::Complex(c)) => Value::Complex(c),
             (None, _) => Value::Float(0.0),
             (Some(Value::Float(s)), Value::Int(n)) => Value::Float(s + n as f32),
             (Some(Value::Float(s)), Value::Float(f)) => Value::Float(s + f),
@@ -1166,6 +1210,7 @@ fn window_running_sum(vals: &[Value], line_no: usize) -> Result<Value, DslError>
                 }
                 Value::Matrix(sum)
             }
+            (Some(Value::Complex(s)), Value::Complex(c)) => Value::Complex(s + c),
             (Some(other), _) => other,
         });
     }
@@ -1227,6 +1272,7 @@ pub(super) fn execute_add_computed_column(
                 let c = m.first().map_or(0, |row| row.len());
                 ValueType::Matrix(r, c)
             }
+            Value::Complex(_) => ValueType::Complex,
             Value::Null => ValueType::Float,
         };
 
@@ -1275,6 +1321,7 @@ pub(super) fn execute_add_computed_column(
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
             Value::Matrix(m) => ValueType::Matrix(m.len(), m.first().map_or(0, |r| r.len())),
+            Value::Complex(_) => ValueType::Complex,
             Value::Null => ValueType::Null,
         };
 
@@ -1735,6 +1782,12 @@ pub(super) fn dsl_expr_to_logical_expr(
                 VectorFnKind::MatShape => LVk::MatShape,
                 VectorFnKind::Flatten => LVk::Flatten,
                 VectorFnKind::Distance => LVk::Distance,
+                VectorFnKind::Real => LVk::Real,
+                VectorFnKind::Imag => LVk::Imag,
+                VectorFnKind::ComplexAbs => LVk::ComplexAbs,
+                VectorFnKind::Phase => LVk::Phase,
+                VectorFnKind::Conj => LVk::Conj,
+                VectorFnKind::ComplexNew => LVk::ComplexNew,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,
@@ -1930,6 +1983,21 @@ fn eval_row_expr(expr: &Expr, env: &std::collections::HashMap<&str, &Value>) -> 
         Expr::Infix { op, lhs, rhs } => {
             let l = eval_row_expr(lhs, env);
             let r = eval_row_expr(rhs, env);
+            // Any pairing touching Complex promotes to Complex -- checked
+            // before Float64 below, same priority reasoning as
+            // query/physical.rs's evaluate_expression.
+            if matches!(l, Value::Complex(_)) || matches!(r, Value::Complex(_)) {
+                return match (l.as_complex(), r.as_complex()) {
+                    (Some(a), Some(b)) => match op {
+                        InfixOp::Add => Value::Complex(a + b),
+                        InfixOp::Subtract => Value::Complex(a - b),
+                        InfixOp::Multiply => Value::Complex(a * b),
+                        InfixOp::Divide => Value::Complex(a / b),
+                        _ => Value::Null,
+                    },
+                    _ => Value::Null,
+                };
+            }
             // Any pairing touching Float64 promotes to Float64 (widening the
             // other side), checked before the plain-f32/Int arms below so it
             // always takes priority over them.
@@ -1973,6 +2041,15 @@ fn eval_row_expr(expr: &Expr, env: &std::collections::HashMap<&str, &Value>) -> 
         // a narrowing bug) and a materially larger fix (needs a full
         // CastTarget match mirroring `query::physical::evaluate_expression`).
         // See CHANGELOG.md's "Flagged, not fixed" note.
+        //
+        // Same gap covers `Expr::VectorFn` (COSINE_SIM/DOT/..., and Phase
+        // 3's REAL/IMAG/ABS/PHASE/CONJ/COMPLEX) -- a computed/LAZY `ADD
+        // COLUMN` using any of these also silently evaluates to Null,
+        // pre-existing and not specific to the Complex additions (this
+        // function has never dispatched any `VectorFn`). `SELECT`/`WHERE`/
+        // ordinary computed columns are unaffected -- they route through
+        // `query::physical::evaluate_expression`, which does dispatch
+        // `VectorFn` (including the new Complex functions) correctly.
         _ => Value::Null,
     }
 }

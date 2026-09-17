@@ -5,6 +5,12 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Re-exported so every other module reaches `Complex64` via
+/// `crate::core::value::Complex64` -- the same module `Value::Complex`
+/// itself lives in -- rather than each needing its own `num_complex`
+/// import.
+pub use num_complex::Complex64;
+
 /// Represents a value in the database - supports heterogeneous types
 /// Represents a value in the database - supports heterogeneous types
 /// Represents a value in the database - supports heterogeneous types
@@ -20,6 +26,15 @@ pub enum Value {
     Bool(bool),
     Vector(Vec<f32>),      // Embedding vector
     Matrix(Vec<Vec<f32>>), // Matrix (2D Tensor)
+    /// Scalar complex number, `f64` precision throughout (matching
+    /// `Float64`'s rationale). Deliberately **scalar-only** -- a genuine
+    /// `Tensor<Complex>` type is a separate, larger initiative (the same way
+    /// this engine still has no `f64` tensor storage, only `f64` scalars).
+    /// `EIGENVALUES_GENERAL`/`EIGEN_GENERAL` (`core::linalg`) are this
+    /// type's first producer; `FFT`'s spectrum output stays the existing
+    /// `Matrix(2, N)` (re/im row) convention, unchanged -- see
+    /// SCIENTIFIC_ENGINE_EXPANSION_PLAN.md Phase 3.
+    Complex(Complex64),
     Null,
 }
 
@@ -55,6 +70,9 @@ impl PartialEq for Value {
                 }
                 true
             }
+            (Value::Complex(a), Value::Complex(b)) => {
+                a.re.to_bits() == b.re.to_bits() && a.im.to_bits() == b.im.to_bits()
+            }
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -89,6 +107,10 @@ impl std::hash::Hash for Value {
                     }
                 }
             }
+            Value::Complex(v) => {
+                v.re.to_bits().hash(state);
+                v.im.to_bits().hash(state);
+            }
             Value::Null => {}
         }
     }
@@ -104,6 +126,7 @@ pub enum ValueType {
     Bool,
     Vector(usize),        // Vector with fixed dimension
     Matrix(usize, usize), // Matrix (rows, cols)
+    Complex,
     Null,
 }
 
@@ -124,6 +147,7 @@ impl Value {
                     ValueType::Matrix(m.len(), m[0].len())
                 }
             }
+            Value::Complex(_) => ValueType::Complex,
             Value::Null => ValueType::Null,
         }
     }
@@ -182,12 +206,48 @@ impl Value {
         }
     }
 
+    /// Try to convert to a `Complex64`, promoting any real numeric `Value`
+    /// (`Int`/`Float`/`Float64`) to a zero-imaginary-part complex number --
+    /// the same "mixed arithmetic always promotes" convention `Float64`'s
+    /// own doc comment describes for `Float`/`Int`.
+    pub fn as_complex(&self) -> Option<Complex64> {
+        match self {
+            Value::Complex(c) => Some(*c),
+            Value::Float64(f) => Some(Complex64::new(*f, 0.0)),
+            Value::Float(f) => Some(Complex64::new(*f as f64, 0.0)),
+            Value::Int(i) => Some(Complex64::new(*i as f64, 0.0)),
+            _ => None,
+        }
+    }
+
     /// Try to get vector reference
     pub fn as_vector(&self) -> Option<&[f32]> {
         match self {
             Value::Vector(v) => Some(v),
             _ => None,
         }
+    }
+
+    /// Equality for `=`/`!=`/`IN` predicate evaluation -- distinct from
+    /// `compare()` because `Complex` has real equality but no total order
+    /// (`compare()` correctly returns `None` for it, since there's no
+    /// meaningful answer to `>`/`<`, but `None` also means "incomparable"
+    /// to every `=`/`!=` call site, which would make `WHERE z = 1+2i`
+    /// silently never match and `WHERE z != 1+2i` silently never match
+    /// either -- wrong for a type that *does* have well-defined equality).
+    /// Every other type's equality still comes from `compare()`'s existing
+    /// cross-type numeric/bool promotions (Int vs Float, Bool vs 0/1, ...)
+    /// unchanged -- only `Complex` gets a real-`PartialEq`-based answer
+    /// instead of `None`.
+    pub fn equals(&self, other: &Value) -> Option<bool> {
+        if matches!(self, Value::Complex(_)) || matches!(other, Value::Complex(_)) {
+            return match (self.as_complex(), other.as_complex()) {
+                (Some(a), Some(b)) => Some(a == b),
+                _ => None,
+            };
+        }
+        self.compare(other)
+            .map(|ord| ord == std::cmp::Ordering::Equal)
     }
 
     /// Compare values (for sorting and filtering)
@@ -233,6 +293,7 @@ impl Value {
             (Value::Matrix(m), ValueType::Matrix(r, c)) => {
                 m.len() == *r && (m.is_empty() || m[0].len() == *c)
             }
+            (Value::Complex(_), ValueType::Complex) => true,
             (Value::Null, _) => true, // Null matches any type if nullable
             _ => false,
         }
@@ -302,8 +363,21 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Complex(v) => write!(f, "{}", format_complex(*v)),
             Value::Null => write!(f, "NULL"),
         }
+    }
+}
+
+/// `a+bi` / `a-bi`, matching the conventional mathematical notation (not
+/// `num_complex::Complex`'s own `Display`, which renders `a+bi` too but
+/// without `format_f64`'s scientific-notation switch for extreme
+/// magnitudes -- consistent with every other numeric `Value` variant here).
+fn format_complex(v: Complex64) -> String {
+    if v.im < 0.0 {
+        format!("{}-{}i", format_f64(v.re), format_f64(-v.im))
+    } else {
+        format!("{}+{}i", format_f64(v.re), format_f64(v.im))
     }
 }
 
@@ -317,6 +391,7 @@ impl fmt::Display for ValueType {
             ValueType::Bool => write!(f, "BOOL"),
             ValueType::Vector(dim) => write!(f, "VECTOR[{}]", dim),
             ValueType::Matrix(r, c) => write!(f, "MATRIX[{}, {}]", r, c),
+            ValueType::Complex => write!(f, "COMPLEX"),
             ValueType::Null => write!(f, "NULL"),
         }
     }
