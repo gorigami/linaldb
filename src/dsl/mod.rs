@@ -4,6 +4,7 @@ pub mod executor;
 pub mod lexer;
 pub mod parser;
 pub mod persistence;
+pub mod script;
 
 pub use error::DslError;
 
