@@ -4,6 +4,17 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.12] - 2026-09-17
+
+Picks up the root engine's `v0.1.85` (linked directly in via the `linal` path
+dependency): `NetCdfConnector` was silently ignoring `scale_factor`/
+`add_offset`/`missing_value` CF attributes declared as 1-element arrays (the
+real shape NCEP/NCAR Reanalysis files use), which disabled CF unpacking and
+fill-value masking against real-world reanalysis products with no warning.
+No Python-side code change — this is a release-bump only, so the fix reaches
+`Db.execute()` through the same `USE`/`IMPORT DATASET FROM ... .nc` path
+used already.
+
 ## [0.1.11] - 2026-09-17
 
 Picks up the root engine's `v0.1.84` (linked directly in via the `linal` path
