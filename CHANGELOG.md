@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.85] - 2026-09-17
+
 ### Fixed — `NetCdfConnector` silently ignored `scale_factor`/`add_offset`/`missing_value` declared as 1-element arrays
 
 Found building `linal-hub`'s `12_climate_science_reanalysis.ipynb` notebook against real NCEP/
