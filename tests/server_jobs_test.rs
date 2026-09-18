@@ -108,3 +108,46 @@ async fn test_server_job_not_found() {
 
     assert_eq!(resp.status(), 404);
 }
+
+/// `/jobs` sibling of `server_usability_test.rs`'s
+/// `test_server_use_database_errors_with_header` -- this call site had the
+/// identical unconditional-restore bug with no guard and no coverage at
+/// all. A `USE <db>` submitted as a job alongside `X-Linal-Database` is
+/// rejected up front (before a job is even created), same as `/execute`.
+#[tokio::test]
+async fn test_server_jobs_use_database_errors_with_header() {
+    let db = Arc::new(RwLock::new(TensorDb::new()));
+    let port = 8107;
+    let db_clone = db.clone();
+
+    tokio::spawn(async move {
+        start_server(db_clone, port).await;
+    });
+
+    sleep(Duration::from_millis(500)).await;
+
+    let client = reqwest::Client::new();
+    let base_url = format!("http://localhost:{}", port);
+
+    client
+        .post(format!("{}/databases/jobs_use_header_db", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/jobs", base_url))
+        .header("X-Linal-Database", "default")
+        .body("USE jobs_use_header_db")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "error");
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.contains("USE") && message.contains("X-Linal-Database"),
+        "error should explain the USE + header conflict, got: {message}"
+    );
+}

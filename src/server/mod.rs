@@ -51,6 +51,24 @@ pub struct ExecuteResponse {
     error: Option<String>,
 }
 
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct BatchStatementResult {
+    statement: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<DslOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct BatchExecuteResponse {
+    status: String,
+    statements: Vec<BatchStatementResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct ScheduleRequest {
     pub name: String,
@@ -63,10 +81,11 @@ pub struct ScheduleRequest {
 #[openapi(
     paths(
         execute_command,
+        execute_batch,
         health_check
     ),
     components(
-        schemas(ExecuteRequest, ExecuteResponse)
+        schemas(ExecuteRequest, ExecuteResponse, BatchStatementResult, BatchExecuteResponse)
     ),
     tags(
         (name = "VectorDB", description = "LINAL Analytical Engine API")
@@ -95,6 +114,7 @@ pub async fn start_server(db: Arc<RwLock<TensorDb>>, port: u16) {
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/execute", post(execute_command))
+        .route("/execute/batch", post(execute_batch))
         .route("/databases", get(list_databases))
         .route(
             "/databases/:name",
@@ -154,6 +174,33 @@ async fn shutdown_signal() {
 )]
 async fn health_check() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+}
+
+/// A request that supplies `X-Linal-Database` has already pinned this
+/// request's execution target for its whole duration -- a `USE <db>`
+/// statement sent alongside it has no "rest of the request" left to persist
+/// across, so this rejects the combination outright instead of silently
+/// reverting the switch and reporting success (the previous behavior: the
+/// response claimed `"Switched to database 'x'"`, but the switch never
+/// outlived this one request -- see CHANGELOG for the bug this closes).
+/// `POST /execute/batch` is deliberately exempt from this check: a `USE`
+/// there persists naturally for the rest of that one batch, since nothing
+/// restores the active database until the whole batch finishes.
+fn reject_use_with_header(command: &str, target_db: &Option<String>) -> Option<String> {
+    if target_db.is_none() {
+        return None;
+    }
+    match crate::dsl::parser::parse(command) {
+        Ok(crate::dsl::ast::Statement::UseDatabase(_)) => Some(
+            "USE has no persisting effect when X-Linal-Database is set on a \
+             single-statement request -- the header already pins the execution \
+             target for this request. Drop the header if you want USE to control \
+             it, or send this as part of a script to POST /execute/batch if you \
+             need USE to persist across multiple statements."
+                .to_string(),
+        ),
+        _ => None,
+    }
 }
 
 #[utoipa::path(
@@ -231,6 +278,20 @@ async fn execute_command(
         .get("X-Linal-Database")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+
+    if let Some(msg) = reject_use_with_header(&command, &target_db) {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            serde_json::to_string(&ExecuteResponse {
+                status: "error".to_string(),
+                result: None,
+                error: Some(msg),
+            })
+            .unwrap(),
+        )
+            .into_response();
+    }
 
     // Wrap execution in timeout and spawn_blocking to keep server responsive
     let db_arc = state.db.clone();
@@ -337,6 +398,181 @@ async fn execute_command(
         }
         _ => {
             // TOON format (default)
+            let body = encode_default(&response)
+                .unwrap_or_else(|e| format!("status: error\nerror: Serialization failed: {}", e));
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "text/toon")],
+                body,
+            )
+                .into_response()
+        }
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/execute/batch",
+    request_body = String,
+    params(
+        ExecuteParams
+    ),
+    responses(
+        (status = 200, description = "Batch execution result", body = BatchExecuteResponse)
+    )
+)]
+async fn execute_batch(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ExecuteParams>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    if body.len() > MAX_COMMAND_LENGTH {
+        return respond_batch(
+            &params,
+            BatchExecuteResponse {
+                status: "error".to_string(),
+                statements: vec![],
+                error: Some(format!(
+                    "Batch body too long (max {} bytes)",
+                    MAX_COMMAND_LENGTH
+                )),
+            },
+        );
+    }
+
+    let statements = match crate::dsl::script::split_script(&body) {
+        Ok(statements) if !statements.is_empty() => statements,
+        Ok(_) => {
+            return respond_batch(
+                &params,
+                BatchExecuteResponse {
+                    status: "error".to_string(),
+                    statements: vec![],
+                    error: Some("Batch body contained no statements".to_string()),
+                },
+            );
+        }
+        Err(e) => {
+            return respond_batch(
+                &params,
+                BatchExecuteResponse {
+                    status: "error".to_string(),
+                    statements: vec![],
+                    error: Some(e.to_string()),
+                },
+            );
+        }
+    };
+
+    let target_db = headers
+        .get("X-Linal-Database")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Whole batch shares one lock hold and one restore boundary: a `USE`
+    // statement inside the batch persists naturally for the rest of *this*
+    // batch (nothing restores mid-loop), then gets undone along with
+    // everything else once the loop ends -- same invariant `/execute`
+    // already has for a single statement, just scoped to N statements.
+    let db_arc = state.db.clone();
+    let exec_result = tokio::time::timeout(
+        std::time::Duration::from_secs(QUERY_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || {
+            let mut db = db_arc.write().unwrap();
+            let prev_db_name = db.active_db().to_string();
+            let switched_db = target_db.is_some();
+
+            if let Some(ref db_name) = target_db {
+                if let Err(e) = db.use_database(db_name) {
+                    return vec![BatchStatementResult {
+                        statement: String::new(),
+                        status: "error".to_string(),
+                        result: None,
+                        error: Some(format!("{}", e)),
+                    }];
+                }
+            }
+
+            let mut results = Vec::with_capacity(statements.len());
+            for stmt in &statements {
+                match execute_line(&mut db, &stmt.text, stmt.start_line) {
+                    Ok(output) => {
+                        results.push(BatchStatementResult {
+                            statement: stmt.text.clone(),
+                            status: "ok".to_string(),
+                            result: match output {
+                                DslOutput::None => None,
+                                other => Some(other),
+                            },
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        results.push(BatchStatementResult {
+                            statement: stmt.text.clone(),
+                            status: "error".to_string(),
+                            result: None,
+                            error: Some(format!("{}", e)),
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if switched_db {
+                let _ = db.use_database(&prev_db_name);
+            }
+
+            results
+        }),
+    )
+    .await;
+
+    let response = match exec_result {
+        Ok(Ok(results)) => {
+            let all_ok = results.iter().all(|r| r.status == "ok");
+            BatchExecuteResponse {
+                status: if all_ok { "ok" } else { "error" }.to_string(),
+                statements: results,
+                error: None,
+            }
+        }
+        Ok(Err(e)) => BatchExecuteResponse {
+            status: "error".to_string(),
+            statements: vec![],
+            error: Some(format!("Execution task panicked: {}", e)),
+        },
+        Err(_) => BatchExecuteResponse {
+            status: "error".to_string(),
+            statements: vec![],
+            error: Some(format!("Batch timed out after {}s", QUERY_TIMEOUT_SECS)),
+        },
+    };
+
+    respond_batch(&params, response)
+}
+
+fn respond_batch(
+    params: &ExecuteParams,
+    response: BatchExecuteResponse,
+) -> axum::response::Response {
+    match params.format.as_str() {
+        "json" => {
+            let body = serde_json::to_string(&response).unwrap_or_else(|e| {
+                format!(
+                    "{{\"status\": \"error\", \"error\": \"Serialization failed: {}\"}}",
+                    e
+                )
+            });
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        _ => {
             let body = encode_default(&response)
                 .unwrap_or_else(|e| format!("status: error\nerror: Serialization failed: {}", e));
             (
@@ -461,6 +697,14 @@ async fn submit_job(
         .get("X-Linal-Database")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+
+    if let Some(msg) = reject_use_with_header(&command, &target_db) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "status": "error", "message": msg })),
+        )
+            .into_response();
+    }
 
     let job_id = state
         .job_manager

@@ -9,7 +9,9 @@ disagreement, don't just pick one side.
 
 Everything here was verified directly against the server implementation
 (`src/server/mod.rs`, `src/core/storage.rs`) as of engine v0.1.74, not
-assumed from the DSL reference alone.
+assumed from the DSL reference alone. §2 (`/execute/batch`) and the
+`USE`+header rejection in §1 were added and verified against a live
+server afterward, alongside `docs/ARCHITECTURE.md`'s matching update.
 
 ## 1. `POST /execute` — ad-hoc DSL execution
 
@@ -39,6 +41,18 @@ on every request (as both `clients/python`'s and `clients/r`'s
 `database=`/`database` connection parameter already do) rather than rely
 on a one-time `USE`.
 
+**A `USE <db>` statement combined *with* `X-Linal-Database` on this
+endpoint is a client error (`400`), not a silent no-op.** A single
+statement has no "rest of the request" for `USE` to persist across, so a
+header-bearing `/execute` call whose body is `USE <db>` is rejected
+outright — `{"status":"error","error":"USE has no persisting effect
+when X-Linal-Database is set on a single-statement request..."}` — rather
+than reporting `"Switched to database 'db'"` and reverting it before the
+response goes out (which is what it silently did before this contract
+version). A client that needs `USE`/`CREATE DATABASE` to control several
+subsequent statements should send them all to `POST /execute/batch`
+(§2) instead of one `/execute` call per statement.
+
 Response body (`format=json`):
 
 ```json
@@ -49,10 +63,11 @@ Response body (`format=json`):
 }
 ```
 
-`result` is present iff the command produced output — e.g. `USE <db>`
-returns `{"status":"ok","result":{"Message":"Switched to database
-'<db>'"}}`, `format=json` empirically confirmed against a live v0.1.72
-server.
+`result` is present iff the command produced output — e.g. a headerless
+`USE <db>` returns `{"status":"ok","result":{"Message":"Switched to
+database '<db>'"}}`, `format=json` empirically confirmed against a live
+v0.1.72 server. (A header-bearing `USE <db>` request instead returns the
+`400` error described above.)
 
 `result`, when present, is one of `DslOutput`'s serde-tagged variants:
 
@@ -117,7 +132,60 @@ A client's `execute()` MUST raise/throw on `status: error`, surfacing the
 server's real `error` string — never synthesize a generic "request
 failed" message when the server sent a specific one.
 
-## 2. `/delivery/*` — read-only dataset export
+## 2. `POST /execute/batch` — batch DSL execution
+
+Request: a whole multi-statement script as the request body
+(`Content-Type: text/plain`), in the exact same format `linal run`
+accepts from a `.lnl` file — one statement per line, or a statement
+spanning multiple lines (it ends once its parentheses balance out, not
+at the next line break), with `#`/`--`/`//` comment lines skipped between
+statements. Statements execute in order, under one write-lock hold, and
+the batch stops at the first error.
+
+Query params: `?format=json` (same as `/execute`).
+
+Headers: `X-Linal-Database: <name>`, same semantics as `/execute` but
+scoped to the whole batch instead of one statement — the server restores
+the previously active database once, after the batch finishes (or stops
+on an error), not after each individual statement. This is why `USE`/
+`CREATE DATABASE` inside a batch body works exactly as written and
+*does* persist for the rest of that batch: nothing restores the active
+database mid-batch, only at the very end. Send a script that needs `USE`
+to control several subsequent statements here instead of as separate
+`/execute` calls (where the identical combination is now a `400` error —
+see §1).
+
+Response body (`format=json`):
+
+```json
+{
+  "status": "ok" | "error",
+  "statements": [
+    {
+      "statement": "<the exact joined statement text that ran>",
+      "status": "ok" | "error",
+      "result": <DslOutput JSON, present iff status is "ok" and the statement produced output>,
+      "error": <string, present iff status is "error">
+    },
+    ...
+  ],
+  "error": <string, present only for a script-level failure before any statement ran -- e.g. unbalanced parentheses, an empty body, or a body over the same MAX_COMMAND_LENGTH limit /execute enforces>
+}
+```
+
+`status` at the top level is `"ok"` only if every statement in
+`statements` succeeded. `statements` contains one entry per statement
+that actually ran — if the script stops at the Nth statement's error,
+entries `N+1..` are never attempted and never appear in the array at
+all (not present-with-an-error-placeholder — simply absent).
+
+A client's batch-execute method MUST surface both levels of failure
+distinctly: a top-level `error` (the script itself was rejected, nothing
+ran) versus a `statements[i].status == "error"` entry (the script ran
+partway, and this is where it stopped) are different situations worth
+telling apart, not both collapsed into one generic exception.
+
+## 3. `/delivery/*` — read-only dataset export
 
 Mounted per-dataset at `/delivery/datasets/:name/`:
 
@@ -173,7 +241,7 @@ must always take the JSON-parsing path for a `Complex` column, never the
 native-list path (there is no "common case" native encoding to fall back
 from, unlike Vector/Matrix).
 
-## 3. The tagged `Value` encoding (used throughout `/execute` results)
+## 4. The tagged `Value` encoding (used throughout `/execute` results)
 
 `core::value::Value` derives plain (externally-tagged) serde
 `Serialize`. Every scalar cell in a `Table`/`TensorTable` result is one
@@ -211,7 +279,7 @@ is the bare string `"Complex"` (a unit variant, same convention as
 `"Null"` in `schema.json`'s `value_type` field), not `{"Vector": n}`/
 `{"Matrix": [r, c]}`'s parameterized object form.
 
-## 4. Error semantics
+## 5. Error semantics
 
 - Network/connection failure (server unreachable): client-native
   exception (e.g. Python `ConnectionError`, R condition), not swallowed.
@@ -225,7 +293,7 @@ is the bare string `"Complex"` (a unit variant, same convention as
   arrives as a normal `status: "error"` response, not a connection drop —
   no special client handling needed beyond the standard error path.
 
-## 5. What this contract deliberately does not cover yet
+## 6. What this contract deliberately does not cover yet
 
 - `/jobs` and `/schedule` (background execution, recurring tasks) —
   real server endpoints (see `docs/ARCHITECTURE.md` §5), but out of scope

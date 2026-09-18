@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `USE <db>` combined with `X-Linal-Database` silently no-op'd over `/execute` and `/jobs`
+
+Found debugging a real `linal-hub` playground script (`CREATE DATABASE IF NOT EXISTS
+smoke_db_final` / `USE smoke_db_final` / dataset creation, sent one statement per
+`/execute` request, each carrying the session's own `X-Linal-Database` header — the
+documented multi-tenant pattern). The `USE` statement reported success (`"Switched to
+database 'smoke_db_final'"`), but every following statement still landed wherever the
+header pointed, not `smoke_db_final`. Confirmed directly with `curl`, bypassing the
+playground entirely.
+
+Root cause: the v0.1.74 fix (below) only closed the *headerless* version of this bug.
+`/execute`'s write path and `/jobs`' `submit_job` (the latter with no guard, comment, or
+test coverage at all) both restore the previously active database unconditionally
+whenever the request itself carried `X-Linal-Database` — with no regard for whether the
+statement that just ran *was itself* a `USE`. Since neither official client
+(`clients/python`, `clients/r`) nor any existing test ever sends `USE` combined with a
+header — both always pin every request via the header and never rely on `USE`
+persisting across calls — this combination had never been given real semantics, just
+silently reverted every time.
+
+Rather than track active-database state per header value (which would redefine what the
+header means and reopen the exact cross-tenant leak class the v0.1.9 multi-tenancy
+feature and this same v0.1.74 fix exist to prevent), a single-statement `/execute` or
+`/jobs` request combining a header with `USE <db>` is now rejected outright with a clear
+error instead of silently reverting: there's no "rest of the request" for `USE` to
+usefully persist across in a single statement. New tests:
+`test_server_use_database_errors_with_header` (`tests/server_usability_test.rs`),
+`test_server_jobs_use_database_errors_with_header` (`tests/server_jobs_test.rs`).
+
+Also documented, and locked in with a new test
+(`test_schedule_target_db_switch_is_permanent`), a related but different existing
+behavior: `/schedule`'s scheduled-task `target_db` switch was already, and remains,
+**permanent** (never restored) — a scheduled task is operator-configured, not per-visitor
+request traffic, so there's no "previous" per-request context to protect. This was
+previously undocumented and completely untested.
+
+### Added — `POST /execute/batch`: run a multi-statement script as one request
+
+The actual gap behind the bug above: there was no way for an HTTP client to run a script
+where `USE`/`CREATE DATABASE` control several subsequent statements, the way a real
+`.lnl` file or the embedded CLI/REPL always could. `POST /execute/batch` accepts a whole
+multi-statement script as the request body — same format `linal run` reads from a `.lnl`
+file, one statement per line or spanning multiple lines (a statement ends once its
+parentheses balance out), `#`/`--`/`//` comments skipped between statements. The
+line-joining logic used to live only inline in `main.rs`'s `Run` command; it's now a
+shared `dsl::script::split_script`, used by both, so the CLI and the new server endpoint
+can't drift apart on this again.
+
+The batch runs under one write-lock hold: a header-bearing batch snapshots the previously
+active database once, executes every statement in order (stopping at the first error),
+then restores it once at the end — so `USE`/`CREATE DATABASE` inside the batch persists
+naturally for the rest of *that* batch (nothing restores mid-batch) without ever risking a
+cross-tenant leak, since its effect can't outlive the batch's own lock hold. Response is a
+JSON array of per-statement results (`{"statement", "status", "result", "error"}`), plus a
+top-level `status`. New tests in `tests/server_usability_test.rs`:
+`test_batch_use_persists_within_one_request`,
+`test_batch_restores_header_db_after_completion`, `test_batch_stops_at_first_error`,
+`test_batch_multitenancy_isolated_across_headers`. Documented in
+`docs/DSL_REFERENCE.md` §10, `docs/ARCHITECTURE.md`, and `clients/CONTRACT.md` §2.
+
 ## [0.1.85] - 2026-09-17
 
 ### Fixed — `NetCdfConnector` silently ignored `scale_factor`/`add_offset`/`missing_value` declared as 1-element arrays

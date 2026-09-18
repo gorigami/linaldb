@@ -822,14 +822,22 @@ For remote execution and production workloads.
 
 ### Request format
 
-`/execute` and `/jobs` (`POST`) both take the raw DSL command as the request body with
-`Content-Type: text/plain` — not JSON. `/execute` additionally accepts a legacy
-`{"command": "..."}` JSON body, but it's deprecated (the server logs a deprecation
-warning on every use); prefer `text/plain`. Append `?format=json` to `/execute` for a
-JSON response — the default response format is a plain-text "toon" encoding, not JSON.
-**`/schedule` (`POST`) is the exception**: it takes a real JSON body (`{"name": ...,
-"command": ..., "interval_secs": ..., "target_db": ...}`), since it's registering a task
-definition, not executing a command directly.
+`/execute`, `/execute/batch`, and `/jobs` (`POST`) all take the raw DSL command as the
+request body with `Content-Type: text/plain` — not JSON. `/execute` additionally accepts
+a legacy `{"command": "..."}` JSON body, but it's deprecated (the server logs a
+deprecation warning on every use); prefer `text/plain`. Append `?format=json` for a JSON
+response on any of the three — the default response format is a plain-text "toon"
+encoding, not JSON. **`/schedule` (`POST`) is the exception**: it takes a real JSON body
+(`{"name": ..., "command": ..., "interval_secs": ..., "target_db": ...}`), since it's
+registering a task definition, not executing a command directly.
+
+`/execute/batch`'s body is a whole multi-statement script, in the exact same format as a
+`.lnl` file run via `linal run`: one statement per line, or spanning multiple lines — a
+statement ends once its parentheses balance out, not at the next line break — with
+`#`/`--`/`//` comment lines skipped between statements. Statements run in order; the
+batch stops at the first error. The JSON response is `{"status": "ok"|"error",
+"statements": [{"statement": ..., "status": ..., "result": ..., "error": ...}, ...]}` —
+one entry per statement that actually ran.
 
 ### Background Jobs
 
@@ -856,13 +864,41 @@ Submit recurring DSL commands that execute on a fixed interval:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | `GET` | Server health check. |
-| `/execute` | `POST` | Execute a DSL command synchronously (`text/plain` body, one statement per request — see "Request format" above). |
+| `/execute` | `POST` | Execute one DSL statement synchronously (`text/plain` body, one statement per request — see "Request format" above). |
+| `/execute/batch` | `POST` | Execute a whole multi-statement script synchronously, in one request (see "Request format" above). |
 | `/databases` | `GET` | List database instances. |
 | `/databases/:name` | `POST` | Create a database instance. |
 | `/databases/:name` | `DELETE` | Drop a database instance. |
 | `/delivery/...` | `GET` | Read-only dataset delivery endpoints. |
 
-Multi-tenant isolation is provided via the `X-Linal-Database: <db_name>` request header. Each request restores the previous active database after execution, so concurrent requests with different headers do not interfere. **The target database must already exist before you address it with this header** — `CREATE DATABASE <name>` itself has to run *without* the header (or with it pointed at an existing database), since the header resolves its target before the statement runs, and the database you're trying to create doesn't exist yet.
+Multi-tenant isolation is provided via the `X-Linal-Database: <db_name>` request header.
+A request that itself supplies this header restores the previously active database once
+it finishes, so concurrent requests targeting different databases via the header cannot
+affect each other's context — this applies to `/execute/batch` too, just scoped to the
+whole batch rather than one statement: the restore happens once, after every statement in
+the batch has run. **The target database must already exist before you address it with
+this header** — `CREATE DATABASE <name>` itself has to run *without* the header (or with
+it pointed at an existing database), since the header resolves its target before the
+statement runs, and the database you're trying to create doesn't exist yet.
+
+A headerless request's own active-database changes persist across future headerless
+requests, exactly like the embedded CLI/REPL — including an explicit `USE <db>`. **A
+`USE <db>` statement combined *with* the header on a single `/execute` or `/jobs`
+request is rejected as an error**, rather than silently reporting success and reverting:
+a single statement has no "rest of the request" for `USE` to usefully persist across, so
+the combination is ambiguous and was previously misleading (the response claimed
+`"Switched to database 'x'"`, but the switch never outlived that one request). If a
+script needs `USE`/`CREATE DATABASE` to control multiple subsequent statements, send it
+to `/execute/batch` instead — there, `USE` persists naturally for the rest of that one
+batch, since nothing restores the active database mid-batch, and is safely undone once
+the whole batch finishes, same as the header restore above.
+
+A scheduled task's `target_db` (`/schedule`, above) is a different, simpler case: the
+switch it makes is **permanent**, not restored — a recurring task is operator-configured,
+not per-visitor request traffic, so there's no "previous" context to protect. Keep this
+in mind if you mix scheduled tasks with headerless `/execute` traffic on the same server:
+a scheduled task's `target_db` becomes the new session-wide active database for every
+following headerless request, until something else changes it again.
 
 - **Graceful Shutdown**: Server handles `SIGINT`/`SIGTERM` to safely close connections.
 
