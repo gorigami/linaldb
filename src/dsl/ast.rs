@@ -581,6 +581,8 @@ pub enum IndexKindAst {
     BTree,
     Hash,
     Vector,
+    /// `CREATE VECTOR INDEX ... USING HNSW`
+    VectorHnsw,
 }
 
 #[derive(Debug, Clone)]

@@ -587,10 +587,25 @@ impl Parser {
                 self.advance();
                 self.eat(&Token::Index)?;
                 let (dataset, column, _) = self.parse_index_target(IndexKindAst::Default)?;
+                // Optional `USING HNSW` -- opts into the HNSW-graph-backed
+                // index (`core::index::hnsw::HnswIndex`) instead of the
+                // default IVF-clustered `VectorIndex`. Explicit opt-in, no
+                // silent default change (PERFORMANCE_OPTIMIZATION_PLAN.md
+                // Phase 1 design decision #3).
+                let kind = if self.at_ident("USING") {
+                    self.advance();
+                    if !self.at_ident("HNSW") {
+                        return Err(self.error("expected HNSW after USING in CREATE VECTOR INDEX"));
+                    }
+                    self.advance();
+                    IndexKindAst::VectorHnsw
+                } else {
+                    IndexKindAst::Vector
+                };
                 Ok(Statement::CreateIndex(CreateIndexStmt {
                     dataset,
                     column,
-                    kind: IndexKindAst::Vector,
+                    kind,
                 }))
             }
             _ => Err(self.unexpected("DATABASE or INDEX after CREATE")),
@@ -1414,6 +1429,23 @@ mod tests {
         assert_eq!(s.dataset, "vecs");
         assert_eq!(s.column, "col");
         assert!(matches!(s.kind, IndexKindAst::Vector));
+    }
+
+    #[test]
+    fn create_vector_index_using_hnsw() {
+        let stmt = parse_ok("CREATE VECTOR INDEX v_idx ON vecs(col) USING HNSW");
+        let Statement::CreateIndex(s) = stmt else {
+            panic!()
+        };
+        assert_eq!(s.dataset, "vecs");
+        assert_eq!(s.column, "col");
+        assert!(matches!(s.kind, IndexKindAst::VectorHnsw));
+    }
+
+    #[test]
+    fn create_vector_index_using_unknown_kind_errors() {
+        let result = crate::dsl::parser::parse("CREATE VECTOR INDEX v_idx ON vecs(col) USING IVF");
+        assert!(result.is_err());
     }
 
     #[test]

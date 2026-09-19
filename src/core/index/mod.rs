@@ -8,8 +8,14 @@ use std::fmt::Debug;
 pub enum IndexType {
     /// Exact match index (hash map based)
     Hash,
-    /// Vector similarity index (linear scan for MVP, HNSW later)
+    /// Vector similarity index: brute-force scan below
+    /// `vector::MIN_VECTORS_TO_CLUSTER`, IVF clustering above it.
     Vector,
+    /// Vector similarity index backed by an HNSW graph
+    /// (`hnsw::HnswIndex`), opted into via `CREATE VECTOR INDEX ... USING
+    /// HNSW`. Only accelerates top-k search (`VectorSearchExec`), not exact
+    /// threshold predicates -- see `HnswIndex`'s doc comment.
+    Hnsw,
 }
 
 /// A persistable record of "column X has an index of type Y", independent of
@@ -98,4 +104,5 @@ impl Clone for Box<dyn Index> {
 
 // Re-export specific implementations
 pub mod hash;
+pub mod hnsw;
 pub mod vector;

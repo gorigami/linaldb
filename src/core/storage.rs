@@ -142,6 +142,13 @@ impl ParquetStorage {
         )
     }
 
+    fn hnsw_index_graphs_path(&self, name: &str) -> String {
+        format!(
+            "{}/datasets/{}/hnsw_index_graphs.json",
+            self.base_path, name
+        )
+    }
+
     /// Persist each vector-indexed column's clustering (`VectorIndex::
     /// snapshot`) plus the content hash it was computed from, so `LOAD
     /// DATASET` can restore the clustering without recomputing k-means --
@@ -188,6 +195,49 @@ impl ParquetStorage {
         let snapshots = serde_json::from_str(&json).map_err(|e| {
             StorageError::Serialization(format!(
                 "Failed to deserialize vector index snapshots: {}",
+                e
+            ))
+        })?;
+        Ok(snapshots)
+    }
+
+    /// Same persistence contract as `save_vector_index_snapshots`, for
+    /// HNSW-backed vector indices (`CREATE VECTOR INDEX ... USING HNSW`,
+    /// `core::index::hnsw::HnswIndex`) -- a separate file/column-keyed map
+    /// since the two index types' snapshot shapes are unrelated (a full
+    /// serialized graph vs. IVF cluster assignments) and a column can only
+    /// ever have one or the other, never both.
+    pub fn save_hnsw_index_snapshots(
+        &self,
+        name: &str,
+        snapshots: &std::collections::HashMap<String, crate::core::index::hnsw::PersistedHnswIndex>,
+    ) -> Result<(), StorageError> {
+        self.ensure_directories(Some(name))?;
+        let path = self.hnsw_index_graphs_path(name);
+        let json = serde_json::to_string_pretty(snapshots).map_err(|e| {
+            StorageError::Serialization(format!("Failed to serialize HNSW index snapshots: {}", e))
+        })?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Loads previously persisted HNSW index snapshots. Returns an empty
+    /// map (not an error) if none were ever saved.
+    pub fn load_hnsw_index_snapshots(
+        &self,
+        name: &str,
+    ) -> Result<
+        std::collections::HashMap<String, crate::core::index::hnsw::PersistedHnswIndex>,
+        StorageError,
+    > {
+        let path = self.hnsw_index_graphs_path(name);
+        if !Path::new(&path).exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let json = fs::read_to_string(path)?;
+        let snapshots = serde_json::from_str(&json).map_err(|e| {
+            StorageError::Serialization(format!(
+                "Failed to deserialize HNSW index snapshots: {}",
                 e
             ))
         })?;

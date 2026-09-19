@@ -446,6 +446,17 @@ pub fn execute_statement(
                     s.dataset, s.column
                 )))
             }
+            IndexKindAst::VectorHnsw => {
+                db.create_hnsw_index(&s.dataset, &s.column)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                Ok(DslOutput::Message(format!(
+                    "Created VECTOR index (HNSW) on {}({})",
+                    s.dataset, s.column
+                )))
+            }
         },
 
         // ── Metadata ────────────────────────────────────────────────────────

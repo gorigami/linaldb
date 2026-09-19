@@ -44,6 +44,11 @@ nalgebra = "0.33"
 num-complex = { version = "0.4", features = ["serde"] }
 comfy-table = "7.2.2"
 indicatif = "0.17"
+# HNSW vector index (src/core/index/hnsw.rs) -- see PERFORMANCE_OPTIMIZATION_PLAN.md
+# Phase 1. Pure Rust, no C/system dependency, consistent with this repo's existing
+# build philosophy (vendored HDF5, rustls-tls). `with-serde` needed for
+# CREATE VECTOR INDEX ... USING HNSW's SAVE/LOAD DATASET persistence.
+instant-distance = { version = "0.6.1", default-features = false, features = ["with-serde"] }
 
 [features]
 default = []

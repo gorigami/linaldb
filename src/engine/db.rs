@@ -1179,6 +1179,31 @@ impl TensorDb {
             .create_vector_index_from_snapshot(dataset_name, column_name, snapshot)
     }
 
+    pub fn create_hnsw_index(
+        &mut self,
+        dataset_name: &str,
+        column_name: &str,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut()
+            .create_hnsw_index(dataset_name, column_name)
+    }
+
+    /// Restores an HNSW vector index from a previously persisted graph
+    /// snapshot instead of recomputing it -- see `DatabaseInstance`'s impl
+    /// and `core::index::hnsw::HnswIndex::restore_from_snapshot`.
+    pub fn create_hnsw_index_from_snapshot(
+        &mut self,
+        dataset_name: &str,
+        column_name: &str,
+        snapshot: crate::core::index::hnsw::HnswIndexSnapshot,
+    ) -> Result<(), EngineError> {
+        self.active_instance_mut().create_hnsw_index_from_snapshot(
+            dataset_name,
+            column_name,
+            snapshot,
+        )
+    }
+
     pub fn list_indices(&self) -> Vec<(String, String, String)> {
         self.active_instance().list_indices()
     }
@@ -3054,6 +3079,34 @@ impl DatabaseInstance {
             .map_err(EngineError::InvalidOp)
     }
 
+    /// Create an HNSW-graph-backed vector index on a dataset column
+    /// (`CREATE VECTOR INDEX ... USING HNSW`).
+    pub fn create_hnsw_index(
+        &mut self,
+        dataset_name: &str,
+        column_name: &str,
+    ) -> Result<(), EngineError> {
+        let dataset = self.get_dataset_mut(dataset_name)?;
+        let index = Box::new(crate::core::index::hnsw::HnswIndex::new());
+        dataset
+            .create_index(column_name.to_string(), index)
+            .map_err(EngineError::InvalidOp)
+    }
+
+    /// Restore an HNSW vector index on a dataset column from a persisted
+    /// graph snapshot, skipping the graph-construction pass entirely.
+    pub fn create_hnsw_index_from_snapshot(
+        &mut self,
+        dataset_name: &str,
+        column_name: &str,
+        snapshot: crate::core::index::hnsw::HnswIndexSnapshot,
+    ) -> Result<(), EngineError> {
+        let dataset = self.get_dataset_mut(dataset_name)?;
+        dataset
+            .create_hnsw_index_from_snapshot(column_name.to_string(), snapshot)
+            .map_err(EngineError::InvalidOp)
+    }
+
     /// Get all indices info
     pub fn list_indices(&self) -> Vec<(String, String, String)> {
         let mut result = Vec::new();
@@ -3063,6 +3116,7 @@ impl DatabaseInstance {
                     let type_str = match idx.index_type() {
                         crate::core::index::IndexType::Hash => "HASH",
                         crate::core::index::IndexType::Vector => "VECTOR",
+                        crate::core::index::IndexType::Hnsw => "VECTOR (HNSW)",
                     };
                     result.push((name.clone(), col.clone(), type_str.to_string()));
                 }

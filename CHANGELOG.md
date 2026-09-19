@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — HNSW vector index (`CREATE VECTOR INDEX ... USING HNSW`)
+
+`core::index::vector::VectorIndex`'s own doc comment has said "linear scan for MVP, HNSW
+later" since it was written — this closes that gap. `CREATE VECTOR INDEX ON <dataset>(<col>)
+USING HNSW` opts a column into an HNSW (Hierarchical Navigable Small World) graph index
+(`core::index::hnsw::HnswIndex`, backed by the `instant-distance` crate) instead of the
+default IVF-clustered `VectorIndex` — explicit opt-in, the plain `CREATE VECTOR INDEX` form
+is completely unchanged. Only accelerates top-k similarity search (`SEARCH ... LIMIT k` /
+`VectorSearchExec`): unlike IVF's spherical-cap clusters, an HNSW graph traversal has no
+cheap provable bound on what it might have skipped, so it cannot safely accelerate an
+*exact* predicate (`WHERE COSINE_SIM(...) > threshold`, `SimilarityJoinExec`) the way IVF
+does — those paths stay `VectorIndex`-only, and an HNSW-only-indexed column simply falls
+back to a full scan+filter for that shape (still correct, just unaccelerated, consistent with
+this planner's existing "recognize the shape or don't accelerate, never error" philosophy).
+
+Below `MIN_VECTORS_TO_INDEX` (16) vectors, `build()` leaves the graph unset and both search
+paths fall brute-force, mirroring `VectorIndex`'s own `MIN_VECTORS_TO_CLUSTER` (64) fallback.
+Vectors added after the last `build()` sit in an "unindexed tail" that's always additionally
+scanned, so correctness never depends on `build()` having (re-)run recently — same guarantee
+`VectorIndex` already gives. `SAVE DATASET`/`LOAD DATASET` persist and restore the built
+graph itself (`hnsw_index_graphs.json`, content-hash-invalidated exactly like
+`vector_index_clusters.json`), so a reload never has to pay for graph construction again
+unless the underlying column actually changed. `EXPLAIN` reports which index type (`Vector`,
+`Hnsw`, or none) a `SEARCH` will actually use at plan time.
+
+Chosen over the `hnsw`/`hnsw_rs` alternatives for being pure Rust with no
+C/system-library dependency (`instant-distance` only pulls in `rayon`/`parking_lot`/`rand`/
+`num_cpus`/`ordered-float`, all already-familiar pure-Rust dependency shapes) — consistent
+with this repo's existing build philosophy (vendored HDF5, `rustls-tls`). See
+`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 1.
+
 ## [0.1.86] - 2026-09-19
 
 ### Fixed — `USE <db>` combined with `X-Linal-Database` silently no-op'd over `/execute` and `/jobs`
