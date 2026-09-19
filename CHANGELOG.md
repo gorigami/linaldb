@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `POST /execute?format=arrow` (binary Arrow IPC response)
+
+A real benchmark (`benches/server_transport.rs`, added as this phase's required gate per
+`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 3) measured Arrow IPC encoding at ~80-180x faster and
+~2.4x smaller on the wire than JSON for a representative bulk query result (10,000 rows × a
+`Vector(128)` embedding column) -- a real, non-trivial cost, not a guess. `?format=arrow` is a
+new, additive third option on `POST /execute` (alongside the existing default `toon` and opt-in
+`json`): a binary Arrow IPC stream (`Content-Type: application/vnd.apache.arrow.stream`,
+`dataset_to_arrow_ipc_bytes` reusing the same `dataset_to_record_batch` conversion `/delivery`'s
+Parquet export already trusts) for a successful `DslOutput::Table` result specifically. Any
+other case under `?format=arrow` (an execution error, or a non-tabular success like a bare
+`Message`/`Tensor`) falls back to a JSON body instead of erroring or returning meaningless
+bytes. No existing behavior changes -- `toon` stays the default, `json` is untouched.
+
+**Also surfaced, unexpectedly, by the same benchmark**: the actual production default (`toon`)
+is itself substantially slower and larger on the wire than even the legacy `json` path for the
+same payload -- ~426ms/30MB vs `json`'s ~36ms/13MB vs `arrow`'s ~233µs/5.5MB at 10,000 rows.
+This is reported here as a measured fact, not fixed or asserted to be a bug: `toon`'s design
+goal is believed to be LLM-facing token efficiency (see `clients/CONTRACT.md`), not wire/CPU
+efficiency, so whether this cost is acceptable given that goal is a product judgment call left
+to the maintainer.
+
 ### Added — `PRUNE LINEAGE BEFORE <timestamp>` (provenance log pruning)
 
 `core::provenance::ProvenanceStore` has been append-only since it was introduced, with no way

@@ -91,3 +91,7 @@ harness = false
 [[bench]]
 name = "dataset_ops"
 harness = false
+
+[[bench]]
+name = "server_transport"
+harness = false

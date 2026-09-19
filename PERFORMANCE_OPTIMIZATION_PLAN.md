@@ -149,16 +149,35 @@ findings and a sequenced, risk-ranked execution order for what remains.
       original proposal conflated it with)
 
 ### Phase 3 — Server transport benchmark spike + (conditional) additive Arrow IPC path
-- [ ] Baseline: measure `/execute` JSON serialization cost for representative tensor/dataset
-      result sizes vs. a hand-rolled Arrow IPC encode of the same payloads
-- [ ] **Gate**: only proceed past this point if the baseline shows JSON serialization is a real,
-      non-trivial fraction of end-to-end request latency for realistic payloads
-- [ ] If gated open: `Accept`-negotiated Arrow IPC stream response on `/execute`,
-      `clients/CONTRACT.md` updated to document it as an additive alternative (JSON stays
-      default/required)
-- [ ] If gated closed: close this phase with the benchmark results recorded in `CHANGELOG.md` and
-      drop the rest — a negative result is still a useful, documented outcome
-- [ ] Docs: `clients/CONTRACT.md`, `CHANGELOG.md`
+- [x] Baseline (`benches/server_transport.rs`, new criterion bench, registered in `Cargo.toml`):
+      measured JSON serialization, **and** the actual production default `toon` encoding
+      (`toon_format::encode_default`), against a hand-rolled Arrow IPC encode of the same
+      representative payload (10k rows × `Vector(128)` embedding column) — **scope correction
+      from the original wording**: the original plan assumed JSON was `/execute`'s default: it
+      is not, `toon` is (`json` is a legacy opt-in), so benchmarking only against JSON would
+      have answered the wrong question
+- [x] **Gate result: opened.** Arrow IPC was ~80-180x faster and ~2.4x smaller on the wire than
+      JSON across 100/1,000/10,000-row payloads — a real, measured cost, not a guess. **Unplanned
+      finding, surfaced to the user via AskUserQuestion before proceeding rather than decided
+      unilaterally**: the real default (`toon`) is itself substantially slower/larger than even
+      `json` for the same payload (~426ms/30MB vs `json`'s ~36ms/13MB vs `arrow`'s ~233µs/5.5MB
+      at 10k rows) — reported as a measured fact in `CHANGELOG.md`/`docs/ARCHITECTURE.md`, not
+      fixed or asserted to be a bug, since `toon`'s design goal is believed to be LLM-facing
+      token efficiency rather than wire/CPU efficiency, and deciding whether that tradeoff is
+      still acceptable is the maintainer's call, not this session's.
+- [x] Implemented: `?format=arrow` on `POST /execute`, additive third option alongside default
+      `toon` and opt-in `json`. Only a successful `DslOutput::Table` result is encoded as real
+      Arrow IPC bytes (`dataset_to_arrow_ipc_bytes`, reusing `dataset_to_record_batch` -- the
+      same conversion `/delivery`'s Parquet export already trusts); anything else under
+      `?format=arrow` (an execution error, or a non-tabular success) falls back to a JSON body,
+      matching this endpoint's existing error-always-falls-back-to-JSON convention. No change to
+      `toon`/`json`'s existing behavior.
+- [x] Docs: `clients/CONTRACT.md` §1 (wire contract for `?format=arrow`, including the
+      fall-back-to-JSON behavior a client must handle), `docs/ARCHITECTURE.md`, `CHANGELOG.md`
+- [x] Tests: 2 new server integration tests (`tests/server_test.rs`) -- a real `Table` result
+      decoded by a real `arrow::ipc::reader::StreamReader` (not just "bytes with the right
+      header"), and a non-tabular result confirmed to fall back to JSON -- plus the existing 8
+      `server_test.rs` tests reconfirmed unaffected
 
 ### Phase 4 — Dense matmul backend benchmark spike + (conditional) `faer` integration
 - [ ] Baseline: current Rayon-parallelized `matmul` vs. `faer` at matrix sizes representative of

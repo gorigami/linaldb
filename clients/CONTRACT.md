@@ -21,6 +21,18 @@ deprecated server-side — clients should always send plain text).
 
 Query params: `?format=json` (recommended for clients — default is
 `toon`, a human-oriented text format not meant for programmatic parsing).
+`?format=arrow` is a third, additive option (`PERFORMANCE_OPTIMIZATION_PLAN.md`
+Phase 3): a binary Arrow IPC stream (`Content-Type:
+application/vnd.apache.arrow.stream`), decodable with any standard Arrow
+reader (e.g. `pyarrow.ipc.open_stream`), for a `Table` result specifically
+— measured ~80-180x faster to produce and ~2.4x smaller on the wire than
+JSON for a representative bulk query result (10k rows × a `Vector(128)`
+column), which is the workload this option exists for. Only a *successful*
+`Table` result actually comes back as Arrow bytes; anything else under
+`?format=arrow` (an execution error, or a non-tabular success like a bare
+`Message`/`Tensor`) falls back to a `format=json`-shaped JSON body instead
+(`Content-Type: application/json`) — a client requesting `arrow` must still
+check the response `Content-Type` before attempting to decode it as Arrow.
 
 Headers: `X-Linal-Database: <name>` to target a non-default database for
 that one request only (the server reverts to whatever was active before
