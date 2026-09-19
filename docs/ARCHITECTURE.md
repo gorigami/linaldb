@@ -761,6 +761,22 @@ OpenLineage mapping was clean.
 - **`EXPLAIN LINEAGE <name> [AS JSON]`**: the user-facing command (§9 of
   `docs/DSL_REFERENCE.md`), text-tree or JSON. `SHOW LINEAGE <name>` is kept
   working as a documented-superseded alias, same resolver.
+- **`PRUNE LINEAGE BEFORE <timestamp>`** (`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 2):
+  compacts the otherwise-unbounded append-only log. `ProvenanceStore::prune_before`
+  computes the set of record indices reachable from every currently-live tensor/dataset
+  (`DatabaseInstance::live_provenance_roots`, walking `find_producer_before` -- the exact
+  logic `resolve_ancestry` itself uses -- from each root, with a `HashSet` visited-guard
+  standing in for `resolve_ancestry`'s `MAX_ANCESTRY_DEPTH`: each record index can only
+  enter the reachable set once, which both prevents redundant work on shared/diamond
+  ancestors and guarantees termination without a depth cap). A record is only removed if
+  it's both older than the cutoff *and* unreachable from that set -- a record reachable
+  from something live is kept regardless of age, so this is not a blind time-window
+  truncation and can never break `resolve_ancestry` for anything still live.
+  `DatabaseInstance::prune_lineage_before` then persists the reduced log back to
+  `provenance.jsonl` as a full rewrite (`save_jsonl`) -- the only place in this module that
+  overwrites rather than appends. `PruneReport` distinguishes records actually removed from
+  records that were stale but kept anyway because a live root still needs them, so the DSL
+  output message never overclaims what happened.
 - **Tensor ops** (`eval_unary`/`eval_binary`/`eval_matmul`/... in
   `engine/db.rs`) still attach the lightweight `core::tensor::Lineage` to
   `TensorMetadata` for the in-memory fast path, *and* record into the same

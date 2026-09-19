@@ -147,6 +147,63 @@ impl DatabaseInstance {
         self.record_provenance(record);
     }
 
+    /// Every currently-live tensor and dataset in this DB, as
+    /// `ProvenanceEntity` roots -- the reachability set `PRUNE LINEAGE`
+    /// protects from removal. Mirrors exactly what `get_dataset_lineage_tree`
+    /// resolves ancestry *from*, so a record kept because it's reachable
+    /// here is exactly a record `EXPLAIN LINEAGE` could still be asked to
+    /// show.
+    fn live_provenance_roots(&self) -> Vec<crate::core::provenance::ProvenanceEntity> {
+        let mut roots = Vec::new();
+        for (name, entry) in &self.names {
+            if let Ok(t) = self.store.get(entry.id) {
+                roots.push(crate::core::provenance::ProvenanceEntity::tensor(
+                    entry.id,
+                    Some(name.clone()),
+                    t.data_hash().to_string(),
+                ));
+            }
+        }
+        for name in self.dataset_store.list_names() {
+            if let Ok(ds) = self.get_dataset(&name) {
+                roots.push(crate::core::provenance::ProvenanceEntity::dataset(
+                    name,
+                    ds.content_hash(),
+                ));
+            }
+        }
+        roots
+    }
+
+    /// `PRUNE LINEAGE BEFORE <cutoff>` -- see `ProvenanceStore::prune_before`
+    /// for the exact safety guarantee (never breaks ancestry resolution for
+    /// anything still live). Persists the pruned log back to
+    /// `provenance.jsonl` as a full rewrite (the only place this module
+    /// does that -- everywhere else only ever appends, since pruning is
+    /// inherently a rewrite of history, not an addition to it); a write
+    /// failure is surfaced to the caller as a real error rather than
+    /// silently left unpersisted, matching `PRUNE`'s "never silently
+    /// no-op" design intent even though the in-memory store has already
+    /// been reduced by that point (a subsequent `SAVE`/restart-triggered
+    /// write of any other provenance record will naturally re-persist the
+    /// smaller in-memory log anyway, so this isn't a lost-forever failure
+    /// mode, just a surfaced one).
+    pub fn prune_lineage_before(
+        &mut self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::core::provenance::PruneReport, EngineError> {
+        let roots = self.live_provenance_roots();
+        let report = self.provenance.prune_before(cutoff, &roots);
+        let path = self.db_dir.join("provenance.jsonl");
+        self.provenance.save_jsonl(&path).map_err(|e| {
+            EngineError::InvalidOp(format!(
+                "failed to persist pruned provenance log to {}: {e}",
+                path.display()
+            ))
+        })?;
+        Ok(report)
+    }
+
     // ... all existing methods of the old TensorDb ...
 
     pub fn set_dataset_metadata(
@@ -1206,6 +1263,15 @@ impl TensorDb {
 
     pub fn list_indices(&self) -> Vec<(String, String, String)> {
         self.active_instance().list_indices()
+    }
+
+    /// `PRUNE LINEAGE BEFORE <cutoff>` -- see `DatabaseInstance::prune_lineage_before`
+    /// and `core::provenance::ProvenanceStore::prune_before`.
+    pub fn prune_lineage_before(
+        &mut self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::core::provenance::PruneReport, EngineError> {
+        self.active_instance_mut().prune_lineage_before(cutoff)
     }
 
     pub fn set_dataset_metadata(

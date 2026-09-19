@@ -105,6 +105,13 @@ pub enum Statement {
     // ─── Session ─────────────────────────────────────────────────────────────
     /// `RESET`
     Reset,
+
+    // ─── Provenance maintenance ─────────────────────────────────────────────
+    /// `PRUNE LINEAGE BEFORE <RFC3339 timestamp string>`. `before` is kept as
+    /// the raw literal text here (parser stays decoupled from engine
+    /// internals, per this file's doc comment) -- the executor parses it into
+    /// a real `chrono::DateTime<Utc>`, erroring loudly on malformed input.
+    PruneLineage(PruneLineageStmt),
 }
 
 impl Statement {
@@ -122,6 +129,11 @@ impl Statement {
 }
 
 // ─── Statement structs ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct PruneLineageStmt {
+    pub before: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct DefineTensorStmt {

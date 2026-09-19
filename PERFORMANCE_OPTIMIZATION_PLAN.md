@@ -124,16 +124,29 @@ findings and a sequenced, risk-ranked execution order for what remains.
       tensors persist via Parquet, not a `JsonStorage` type that no longer exists in source)
 
 ### Phase 2 — Provenance log pruning/checkpointing
-- [ ] `PRUNE LINEAGE BEFORE <timestamp>` DSL statement (`src/core/provenance.rs`, `src/dsl/`)
-- [ ] Live-reachability analysis from current tensor/dataset roots before removing any
-      `provenance.jsonl` entry (design decision #4 above)
-- [ ] Decide + document: in-place compaction (rewrite `provenance.jsonl`) vs. checkpoint file +
-      trimmed tail — pick based on what keeps `resolve_ancestry` simplest, not what's fastest to
-      write
-- [ ] Regression coverage for `EXPLAIN LINEAGE`/`SHOW LINEAGE` before and after a prune, across
-      both tensors and datasets
-- [ ] Full CI-exact test suite + `cargo clean`/`rm -rf ./data` after
-- [ ] Docs: `CHANGELOG.md`, `docs/DSL_REFERENCE.md`, `docs/ARCHITECTURE.md`
+- [x] `PRUNE LINEAGE BEFORE <RFC3339 timestamp string>` DSL statement (new `Token::Prune`
+      lexer token, `Statement::PruneLineage`/`PruneLineageStmt` kept as raw string text in the
+      AST per this file's decoupling convention, parsed into a real `chrono::DateTime<Utc>` by
+      the executor with a loud error on malformed input)
+- [x] Live-reachability analysis from current tensor/dataset roots before removing any
+      `provenance.jsonl` entry (`ProvenanceStore::reachable_indices`/`prune_before`,
+      `DatabaseInstance::live_provenance_roots`) — a record reachable from something live is
+      kept regardless of age, never a blind time-window truncation
+- [x] **Decided**: in-place compaction (full `provenance.jsonl` rewrite via `save_jsonl`), not a
+      checkpoint file — simpler, and pruning is inherently infrequent maintenance, not a hot
+      path worth optimizing the write cost of
+- [x] Regression coverage: 4 new `core::provenance` unit tests with deterministic timestamps
+      (removes old+unreachable, keeps reachable-even-if-stale, keeps young-even-if-unreachable,
+      a mixed pass doing both in one call) + 3 new end-to-end DSL integration tests in
+      `tests/lineage_provenance_test.rs` proving the live-tensor-ancestry-never-breaks guarantee
+      through the real `PRUNE LINEAGE` statement (a future cutoff, a past cutoff, a malformed
+      timestamp) — mechanical *removal* is covered precisely at the unit level since there's no
+      DSL-level way to make something "no longer live" short of `DROP DATABASE`, which would
+      make the removal case trivial/uninteresting to test end-to-end
+- [x] Full CI-exact test suite + `cargo clean`/`rm -rf ./data` after
+- [x] Docs: `CHANGELOG.md`, `docs/DSL_REFERENCE.md`, `docs/ARCHITECTURE.md` (also notes the
+      corrected motivation: disk growth, not the unrelated 100MB execution-memory limit the
+      original proposal conflated it with)
 
 ### Phase 3 — Server transport benchmark spike + (conditional) additive Arrow IPC path
 - [ ] Baseline: measure `/execute` JSON serialization cost for representative tensor/dataset

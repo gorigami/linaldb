@@ -634,6 +634,43 @@ pub fn execute_statement(
                 "Session reset complete. All in-memory data has been cleared from the active database.".to_string(),
             ))
         }
+
+        // ── Provenance maintenance ──────────────────────────────────────────
+        Statement::PruneLineage(s) => {
+            let cutoff = chrono::DateTime::parse_from_rfc3339(&s.before)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| DslError::Parse {
+                    line: line_no,
+                    msg: format!(
+                        "PRUNE LINEAGE BEFORE expects an RFC3339 timestamp (e.g. \
+                         \"2026-01-01T00:00:00Z\"), got '{}': {}",
+                        s.before, e
+                    ),
+                })?;
+            let report = db
+                .prune_lineage_before(cutoff)
+                .map_err(|e| DslError::Engine {
+                    line: line_no,
+                    source: e,
+                })?;
+            let message = if report.retained_because_live > 0 {
+                format!(
+                    "Pruned {} of {} provenance record(s) before {} ({} retained because a \
+                     live tensor/dataset's lineage still needs them; {} remain).",
+                    report.pruned,
+                    report.total_before,
+                    s.before,
+                    report.retained_because_live,
+                    report.total_after
+                )
+            } else {
+                format!(
+                    "Pruned {} of {} provenance record(s) before {} ({} remain).",
+                    report.pruned, report.total_before, s.before, report.total_after
+                )
+            };
+            Ok(DslOutput::Message(message))
+        }
     }
 }
 

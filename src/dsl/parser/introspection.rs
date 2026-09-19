@@ -80,6 +80,18 @@ impl Parser {
     // EXPLAIN [PLAN] DATASET <name>
     // EXPLAIN [PLAN] SEARCH <ds> ON <col> QUERY <q> LIMIT <k>
     // EXPLAIN [PLAN] SELECT ...
+    // PRUNE LINEAGE BEFORE <string literal RFC3339 timestamp>
+    pub(super) fn parse_prune_lineage(&mut self) -> Result<Statement, ParseError> {
+        self.eat(&Token::Prune)?;
+        self.eat(&Token::Lineage)?;
+        if !self.at_ident("BEFORE") {
+            return Err(self.error("expected BEFORE after PRUNE LINEAGE"));
+        }
+        self.advance();
+        let before = self.eat_str()?;
+        Ok(Statement::PruneLineage(PruneLineageStmt { before }))
+    }
+
     // EXPLAIN LINEAGE <name> [AS JSON]
     // EXPLAIN <bare_ident>
     pub(super) fn parse_explain(&mut self) -> Result<Statement, ParseError> {

@@ -358,6 +358,7 @@ impl Parser {
                 }
                 Ok(Statement::Reset)
             }
+            Some(Token::Prune) => self.parse_prune_lineage(),
             Some(Token::Ident(_)) if self.peek_at(1) == Some(&Token::Dot) => {
                 self.parse_method_call()
             }
@@ -1418,6 +1419,21 @@ mod tests {
     fn reset_session() {
         let stmt = parse_ok("RESET SESSION");
         assert!(matches!(stmt, Statement::Reset));
+    }
+
+    #[test]
+    fn prune_lineage_before() {
+        let stmt = parse_ok(r#"PRUNE LINEAGE BEFORE "2026-01-01T00:00:00Z""#);
+        let Statement::PruneLineage(s) = stmt else {
+            panic!()
+        };
+        assert_eq!(s.before, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn prune_lineage_missing_before_errors() {
+        let result = crate::dsl::parser::parse(r#"PRUNE LINEAGE "2026-01-01T00:00:00Z""#);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `PRUNE LINEAGE BEFORE <timestamp>` (provenance log pruning)
+
+`core::provenance::ProvenanceStore` has been append-only since it was introduced, with no way
+to shrink `provenance.jsonl` -- a real gap for long-running or edge deployments where that log
+would otherwise grow unbounded. `PRUNE LINEAGE BEFORE "<RFC3339 timestamp>"` removes records
+older than the given cutoff, but **never** a record still needed to resolve `EXPLAIN LINEAGE`
+for a currently-live tensor or dataset, computed via a real reachability walk
+(`ProvenanceStore::prune_before`/`reachable_indices`, reusing `resolve_ancestry`'s exact
+producer-resolution logic) from every tensor/dataset that exists right now — not a blind
+time-window truncation. A record that's old enough to prune but still reachable from something
+live is kept and reported separately (`PruneReport::retained_because_live`), so the DSL output
+message always says exactly what happened (`"Pruned N of M ... (K retained because a live
+tensor/dataset's lineage still needs them; J remain)."`) instead of silently overclaiming a
+full prune. A malformed timestamp is a loud parse error. The pruned log is persisted back to
+`provenance.jsonl` as a full rewrite (the only place this module does that; everywhere else
+only ever appends).
+
+See `PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 2. Also corrects that plan's own framing of the
+original proposal: pruning was motivated there by the engine's separate 100MB
+per-execution-memory limit, which is an unrelated subsystem from the on-disk provenance file —
+the real motivation is disk growth, not that memory limit.
+
 ### Added — HNSW vector index (`CREATE VECTOR INDEX ... USING HNSW`)
 
 `core::index::vector::VectorIndex`'s own doc comment has said "linear scan for MVP, HNSW
