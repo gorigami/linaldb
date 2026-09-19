@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.86] - 2026-09-19
+
 ### Fixed — `USE <db>` combined with `X-Linal-Database` silently no-op'd over `/execute` and `/jobs`
 
 Found debugging a real `linal-hub` playground script (`CREATE DATABASE IF NOT EXISTS
