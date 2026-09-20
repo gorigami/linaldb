@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.87] - 2026-09-19
+
 ### Added — optional `faer-matmul` Cargo feature (faster dense matmul kernel)
 
 A real benchmark (`benches/matmul_backend.rs`, this phase's required gate per
