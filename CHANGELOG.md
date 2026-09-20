@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.88] - 2026-09-20
+
+### Fixed — `PRUNE LINEAGE` failed on a database with no data dir yet
+
+`DatabaseInstance::prune_lineage_before` (added in `v0.1.87`) called `ProvenanceStore::save_jsonl`
+directly without first ensuring `self.db_dir` exists on disk, unlike `record_provenance` (which
+already does `std::fs::create_dir_all` before any provenance write). A fresh `TensorDb`/`Db()`
+that has never `SAVE`d anything reported `"No such file or directory"` instead of succeeding when
+`PRUNE LINEAGE` ran. Found via a real Python-embedded (`clients/python-embedded`) smoke test
+against a brand-new `Db()` — not caught by any existing Rust test, since every one of them
+happened to `SAVE`/insert into an already-materialized directory first. Fix mirrors
+`record_provenance`'s existing `create_dir_all` call; new regression test uses an isolated temp
+`data_dir` (`TensorDb::with_config`) so it reliably starts from a genuinely nonexistent directory.
+
 ## [0.1.87] - 2026-09-19
 
 ### Added — optional `faer-matmul` Cargo feature (faster dense matmul kernel)
