@@ -14,6 +14,7 @@
 //! save/restart/load round trip are exercised instead -- the actual
 //! persisted-ancestry surface this plan built.
 
+use linal::core::config::{EngineConfig, StorageConfig};
 use linal::dsl::{execute_line, DslError, DslOutput};
 use linal::engine::TensorDb;
 use std::fs;
@@ -261,4 +262,40 @@ fn prune_lineage_rejects_a_malformed_timestamp() {
         msg.contains("RFC3339"),
         "expected a clear explanation of the expected format, got: {msg}"
     );
+}
+
+/// Regression test for a real bug found via the Python-embedded binding: on
+/// a brand-new `TensorDb` whose data directory has never been created on
+/// disk (no `SAVE DATASET`, no other operation that happened to trigger
+/// `record_provenance`'s own `create_dir_all`), `PRUNE LINEAGE` used to fail
+/// with `"No such file or directory"` instead of succeeding -- it tried to
+/// `save_jsonl` straight into a directory that doesn't exist yet. Uses a
+/// unique temp `data_dir` (not the shared `./data/default` other tests in
+/// this file/process write to) so this reliably starts from a genuinely
+/// nonexistent directory without risking a race with any other test.
+#[test]
+fn prune_lineage_succeeds_on_a_database_with_no_data_dir_yet() {
+    let data_dir =
+        std::env::temp_dir().join(format!("linal_prune_no_datadir_{}", uuid::Uuid::new_v4()));
+    let _ = fs::remove_dir_all(&data_dir);
+    assert!(
+        !data_dir.exists(),
+        "test precondition: data_dir must not exist yet"
+    );
+
+    let mut db = TensorDb::with_config(EngineConfig {
+        storage: StorageConfig {
+            data_dir: data_dir.clone(),
+            default_db: "default".to_string(),
+        },
+    });
+
+    let output = execute_line(&mut db, r#"PRUNE LINEAGE BEFORE "2099-01-01T00:00:00Z""#, 1)
+        .expect("PRUNE LINEAGE must succeed even when the data dir doesn't exist yet");
+    let DslOutput::Message(msg) = output else {
+        panic!("expected a Message output")
+    };
+    assert!(msg.contains("Pruned 0 of 0"), "got: {msg}");
+
+    let _ = fs::remove_dir_all(&data_dir);
 }

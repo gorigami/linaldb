@@ -194,6 +194,19 @@ impl DatabaseInstance {
     ) -> Result<crate::core::provenance::PruneReport, EngineError> {
         let roots = self.live_provenance_roots();
         let report = self.provenance.prune_before(cutoff, &roots);
+        // Same directory-creation requirement `record_provenance` already
+        // has: a fresh DB that has never SAVEd anything (or otherwise never
+        // triggered a provenance write) has no `db_dir` on disk yet at all --
+        // found via a real Python-embedded smoke test on `PRUNE LINEAGE`
+        // against a brand-new `Db()`, not caught by any existing test
+        // (every one of them happened to SAVE/insert into an
+        // already-materialized dir first).
+        std::fs::create_dir_all(&self.db_dir).map_err(|e| {
+            EngineError::InvalidOp(format!(
+                "could not create '{}' for provenance persistence: {e}",
+                self.db_dir.display()
+            ))
+        })?;
         let path = self.db_dir.join("provenance.jsonl");
         self.provenance.save_jsonl(&path).map_err(|e| {
             EngineError::InvalidOp(format!(
