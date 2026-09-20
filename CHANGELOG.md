@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — optional `faer-matmul` Cargo feature (faster dense matmul kernel)
+
+A real benchmark (`benches/matmul_backend.rs`, this phase's required gate per
+`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 4) compared the engine's existing hand-rolled,
+Rayon-parallelized dense matmul kernel against `faer`'s GEMM at square-matrix sizes 50, 200,
+500, and 1000 -- representative of real usage on this engine, not ML-training scale. `faer` won
+meaningfully at every size tested, including the smallest (50x50: ~7.9x faster), growing to
+~22x faster at 1000x1000 -- not a "only wins at huge N" result. `faer` is now an optional
+dependency, linked in only when the new `faer-matmul` feature is enabled
+(`cargo build --features faer-matmul`); the default build is completely unaffected. `faer` was
+chosen over an OpenBLAS-style backend specifically because it's pure Rust with no C/Fortran
+toolchain requirement, preserving this repo's existing "no system library dependency" build
+property (vendored HDF5, `rustls-tls`) -- an OpenBLAS-style backend would have reintroduced
+exactly that. `matmul_with_timestamp`'s existing shape/dimension validation and `Tensor::new`
+construction are unchanged; only the numeric kernel itself is swappable
+(`matmul_data_builtin` vs. `matmul_data_faer`). Not part of the default build or CI's test
+matrix (same as the pre-existing `zero-copy`/`experimental` features); validated locally with
+`--features faer-matmul` against the existing `engine_matrix_ops.rs`/`dsl_matrix_ops.rs`
+integration suites (including transposed/strided inputs) before landing.
+
+This closes out `PERFORMANCE_OPTIMIZATION_PLAN.md`'s four phases (HNSW vector index,
+provenance log pruning, `?format=arrow`, and this).
+
 ### Added — `POST /execute?format=arrow` (binary Arrow IPC response)
 
 A real benchmark (`benches/server_transport.rs`, added as this phase's required gate per

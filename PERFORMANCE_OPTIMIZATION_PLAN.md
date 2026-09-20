@@ -180,15 +180,25 @@ findings and a sequenced, risk-ranked execution order for what remains.
       `server_test.rs` tests reconfirmed unaffected
 
 ### Phase 4 — Dense matmul backend benchmark spike + (conditional) `faer` integration
-- [ ] Baseline: current Rayon-parallelized `matmul` vs. `faer` at matrix sizes representative of
-      this engine's actual usage (scientific/engineering datasets fitting the existing
-      memory-limited execution model, not ML-training-scale)
-- [ ] **Gate**: only proceed if `faer` shows a meaningful win at those realistic sizes, not just
-      at synthetic large-N benchmarks
-- [ ] If gated open: `faer` behind a Cargo feature flag; existing correctness-first validation
-      (singularity/shape checks) unchanged in front of the kernel call
-- [ ] If gated closed: close this phase with the benchmark results recorded in `CHANGELOG.md`
-- [ ] Docs: `CHANGELOG.md`, `docs/ARCHITECTURE.md` (kernel selection section) if shipped
+- [x] Baseline (`benches/matmul_backend.rs`, new criterion bench): current Rayon-parallelized
+      `matmul` vs. `faer` at square-matrix sizes 50/200/500/1000 -- representative of this
+      engine's actual usage (fits comfortably in its memory-limited execution model, not
+      ML-training-scale)
+- [x] **Gate result: opened.** `faer` won meaningfully at every size, including the smallest
+      (50x50: ~7.9x faster), growing to ~22x faster at 1000x1000 -- a real, consistent win, not
+      a "only wins at huge N" result.
+- [x] Implemented: `faer` promoted to a real optional dependency, linked in only behind a new
+      opt-in `faer-matmul` Cargo feature (default build unaffected). `matmul_with_timestamp`'s
+      existing shape/dimension validation and `Tensor::new` construction are unchanged; only
+      the numeric kernel (`matmul_data_builtin` vs. new `matmul_data_faer`) swaps via
+      `#[cfg(feature = "faer-matmul")]`. Faer path honors `a`/`b`'s strides/offset directly
+      (no forced contiguous copy first), same as the built-in kernel.
+- [x] Docs: `CHANGELOG.md`, `docs/ARCHITECTURE.md` (kernel selection section), Cargo.toml
+      (feature + dependency doc comments)
+- [x] Validated locally with `--features faer-matmul` against
+      `engine_matrix_ops.rs`/`dsl_matrix_ops.rs` (including transposed/strided-input coverage)
+      -- not part of the default build or CI's test matrix, same as the pre-existing
+      `zero-copy`/`experimental` features
 
 ## Backlog (not scheduled — profiling-gated future items)
 

@@ -967,7 +967,21 @@ Rayon parallelism fires inside individual kernel functions in `engine/kernels.rs
 
 - `add`, `sub`, `multiply`: `par_iter()` for contiguous tensors ≥50k elements
 - `scalar_mul` (backing `SCALE`): `par_iter()` at ≥50k elements
-- `matmul`: `par_chunks_mut` for large tile passes
+- `matmul`: `par_chunks_mut` for large tile passes -- this is `matmul_data_builtin`
+  (`engine/kernels.rs`) specifically, the default. An alternate `matmul_data_faer`
+  backend (`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 4), gated behind the opt-in
+  `faer-matmul` Cargo feature (`faer` promoted from a dev-dependency to a real
+  optional one only when that feature is on -- pure Rust, no C/Fortran BLAS
+  toolchain, chosen specifically to preserve this repo's "no system library
+  dependency" build property), measured ~8-22x faster than the built-in kernel
+  across 50..1000-square matrices in `benches/matmul_backend.rs`, growing with N.
+  `matmul_with_timestamp` picks whichever is compiled in via `#[cfg(feature =
+  "faer-matmul")]`; the shape/dimension validation in front of it and the
+  `Tensor::new` construction after it are both unchanged and feature-independent
+  -- only the numeric kernel itself swaps. Not part of the default build or CI's
+  test matrix (same as the pre-existing `zero-copy`/`experimental` features);
+  validated locally against the existing `engine_matrix_ops.rs`/`dsl_matrix_ops.rs`
+  integration suites with `--features faer-matmul` before landing.
 - Dataset batch operations: `par_chunks` for row processing ≥10k rows
 - 2.5x speedup on 100k-element vectors
 

@@ -1002,6 +1002,62 @@ pub fn matmul_with_timestamp(
         ));
     }
 
+    #[cfg(feature = "faer-matmul")]
+    let data = matmul_data_faer(a, b, m, n, p);
+
+    #[cfg(not(feature = "faer-matmul"))]
+    let data = matmul_data_builtin(a, b, m, n, p);
+
+    let shape = Shape::new(vec![m, p]);
+    let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
+    Tensor::new(new_id, shape, data, metadata)
+}
+
+/// `faer`-backed dense GEMM, gated behind the `faer-matmul` feature -- see
+/// that feature's doc comment in `Cargo.toml`. Honors `a`/`b`'s strides and
+/// offset directly (no materialization needed first), same as the built-in
+/// kernel below, so a transposed/sliced zero-copy view multiplies correctly
+/// without requiring a contiguous copy.
+#[cfg(feature = "faer-matmul")]
+fn matmul_data_faer(a: &Tensor, b: &Tensor, m: usize, n: usize, p: usize) -> Vec<f32> {
+    let a_strides = &a.strides;
+    let b_strides = &b.strides;
+    let a_data = a.data_ref();
+    let b_data = b.data_ref();
+    let a_offset = a.offset;
+    let b_offset = b.offset;
+
+    let a_mat = faer::Mat::<f32>::from_fn(m, n, |i, j| {
+        a_data[a_offset + i * a_strides[0] + j * a_strides[1]]
+    });
+    let b_mat = faer::Mat::<f32>::from_fn(n, p, |i, j| {
+        b_data[b_offset + i * b_strides[0] + j * b_strides[1]]
+    });
+
+    let mut dst = faer::Mat::<f32>::zeros(m, p);
+    faer::linalg::matmul::matmul(
+        &mut dst,
+        faer::Accum::Replace,
+        &a_mat,
+        &b_mat,
+        1.0f32,
+        faer::Par::rayon(0),
+    );
+
+    let mut data = vec![0.0f32; m * p];
+    for i in 0..m {
+        for j in 0..p {
+            data[i * p + j] = dst[(i, j)];
+        }
+    }
+    data
+}
+
+/// The original hand-rolled, Rayon-parallelized-above-`PARALLEL_THRESHOLD`
+/// kernel -- unchanged, and still the default (the `faer-matmul` feature is
+/// opt-in, not on by default).
+#[cfg_attr(feature = "faer-matmul", allow(dead_code))]
+fn matmul_data_builtin(a: &Tensor, b: &Tensor, m: usize, n: usize, p: usize) -> Vec<f32> {
     let mut data = vec![0.0; m * p];
 
     let a_strides = &a.strides;
@@ -1058,9 +1114,7 @@ pub fn matmul_with_timestamp(
         }
     }
 
-    let shape = Shape::new(vec![m, p]);
-    let metadata = TensorMetadata::new_with_timestamp(new_id, None, timestamp);
-    Tensor::new(new_id, shape, data, metadata)
+    data
 }
 
 /// Transpose a rank-2 tensor (matrix)

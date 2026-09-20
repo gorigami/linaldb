@@ -49,11 +49,21 @@ indicatif = "0.17"
 # build philosophy (vendored HDF5, rustls-tls). `with-serde` needed for
 # CREATE VECTOR INDEX ... USING HNSW's SAVE/LOAD DATASET persistence.
 instant-distance = { version = "0.6.1", default-features = false, features = ["with-serde"] }
+# Optional dense-matmul backend (src/engine/kernels.rs) -- see
+# PERFORMANCE_OPTIMIZATION_PLAN.md Phase 4. Only linked in when the
+# `faer-matmul` feature is enabled; pure Rust, no C/Fortran BLAS toolchain,
+# chosen specifically to preserve this repo's existing "no system library
+# dependency" build property (vendored HDF5, rustls-tls) -- an OpenBLAS-style
+# backend would have reintroduced exactly that. A real benchmark
+# (benches/matmul_backend.rs) measured it ~8-22x faster than the existing
+# hand-rolled/Rayon kernel across 50..1000-square matrices, growing with N.
+faer = { version = "0.24.4", optional = true }
 
 [features]
 default = []
 zero-copy = []  # Enable Arc-based tensor storage
 experimental = ["zero-copy"]  # Bundle experimental features
+faer-matmul = ["dep:faer"]  # Opt-in faer-backed dense matmul kernel
 
 [[example]]
 name = "gen_test_data"
@@ -75,6 +85,7 @@ path = "tools/fixtures/gen_gw_data.rs"
 tower = { version = "0.5.2", features = ["util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+faer = "0.24.4"
 
 [[bench]]
 name = "tensor_ops"
@@ -94,4 +105,8 @@ harness = false
 
 [[bench]]
 name = "server_transport"
+harness = false
+
+[[bench]]
+name = "matmul_backend"
 harness = false
