@@ -28,13 +28,37 @@ const QUERY_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Deserialize, utoipa::IntoParams)]
 struct ExecuteParams {
-    /// Format of the output: 'toon' (default) or 'json'
+    /// Format of the output: 'toon' (default), 'json', or 'arrow' (binary
+    /// Arrow IPC stream, tabular results only -- see `execute_command`)
     #[serde(default = "default_format")]
     format: String,
 }
 
 fn default_format() -> String {
     "toon".to_string()
+}
+
+/// Content-type for `?format=arrow`'s binary response body -- the standard
+/// MIME type for the Arrow IPC streaming format.
+const ARROW_IPC_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
+
+/// Encodes a `dataset_legacy::Dataset` as an Arrow IPC stream
+/// (`core::storage::dataset_to_record_batch` -> `arrow::ipc::writer::StreamWriter`).
+/// Reuses the exact conversion `/delivery`'s Parquet export and
+/// `core::provenance::record_batch_content_hash` already trust.
+fn dataset_to_arrow_ipc_bytes(
+    dataset: &crate::core::dataset_legacy::Dataset,
+) -> Result<Vec<u8>, String> {
+    let batch =
+        crate::core::storage::dataset_to_record_batch(dataset).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    {
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())
+            .map_err(|e| e.to_string())?;
+        writer.write(&batch).map_err(|e| e.to_string())?;
+        writer.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -395,6 +419,52 @@ async fn execute_command(
                 body,
             )
                 .into_response()
+        }
+        "arrow" => {
+            // Binary Arrow IPC stream (opt-in, additive -- see
+            // PERFORMANCE_OPTIMIZATION_PLAN.md Phase 3). Only a successful
+            // `DslOutput::Table` result can be represented this way; every
+            // other case (an execution error, or a non-tabular success like
+            // a bare Tensor/Message) falls back to a JSON body, same
+            // convention the rest of this endpoint already uses for errors
+            // regardless of the requested format.
+            match &response.result {
+                Some(DslOutput::Table(dataset)) if response.status == "ok" => {
+                    match dataset_to_arrow_ipc_bytes(dataset) {
+                        Ok(bytes) => (
+                            StatusCode::OK,
+                            [(axum::http::header::CONTENT_TYPE, ARROW_IPC_CONTENT_TYPE)],
+                            bytes,
+                        )
+                            .into_response(),
+                        Err(e) => (
+                            StatusCode::OK,
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            serde_json::to_string(&ExecuteResponse {
+                                status: "error".to_string(),
+                                result: None,
+                                error: Some(format!("Arrow IPC encoding failed: {e}")),
+                            })
+                            .unwrap_or_default()
+                            .into_bytes(),
+                        )
+                            .into_response(),
+                    }
+                }
+                _ => (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    serde_json::to_string(&response)
+                        .unwrap_or_else(|e| {
+                            format!(
+                                "{{\"status\": \"error\", \"error\": \"Serialization failed: {}\"}}",
+                                e
+                            )
+                        })
+                        .into_bytes(),
+                )
+                    .into_response(),
+            }
         }
         _ => {
             // TOON format (default)

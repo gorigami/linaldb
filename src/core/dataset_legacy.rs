@@ -609,6 +609,30 @@ impl Dataset {
         Ok(())
     }
 
+    /// Same accelerated-restore pattern as `create_vector_index_from_snapshot`,
+    /// for a `HnswIndex` restored from a previously persisted
+    /// `HnswIndexSnapshot`.
+    pub fn create_hnsw_index_from_snapshot(
+        &mut self,
+        column_name: String,
+        snapshot: crate::core::index::hnsw::HnswIndexSnapshot,
+    ) -> Result<(), String> {
+        if !self.schema_has_field(&column_name) {
+            return Err(format!("Column '{}' not found in schema", column_name));
+        }
+
+        let mut index = crate::core::index::hnsw::HnswIndex::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            if let Some(val) = row.get(&column_name) {
+                index.add(i, val)?;
+            }
+        }
+        index.restore_from_snapshot(snapshot)?;
+
+        self.indices.insert(column_name, Box::new(index));
+        Ok(())
+    }
+
     /// Get index for a column
     pub fn get_index(&self, column_name: &str) -> Option<&dyn Index> {
         self.indices.get(column_name).map(|b| b.as_ref())

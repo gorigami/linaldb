@@ -224,6 +224,18 @@ pub struct ProvenanceStore {
     records: Vec<ProvenanceRecord>,
 }
 
+/// `ProvenanceStore::prune_before`'s outcome, precise enough for `PRUNE
+/// LINEAGE`'s output message to never overclaim what actually happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PruneReport {
+    pub total_before: usize,
+    pub total_after: usize,
+    pub pruned: usize,
+    /// Records older than the requested cutoff that were kept anyway
+    /// because a currently-live tensor/dataset's ancestry still needs them.
+    pub retained_because_live: usize,
+}
+
 impl ProvenanceStore {
     pub fn new() -> Self {
         Self::default()
@@ -346,6 +358,74 @@ impl ProvenanceStore {
                     .collect(),
             },
             None => ProvenanceTree::root(entity.clone()),
+        }
+    }
+
+    /// Every record index reachable by walking `resolve_ancestry`'s exact
+    /// producer-resolution logic (`find_producer_before`) backward from each
+    /// of `roots` -- i.e. every record still needed to answer `EXPLAIN
+    /// LINEAGE` for something currently live. A `HashSet` visited-guard
+    /// (not `MAX_ANCESTRY_DEPTH`) both prevents revisiting shared ancestors
+    /// in a diamond-shaped history and guarantees termination: each record
+    /// index can enter the set at most once, so the walk is bounded by
+    /// `self.records.len()` regardless of how many roots or how deep the
+    /// chain.
+    fn reachable_indices(&self, roots: &[ProvenanceEntity]) -> std::collections::HashSet<usize> {
+        let mut visited = std::collections::HashSet::new();
+        let mut stack: Vec<(ProvenanceEntity, usize)> = roots
+            .iter()
+            .map(|r| (r.clone(), self.records.len()))
+            .collect();
+        while let Some((entity, before)) = stack.pop() {
+            if let Some((idx, record)) = self.find_producer_before(&entity, before) {
+                if visited.insert(idx) {
+                    for input in &record.inputs {
+                        stack.push((input.clone(), idx));
+                    }
+                }
+            }
+        }
+        visited
+    }
+
+    /// Removes every record strictly older than `cutoff` that isn't needed
+    /// to resolve the ancestry of anything in `live_roots` (content hashes
+    /// of every tensor/dataset that currently exists in this DB). A record
+    /// reachable from a live root is always kept regardless of `cutoff` --
+    /// pruning must never break `resolve_ancestry` for anything still
+    /// live, so this is not a blind time-window truncation. The returned
+    /// `PruneReport` distinguishes "removed" from "old enough to remove but
+    /// kept because something live still needs it," so the caller can
+    /// report exactly what happened rather than claiming a full prune that
+    /// didn't actually occur.
+    pub fn prune_before(
+        &mut self,
+        cutoff: DateTime<Utc>,
+        live_roots: &[ProvenanceEntity],
+    ) -> PruneReport {
+        let reachable = self.reachable_indices(live_roots);
+        let total_before = self.records.len();
+        let mut retained_because_live = 0usize;
+
+        let mut kept = Vec::with_capacity(self.records.len());
+        for (idx, record) in self.records.drain(..).enumerate() {
+            let is_stale = record.timestamp < cutoff;
+            let is_reachable = reachable.contains(&idx);
+            if is_stale && !is_reachable {
+                continue; // safe to prune
+            }
+            if is_stale && is_reachable {
+                retained_because_live += 1;
+            }
+            kept.push(record);
+        }
+        self.records = kept;
+
+        PruneReport {
+            total_before,
+            total_after: self.records.len(),
+            pruned: total_before - self.records.len(),
+            retained_because_live,
         }
     }
 
@@ -551,5 +631,123 @@ mod tests {
             std::env::temp_dir().join(format!("linal_prov_missing_{}.jsonl", Uuid::new_v4()));
         let store = ProvenanceStore::load_jsonl(&path).unwrap();
         assert!(store.is_empty());
+    }
+
+    /// Builds a record with an explicit, controlled timestamp -- the
+    /// pruning tests below need to place records precisely on either side
+    /// of a cutoff, which `ProvenanceRecord::new`'s `Utc::now()` default
+    /// can't guarantee deterministically.
+    fn record_at(
+        operation: &str,
+        timestamp: DateTime<Utc>,
+        inputs: Vec<ProvenanceEntity>,
+        outputs: Vec<ProvenanceEntity>,
+    ) -> ProvenanceRecord {
+        let mut r = ProvenanceRecord::new(operation, ExecutionId::new())
+            .with_inputs(inputs)
+            .with_outputs(outputs);
+        r.timestamp = timestamp;
+        r
+    }
+
+    fn days_ago(n: i64) -> DateTime<Utc> {
+        Utc::now() - chrono::Duration::days(n)
+    }
+
+    #[test]
+    fn prune_before_removes_old_unreachable_records() {
+        let mut store = ProvenanceStore::new();
+        store.append(record_at(
+            "IMPORT",
+            days_ago(10),
+            vec![],
+            vec![tensor_entity("dropped-h1")],
+        ));
+
+        // No live roots at all -- this dataset/tensor was since dropped.
+        let report = store.prune_before(days_ago(5), &[]);
+        assert_eq!(report.total_before, 1);
+        assert_eq!(report.pruned, 1);
+        assert_eq!(report.total_after, 0);
+        assert_eq!(report.retained_because_live, 0);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn prune_before_never_removes_a_record_a_live_root_still_needs() {
+        let mut store = ProvenanceStore::new();
+        store.append(record_at(
+            "IMPORT",
+            days_ago(10),
+            vec![],
+            vec![tensor_entity("h1")],
+        ));
+        store.append(record_at(
+            "SCALE",
+            days_ago(9),
+            vec![tensor_entity("h1")],
+            vec![tensor_entity("h2")],
+        ));
+
+        // "h2" is still live -- pruning before a cutoff that's *after* both
+        // records must not remove either, since both are needed to resolve
+        // h2's ancestry.
+        let live = vec![tensor_entity("h2")];
+        let report = store.prune_before(days_ago(1), &live);
+        assert_eq!(report.total_before, 2);
+        assert_eq!(report.pruned, 0);
+        assert_eq!(report.total_after, 2);
+        assert_eq!(
+            report.retained_because_live, 2,
+            "both records are older than the cutoff but reachable from the live root"
+        );
+
+        // The kept log must still resolve ancestry correctly afterward.
+        let tree = store.resolve_ancestry(&tensor_entity("h2"));
+        assert_eq!(tree.operation, "SCALE");
+        assert_eq!(tree.inputs[0].operation, "IMPORT");
+    }
+
+    #[test]
+    fn prune_before_never_removes_records_younger_than_the_cutoff() {
+        let mut store = ProvenanceStore::new();
+        store.append(record_at(
+            "IMPORT",
+            days_ago(1), // younger than the cutoff below
+            vec![],
+            vec![tensor_entity("recently-dropped")],
+        ));
+
+        // No live roots, but the record is younger than the cutoff -- must
+        // survive regardless (not a blind time-window truncation, but also
+        // never prunes something that isn't actually stale yet).
+        let report = store.prune_before(days_ago(5), &[]);
+        assert_eq!(report.pruned, 0);
+        assert_eq!(report.total_after, 1);
+    }
+
+    #[test]
+    fn prune_before_prunes_unreachable_but_keeps_reachable_in_the_same_pass() {
+        let mut store = ProvenanceStore::new();
+        store.append(record_at(
+            "IMPORT",
+            days_ago(10),
+            vec![],
+            vec![tensor_entity("dropped")],
+        ));
+        store.append(record_at(
+            "IMPORT",
+            days_ago(10),
+            vec![],
+            vec![tensor_entity("still-live")],
+        ));
+
+        let live = vec![tensor_entity("still-live")];
+        let report = store.prune_before(days_ago(5), &live);
+        assert_eq!(report.total_before, 2);
+        assert_eq!(report.pruned, 1);
+        assert_eq!(report.total_after, 1);
+        assert_eq!(report.retained_because_live, 1);
+        assert_eq!(store.records()[0].outputs[0].content_hash(), "still-live");
     }
 }

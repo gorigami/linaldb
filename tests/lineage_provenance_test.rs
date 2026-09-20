@@ -186,3 +186,79 @@ fn full_provenance_round_trip_survives_a_restart() {
     let _ = fs::remove_dir_all("./data/default/datasets/lineage_it_raw");
     let _ = fs::remove_dir_all("./data/default/datasets/lineage_it_agg");
 }
+
+/// End-to-end (DSL `PRUNE LINEAGE` -> `DatabaseInstance::prune_lineage_before`
+/// -> `ProvenanceStore::prune_before`) check of the one property that
+/// matters most: pruning must never break `EXPLAIN LINEAGE` for a tensor
+/// that's still live, even when every one of its ancestry records is older
+/// than the requested cutoff. A future cutoff (every real record is
+/// necessarily "older" than it) exercises exactly that "stale but still
+/// needed" path without depending on wall-clock timing tricks.
+///
+/// Mechanical *removal* of a genuinely unreachable, stale record is
+/// covered precisely (deterministic timestamps, no real clock involved) by
+/// `core::provenance::tests::prune_before_removes_old_unreachable_records`
+/// and its neighbors -- there is no DSL-level way to make a tensor/dataset
+/// stop being "live" short of `DROP DATABASE` (which would trivially make
+/// pruning moot), so this integration test's job is proving the safety
+/// guarantee end-to-end, not the compaction mechanics.
+#[test]
+fn prune_lineage_never_breaks_a_live_tensors_ancestry() {
+    let mut db = TensorDb::new();
+    execute_line(&mut db, "VECTOR a = [1.0, 2.0, 3.0]", 1).expect("setup failed");
+    execute_line(&mut db, "LET b = a * 2.0", 2).expect("setup failed");
+
+    let before_prune = expect_message(
+        execute_line(&mut db, "EXPLAIN LINEAGE b", 3),
+        "EXPLAIN LINEAGE before prune",
+    );
+    assert!(before_prune.contains("SCALE") || before_prune.contains("MULTIPLY"));
+
+    let prune_output = expect_message(
+        execute_line(&mut db, r#"PRUNE LINEAGE BEFORE "2099-01-01T00:00:00Z""#, 4),
+        "PRUNE LINEAGE",
+    );
+    assert!(
+        prune_output.contains("retained because a live tensor/dataset's lineage still needs them"),
+        "expected the report to explain why nothing was actually removed, got: {prune_output}"
+    );
+
+    // Ancestry must resolve identically after the prune -- nothing was
+    // actually lost, only reported as protected.
+    let after_prune = expect_message(
+        execute_line(&mut db, "EXPLAIN LINEAGE b", 5),
+        "EXPLAIN LINEAGE after prune",
+    );
+    assert_eq!(before_prune, after_prune);
+}
+
+/// A cutoff in the past (every real record is necessarily younger than it)
+/// must prune nothing at all -- `PRUNE LINEAGE` is not a blind "clear
+/// everything" command, it only ever removes records that are both stale
+/// *and* unreachable.
+#[test]
+fn prune_lineage_with_a_past_cutoff_prunes_nothing() {
+    let mut db = TensorDb::new();
+    execute_line(&mut db, "VECTOR a = [1.0, 2.0, 3.0]", 1).expect("setup failed");
+
+    let output = expect_message(
+        execute_line(&mut db, r#"PRUNE LINEAGE BEFORE "2000-01-01T00:00:00Z""#, 2),
+        "PRUNE LINEAGE with a past cutoff",
+    );
+    assert!(
+        output.contains("Pruned 0 of"),
+        "expected nothing to be pruned, got: {output}"
+    );
+}
+
+#[test]
+fn prune_lineage_rejects_a_malformed_timestamp() {
+    let mut db = TensorDb::new();
+    let err = execute_line(&mut db, "PRUNE LINEAGE BEFORE \"not-a-timestamp\"", 1)
+        .expect_err("a malformed timestamp must be a loud parse error, not silently accepted");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("RFC3339"),
+        "expected a clear explanation of the expected format, got: {msg}"
+    );
+}

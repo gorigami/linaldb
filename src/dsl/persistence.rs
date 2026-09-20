@@ -151,6 +151,39 @@ fn save_dataset_core(
             msg: format!("Failed to save vector index snapshots: {}", e),
         })?;
 
+    // Same best-effort persistence for HNSW-backed vector indices (a
+    // column has at most one of the two, see `save_hnsw_index_snapshots`'s
+    // doc comment).
+    let mut hnsw_index_snapshots = std::collections::HashMap::new();
+    for (column, index) in &dataset.indices {
+        if index.index_type() != crate::core::index::IndexType::Hnsw {
+            continue;
+        }
+        let Some(snapshot_json) = index.export_snapshot() else {
+            continue; // too few vectors to have built a graph -- nothing to persist
+        };
+        let Ok(snapshot) = serde_json::from_value(snapshot_json) else {
+            continue;
+        };
+        let Ok(values) = dataset.get_column(column) else {
+            continue;
+        };
+        let content_hash = crate::core::index::hnsw::HnswIndex::content_hash(&values);
+        hnsw_index_snapshots.insert(
+            column.clone(),
+            crate::core::index::hnsw::PersistedHnswIndex {
+                content_hash,
+                snapshot,
+            },
+        );
+    }
+    storage
+        .save_hnsw_index_snapshots(&disk_name, &hnsw_index_snapshots)
+        .map_err(|e| DslError::Parse {
+            line: line_no,
+            msg: format!("Failed to save HNSW index snapshots: {}", e),
+        })?;
+
     let mut metadata = if storage.metadata_exists(&disk_name) {
         let mut meta = storage
             .load_dataset_metadata(&disk_name)
@@ -349,6 +382,9 @@ fn load_dataset_core(
     let vector_snapshots = storage
         .load_vector_index_snapshots(&disk_name)
         .unwrap_or_default();
+    let hnsw_snapshots = storage
+        .load_hnsw_index_snapshots(&disk_name)
+        .unwrap_or_default();
     let mut restored_indexes = Vec::new();
     let mut restored_from_snapshot = Vec::new();
     for def in &index_defs {
@@ -378,6 +414,28 @@ fn load_dataset_core(
                         r
                     }
                     None => db.create_vector_index(dataset_name, &def.column),
+                }
+            }
+            crate::core::index::IndexType::Hnsw => {
+                let from_snapshot = hnsw_snapshots.get(&def.column).and_then(|persisted| {
+                    let values = db
+                        .get_dataset(dataset_name)
+                        .ok()?
+                        .get_column(&def.column)
+                        .ok()?;
+                    let current_hash = crate::core::index::hnsw::HnswIndex::content_hash(&values);
+                    (current_hash == persisted.content_hash).then(|| persisted.snapshot.clone())
+                });
+                match from_snapshot {
+                    Some(snapshot) => {
+                        let r =
+                            db.create_hnsw_index_from_snapshot(dataset_name, &def.column, snapshot);
+                        if r.is_ok() {
+                            restored_from_snapshot.push(def.column.clone());
+                        }
+                        r
+                    }
+                    None => db.create_hnsw_index(dataset_name, &def.column),
                 }
             }
         };

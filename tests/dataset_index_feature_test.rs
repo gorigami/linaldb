@@ -477,3 +477,217 @@ fn stale_vector_index_snapshot_is_rejected_and_falls_back_to_rebuild() {
 
     let _ = std::fs::remove_dir_all("./data/default/datasets/stale_vecs");
 }
+
+/// End-to-end (DSL -> planner -> `VectorSearchExec` -> `HnswIndex`) check
+/// that `CREATE VECTOR INDEX ... USING HNSW` actually accelerates
+/// `SEARCH ... LIMIT k` and returns the right neighbors, at a scale past
+/// `MIN_VECTORS_TO_INDEX` (see `core::index::hnsw`).
+#[test]
+fn hnsw_index_accelerates_top_k_search() {
+    let mut db = TensorDb::new();
+
+    const DIM: usize = 4;
+    const PER_CLUSTER: usize = 40;
+    const NUM_CLUSTERS: usize = 3; // total rows = 120, past MIN_VECTORS_TO_INDEX
+
+    let mut script = String::from("DATASET hnsw_vecs COLUMNS (id: Int, embedding: Vector(4))\n");
+    for axis in 0..NUM_CLUSTERS {
+        for j in 0..PER_CLUSTER {
+            let mut v = [0.0f32; DIM];
+            v[axis] = 1.0;
+            v[(axis + 1) % DIM] += 0.01 * (j as f32 / PER_CLUSTER as f32);
+            let row_id = axis * PER_CLUSTER + j;
+            script.push_str(&format!(
+                "INSERT INTO hnsw_vecs VALUES ({}, [{}])\n",
+                row_id,
+                v.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    // CREATE INDEX *after* the rows exist: `create_index`'s single backfill
+    // + `build()` pass only runs once, at creation time -- rows inserted
+    // after an empty CREATE INDEX sit in the "unindexed tail" (still
+    // correct via brute-force fallback, see `HnswIndex`'s doc comment, but
+    // never actually exercises the graph). Matches
+    // `vector_index_clustering_survives_save_and_load_without_rebuilding`'s
+    // ordering below.
+    script.push_str("CREATE VECTOR INDEX ON hnsw_vecs(embedding) USING HNSW\n");
+    linal::dsl::execute_script(&mut db, &script).expect("setup script failed");
+
+    let indices = db.list_indices();
+    assert!(
+        indices
+            .iter()
+            .any(|(ds, col, ty)| ds == "hnsw_vecs" && col == "embedding" && ty == "VECTOR (HNSW)"),
+        "expected an HNSW index to be listed, got: {:?}",
+        indices
+    );
+
+    let mut query_vec = [0.0f32; DIM];
+    query_vec[1] = 1.0;
+    let query = format!(
+        "SEARCH hnsw_vecs ON embedding QUERY [{}] LIMIT 10",
+        query_vec
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let out = linal::dsl::execute_line(&mut db, &query, 1).expect("search failed");
+    let linal::dsl::DslOutput::Table(ds) = out else {
+        panic!("expected inline Table")
+    };
+    assert_eq!(ds.len(), 10);
+    let id_col = ds.schema.get_field_index("id").unwrap();
+    for row in &ds.rows {
+        let linal::core::value::Value::Int(id) = row.values[id_col] else {
+            panic!("expected Int id")
+        };
+        let expected_range = (PER_CLUSTER as i64)..(2 * PER_CLUSTER as i64);
+        assert!(
+            expected_range.contains(&id),
+            "expected every top-10 result to belong to cluster axis=1 (row ids {:?}), got id {}",
+            expected_range,
+            id
+        );
+    }
+}
+
+/// Confirms an HNSW-only-indexed column still answers an *exact* predicate
+/// (`WHERE COSINE_SIM(...) > threshold`) correctly rather than erroring or
+/// silently missing rows -- `HnswIndex::search_threshold` always
+/// brute-force scans directly instead of trusting the approximate graph
+/// (see that type's doc comment). This is the planner *not* routing to
+/// `CosineFilterExec` for an HNSW index (only `VectorIndex`/IVF gets that
+/// acceleration) and falling back to a full scan+filter, which must still
+/// be correct.
+#[test]
+fn hnsw_only_index_still_answers_exact_where_predicate() {
+    let mut db = TensorDb::new();
+    let script = r#"
+    DATASET hnsw_where COLUMNS (id: Int, embedding: Vector(3))
+    CREATE VECTOR INDEX ON hnsw_where(embedding) USING HNSW
+    INSERT INTO hnsw_where VALUES (1, [1.0, 0.0, 0.0])
+    INSERT INTO hnsw_where VALUES (2, [0.0, 1.0, 0.0])
+    INSERT INTO hnsw_where VALUES (3, [0.99, 0.01, 0.0])
+    "#;
+    linal::dsl::execute_script(&mut db, script).expect("setup script failed");
+
+    let out = linal::dsl::execute_line(
+        &mut db,
+        "SELECT id FROM hnsw_where WHERE COSINE_SIM(embedding, [1.0, 0.0, 0.0]) > 0.9",
+        1,
+    )
+    .expect("query failed");
+    let linal::dsl::DslOutput::Table(ds) = out else {
+        panic!("expected inline Table")
+    };
+    let id_col = ds.schema.get_field_index("id").unwrap();
+    let mut ids: Vec<i64> = ds
+        .rows
+        .iter()
+        .map(|r| match r.values[id_col] {
+            linal::core::value::Value::Int(i) => i,
+            _ => panic!("expected Int id"),
+        })
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec![1, 3],
+        "expected exactly rows 1 and 3 to pass the threshold"
+    );
+}
+
+/// End-to-end SAVE/LOAD round trip for an HNSW index: a *fresh* engine
+/// (standing in for a process restart, same pattern as
+/// `test_index_definitions_survive_save_and_load`) must recover both the
+/// index definition and the persisted graph itself (not just rebuild it),
+/// confirmed via `"from snapshot"` appearing in the LOAD output.
+#[test]
+fn hnsw_index_snapshot_survives_save_and_load() {
+    let mut db = TensorDb::new();
+
+    const DIM: usize = 4;
+    const PER_CLUSTER: usize = 40;
+    const NUM_CLUSTERS: usize = 3;
+
+    let mut script = String::from("DATASET hnsw_persist COLUMNS (id: Int, embedding: Vector(4))\n");
+    for axis in 0..NUM_CLUSTERS {
+        for j in 0..PER_CLUSTER {
+            let mut v = [0.0f32; DIM];
+            v[axis] = 1.0;
+            v[(axis + 1) % DIM] += 0.01 * (j as f32 / PER_CLUSTER as f32);
+            let row_id = axis * PER_CLUSTER + j;
+            script.push_str(&format!(
+                "INSERT INTO hnsw_persist VALUES ({}, [{}])\n",
+                row_id,
+                v.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    // CREATE INDEX after the rows exist -- see the ordering note in
+    // `hnsw_index_accelerates_top_k_search` above; here it matters even
+    // more directly since this test asserts a non-trivial graph was
+    // actually persisted and restored, not an empty/never-built one.
+    script.push_str("CREATE VECTOR INDEX ON hnsw_persist(embedding) USING HNSW\n");
+    script.push_str("SAVE DATASET hnsw_persist\n");
+    linal::dsl::execute_script(&mut db, &script).expect("setup script failed");
+
+    let mut db2 = TensorDb::new();
+    let output = linal::dsl::execute_line(&mut db2, "LOAD DATASET hnsw_persist", 1)
+        .expect("load failed")
+        .to_string();
+    assert!(
+        output.contains("indices restored on"),
+        "expected load output to mention restored indices, got: {}",
+        output
+    );
+    assert!(
+        output.contains("from snapshot"),
+        "expected the HNSW graph to be restored from its persisted snapshot rather than \
+         rebuilt from scratch, got: {}",
+        output
+    );
+
+    let indices = db2.list_indices();
+    assert!(indices
+        .iter()
+        .any(|(ds, col, ty)| ds == "hnsw_persist" && col == "embedding" && ty == "VECTOR (HNSW)"));
+
+    let mut query_vec = [0.0f32; DIM];
+    query_vec[2] = 1.0;
+    let query = format!(
+        "SEARCH hnsw_persist ON embedding QUERY [{}] LIMIT 5",
+        query_vec
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let out = linal::dsl::execute_line(&mut db2, &query, 2).expect("search failed");
+    let linal::dsl::DslOutput::Table(ds) = out else {
+        panic!("expected inline Table")
+    };
+    assert_eq!(ds.len(), 5);
+    let id_col = ds.schema.get_field_index("id").unwrap();
+    let expected_range = (2 * PER_CLUSTER as i64)..(3 * PER_CLUSTER as i64);
+    for row in &ds.rows {
+        let linal::core::value::Value::Int(id) = row.values[id_col] else {
+            panic!("expected Int id")
+        };
+        assert!(
+            expected_range.contains(&id),
+            "expected every result post-reload to belong to cluster axis=2, got id {}",
+            id
+        );
+    }
+
+    let _ = std::fs::remove_dir_all("./data/default/datasets/hnsw_persist");
+}

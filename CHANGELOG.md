@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — optional `faer-matmul` Cargo feature (faster dense matmul kernel)
+
+A real benchmark (`benches/matmul_backend.rs`, this phase's required gate per
+`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 4) compared the engine's existing hand-rolled,
+Rayon-parallelized dense matmul kernel against `faer`'s GEMM at square-matrix sizes 50, 200,
+500, and 1000 -- representative of real usage on this engine, not ML-training scale. `faer` won
+meaningfully at every size tested, including the smallest (50x50: ~7.9x faster), growing to
+~22x faster at 1000x1000 -- not a "only wins at huge N" result. `faer` is now an optional
+dependency, linked in only when the new `faer-matmul` feature is enabled
+(`cargo build --features faer-matmul`); the default build is completely unaffected. `faer` was
+chosen over an OpenBLAS-style backend specifically because it's pure Rust with no C/Fortran
+toolchain requirement, preserving this repo's existing "no system library dependency" build
+property (vendored HDF5, `rustls-tls`) -- an OpenBLAS-style backend would have reintroduced
+exactly that. `matmul_with_timestamp`'s existing shape/dimension validation and `Tensor::new`
+construction are unchanged; only the numeric kernel itself is swappable
+(`matmul_data_builtin` vs. `matmul_data_faer`). Not part of the default build or CI's test
+matrix (same as the pre-existing `zero-copy`/`experimental` features); validated locally with
+`--features faer-matmul` against the existing `engine_matrix_ops.rs`/`dsl_matrix_ops.rs`
+integration suites (including transposed/strided inputs) before landing.
+
+This closes out `PERFORMANCE_OPTIMIZATION_PLAN.md`'s four phases (HNSW vector index,
+provenance log pruning, `?format=arrow`, and this).
+
+### Added — `POST /execute?format=arrow` (binary Arrow IPC response)
+
+A real benchmark (`benches/server_transport.rs`, added as this phase's required gate per
+`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 3) measured Arrow IPC encoding at ~80-180x faster and
+~2.4x smaller on the wire than JSON for a representative bulk query result (10,000 rows × a
+`Vector(128)` embedding column) -- a real, non-trivial cost, not a guess. `?format=arrow` is a
+new, additive third option on `POST /execute` (alongside the existing default `toon` and opt-in
+`json`): a binary Arrow IPC stream (`Content-Type: application/vnd.apache.arrow.stream`,
+`dataset_to_arrow_ipc_bytes` reusing the same `dataset_to_record_batch` conversion `/delivery`'s
+Parquet export already trusts) for a successful `DslOutput::Table` result specifically. Any
+other case under `?format=arrow` (an execution error, or a non-tabular success like a bare
+`Message`/`Tensor`) falls back to a JSON body instead of erroring or returning meaningless
+bytes. No existing behavior changes -- `toon` stays the default, `json` is untouched.
+
+**Also surfaced, unexpectedly, by the same benchmark**: the actual production default (`toon`)
+is itself substantially slower and larger on the wire than even the legacy `json` path for the
+same payload -- ~426ms/30MB vs `json`'s ~36ms/13MB vs `arrow`'s ~233µs/5.5MB at 10,000 rows.
+This is reported here as a measured fact, not fixed or asserted to be a bug: `toon`'s design
+goal is believed to be LLM-facing token efficiency (see `clients/CONTRACT.md`), not wire/CPU
+efficiency, so whether this cost is acceptable given that goal is a product judgment call left
+to the maintainer.
+
+### Added — `PRUNE LINEAGE BEFORE <timestamp>` (provenance log pruning)
+
+`core::provenance::ProvenanceStore` has been append-only since it was introduced, with no way
+to shrink `provenance.jsonl` -- a real gap for long-running or edge deployments where that log
+would otherwise grow unbounded. `PRUNE LINEAGE BEFORE "<RFC3339 timestamp>"` removes records
+older than the given cutoff, but **never** a record still needed to resolve `EXPLAIN LINEAGE`
+for a currently-live tensor or dataset, computed via a real reachability walk
+(`ProvenanceStore::prune_before`/`reachable_indices`, reusing `resolve_ancestry`'s exact
+producer-resolution logic) from every tensor/dataset that exists right now — not a blind
+time-window truncation. A record that's old enough to prune but still reachable from something
+live is kept and reported separately (`PruneReport::retained_because_live`), so the DSL output
+message always says exactly what happened (`"Pruned N of M ... (K retained because a live
+tensor/dataset's lineage still needs them; J remain)."`) instead of silently overclaiming a
+full prune. A malformed timestamp is a loud parse error. The pruned log is persisted back to
+`provenance.jsonl` as a full rewrite (the only place this module does that; everywhere else
+only ever appends).
+
+See `PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 2. Also corrects that plan's own framing of the
+original proposal: pruning was motivated there by the engine's separate 100MB
+per-execution-memory limit, which is an unrelated subsystem from the on-disk provenance file —
+the real motivation is disk growth, not that memory limit.
+
+### Added — HNSW vector index (`CREATE VECTOR INDEX ... USING HNSW`)
+
+`core::index::vector::VectorIndex`'s own doc comment has said "linear scan for MVP, HNSW
+later" since it was written — this closes that gap. `CREATE VECTOR INDEX ON <dataset>(<col>)
+USING HNSW` opts a column into an HNSW (Hierarchical Navigable Small World) graph index
+(`core::index::hnsw::HnswIndex`, backed by the `instant-distance` crate) instead of the
+default IVF-clustered `VectorIndex` — explicit opt-in, the plain `CREATE VECTOR INDEX` form
+is completely unchanged. Only accelerates top-k similarity search (`SEARCH ... LIMIT k` /
+`VectorSearchExec`): unlike IVF's spherical-cap clusters, an HNSW graph traversal has no
+cheap provable bound on what it might have skipped, so it cannot safely accelerate an
+*exact* predicate (`WHERE COSINE_SIM(...) > threshold`, `SimilarityJoinExec`) the way IVF
+does — those paths stay `VectorIndex`-only, and an HNSW-only-indexed column simply falls
+back to a full scan+filter for that shape (still correct, just unaccelerated, consistent with
+this planner's existing "recognize the shape or don't accelerate, never error" philosophy).
+
+Below `MIN_VECTORS_TO_INDEX` (16) vectors, `build()` leaves the graph unset and both search
+paths fall brute-force, mirroring `VectorIndex`'s own `MIN_VECTORS_TO_CLUSTER` (64) fallback.
+Vectors added after the last `build()` sit in an "unindexed tail" that's always additionally
+scanned, so correctness never depends on `build()` having (re-)run recently — same guarantee
+`VectorIndex` already gives. `SAVE DATASET`/`LOAD DATASET` persist and restore the built
+graph itself (`hnsw_index_graphs.json`, content-hash-invalidated exactly like
+`vector_index_clusters.json`), so a reload never has to pay for graph construction again
+unless the underlying column actually changed. `EXPLAIN` reports which index type (`Vector`,
+`Hnsw`, or none) a `SEARCH` will actually use at plan time.
+
+Chosen over the `hnsw`/`hnsw_rs` alternatives for being pure Rust with no
+C/system-library dependency (`instant-distance` only pulls in `rayon`/`parking_lot`/`rand`/
+`num_cpus`/`ordered-float`, all already-familiar pure-Rust dependency shapes) — consistent
+with this repo's existing build philosophy (vendored HDF5, `rustls-tls`). See
+`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 1.
+
 ## [0.1.86] - 2026-09-19
 
 ### Fixed — `USE <db>` combined with `X-Linal-Database` silently no-op'd over `/execute` and `/jobs`

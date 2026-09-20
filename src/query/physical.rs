@@ -160,6 +160,12 @@ pub struct VectorSearchExec {
     pub column: String,
     pub query: crate::core::tensor::Tensor,
     pub k: usize,
+    /// Which index type the planner found on `column` at plan time (`None`
+    /// if there wasn't one yet) -- purely for `EXPLAIN`'s benefit, so it can
+    /// report whether HNSW, IVF, or no acceleration will actually be used
+    /// without having to execute the query. `execute()` re-resolves the
+    /// real index itself and doesn't trust this field.
+    pub resolved_index_type: Option<String>,
 }
 
 impl PhysicalPlan for VectorSearchExec {
@@ -176,7 +182,14 @@ impl PhysicalPlan for VectorSearchExec {
             ))
         })?;
 
-        if index.index_type() != crate::core::index::IndexType::Vector {
+        // Top-k search is the one path an HNSW-backed index can safely
+        // accelerate too (unlike the exact-predicate paths below, which stay
+        // IVF-`Vector`-only -- see `core::index::hnsw::HnswIndex`'s doc
+        // comment).
+        if !matches!(
+            index.index_type(),
+            crate::core::index::IndexType::Vector | crate::core::index::IndexType::Hnsw
+        ) {
             return Err(EngineError::InvalidOp(format!(
                 "Index on '{}' is not a VECTOR index",
                 self.column

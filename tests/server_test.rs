@@ -262,6 +262,112 @@ async fn test_invalid_format_defaults_to_toon() {
     let body = resp.text().await.expect("Failed to get body");
     assert!(body.contains("status: ok"));
 }
+
+/// `?format=arrow` (`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 3): a real
+/// `Table` result comes back as genuine binary Arrow IPC, decodable by a
+/// real `arrow` reader -- not just "some bytes with the right header".
+#[tokio::test]
+async fn test_arrow_format_table_result() {
+    let db = Arc::new(RwLock::new(TensorDb::new()));
+    let port = 8103;
+    let db_clone = db.clone();
+
+    tokio::spawn(async move {
+        start_server(db_clone, port).await;
+    });
+    sleep(Duration::from_millis(1000)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{}/execute", port);
+
+    for stmt in [
+        "DATASET arrow_fmt_t COLUMNS (id: Int, val: Float)",
+        "INSERT INTO arrow_fmt_t VALUES (1, 1.5)",
+        "INSERT INTO arrow_fmt_t VALUES (2, 2.5)",
+    ] {
+        let resp = client
+            .post(&base)
+            .header("Content-Type", "text/plain")
+            .body(stmt)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "setup statement failed: {stmt}");
+    }
+
+    let resp = client
+        .post(format!("{}?format=arrow", base))
+        .header("Content-Type", "text/plain")
+        .body("SELECT * FROM arrow_fmt_t")
+        .send()
+        .await
+        .expect("Failed to send request");
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/vnd.apache.arrow.stream"
+    );
+
+    let bytes = resp.bytes().await.expect("Failed to get body");
+    let cursor = std::io::Cursor::new(bytes.as_ref());
+    let reader =
+        arrow::ipc::reader::StreamReader::try_new(cursor, None).expect("valid Arrow IPC stream");
+    let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 2,
+        "expected both inserted rows in the Arrow stream"
+    );
+
+    let schema = batches[0].schema();
+    assert!(schema.field_with_name("id").is_ok());
+    assert!(schema.field_with_name("val").is_ok());
+}
+
+/// A non-tabular result under `?format=arrow` (nothing Arrow-shaped to
+/// encode) falls back to a JSON body rather than erroring or returning
+/// meaningless bytes -- consistent with this endpoint's existing
+/// error-always-falls-back-to-JSON convention regardless of requested
+/// format.
+#[tokio::test]
+async fn test_arrow_format_falls_back_to_json_for_non_tabular_result() {
+    let db = Arc::new(RwLock::new(TensorDb::new()));
+    let port = 8104;
+    let db_clone = db.clone();
+
+    tokio::spawn(async move {
+        start_server(db_clone, port).await;
+    });
+    sleep(Duration::from_millis(1000)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://localhost:{}/execute?format=arrow", port))
+        .header("Content-Type", "text/plain")
+        .body("VECTOR v = [1, 2, 3]")
+        .send()
+        .await
+        .expect("Failed to send request");
+
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json"),
+        "expected a JSON fallback for a non-tabular result under ?format=arrow"
+    );
+    let body: serde_json::Value = resp.json().await.expect("valid JSON fallback body");
+    assert_eq!(body["status"], "ok");
+}
+
 #[tokio::test]
 async fn test_server_validation_empty() {
     let db = Arc::new(RwLock::new(TensorDb::new()));

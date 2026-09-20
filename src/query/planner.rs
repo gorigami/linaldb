@@ -135,12 +135,19 @@ impl<'a> Planner<'a> {
                             schema,
                         } = input.as_ref()
                         {
+                            let resolved_index_type = self
+                                .db
+                                .get_dataset(dataset_name)
+                                .ok()
+                                .and_then(|ds| ds.get_index(column))
+                                .map(|idx| format!("{:?}", idx.index_type()));
                             Ok(Box::new(VectorSearchExec {
                                 dataset_name: dataset_name.clone(),
                                 schema: schema.clone(),
                                 column: column.clone(),
                                 query: query.clone(),
                                 k: *k,
+                                resolved_index_type,
                             }))
                         } else {
                             Err(EngineError::InvalidOp(
