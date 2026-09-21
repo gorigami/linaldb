@@ -3,9 +3,10 @@
 R client for [LINALDB](../../README.md) — a SQL-inspired analytical
 engine treating vectors, matrices, and tensors as first-class citizens.
 
-**Status**: functional through checkpoint 5 of
-[`PYTHON_R_INTEROP_PLAN.md`](../../PYTHON_R_INTEROP_PLAN.md) — `/execute`
-and `/delivery` are both implemented and tested against a real server
+**Status**: functional through checkpoint 5 of `PYTHON_R_INTEROP_PLAN.md`
+(completed and removed from the repo root once all its checkpoints
+landed) — `/execute` and `/delivery` are both implemented and tested
+against a real server
 (55 passing `testthat` tests, including a full `R CMD check` pass, plus a
 real end-to-end example, see below). Not yet published to CRAN — the
 non-standard license string in `DESCRIPTION` needs resolving first, see
@@ -59,8 +60,8 @@ roxygen2::roxygenise(".")
 ```
 
 To validate the way CRAN would (catches real issues `load_all()`-only
-testing can miss — see checkpoint 3's findings in
-`PYTHON_R_INTEROP_PLAN.md`):
+testing can miss — per checkpoint 3's findings during the now-completed
+`PYTHON_R_INTEROP_PLAN.md` effort):
 
 ```sh
 R CMD build --no-build-vignettes .

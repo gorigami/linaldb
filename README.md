@@ -190,7 +190,7 @@ export). See [`clients/CONTRACT.md`](clients/CONTRACT.md) for the wire
 contract both implement against.
 
 ```python
-# pip install -e clients/python (not yet published to PyPI)
+# pip install linaldb-server
 import linaldb_server as linaldb
 
 client = linaldb.connect("http://localhost:8080")
@@ -214,7 +214,7 @@ SQLite." Saved datasets are read straight off disk instead of over
 for the result shapes.
 
 ```python
-# maturin develop (from clients/python-embedded; not yet published to PyPI)
+# pip install linaldb
 import linaldb
 
 db = linaldb.Db()  # persists to ./data, exactly like the CLI

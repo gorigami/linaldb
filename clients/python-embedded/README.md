@@ -17,7 +17,7 @@ pip install linaldb
 
 ## Status
 
-Nine releases on PyPI so far, `0.1.0` through `0.1.8` — most bumped purely
+14 releases on PyPI so far, `0.1.0` through `0.1.14` — most bumped purely
 to pick up a real engine fix (this crate has no code of its own beyond
 the PyO3 bindings), each found via genuine end-to-end testing against
 real data in the `linal-hub` sibling project rather than isolated unit
