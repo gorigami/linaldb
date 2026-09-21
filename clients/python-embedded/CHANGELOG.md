@@ -4,6 +4,18 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.14] - 2026-09-21
+
+Picks up the root engine's `v0.1.89` (linked directly in via the `linal` path dependency): a
+real bug fix found via `linal-hub` (`05_lineage_and_linear_algebra.ipynb`) while building a
+`PRUNE LINEAGE` demonstration. Two different tensor operations producing byte-identical output
+content (the same deterministic transform run twice on the same input — not rare) used to be
+indistinguishable to `EXPLAIN LINEAGE`'s content-hash-based ancestry resolution, since tensor
+outputs (unlike dataset outputs) were never recorded with a name. Invisible via `EXPLAIN
+LINEAGE` alone, but `PRUNE LINEAGE` (v0.1.87) could delete a still-live tensor's *true* original
+provenance record while keeping an unrelated look-alike. Fixed by naming tensor outputs the
+same way dataset outputs and tensor inputs already were. No Python-side code change.
+
 ## [0.1.13] - 2026-09-20
 
 Picks up the root engine's `v0.1.88` (linked directly in via the `linal` path

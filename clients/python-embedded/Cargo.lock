@@ -2012,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "linal"
-version = "0.1.88"
+version = "0.1.89"
 dependencies = [
  "arrow",
  "arrow-csv",
@@ -2051,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "linal-python"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "linal",
  "pyo3",
