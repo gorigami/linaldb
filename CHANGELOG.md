@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — content-hash-collision misattribution in tensor provenance (`EXPLAIN LINEAGE`/`PRUNE LINEAGE`)
+
+`DatabaseInstance::record_tensor_provenance` (and the separate multi-output `eval_linalg_multi`
+path used by `QR`/`LU`/`EIGEN`/`SVD`) always recorded a tensor's *output* provenance entity with
+`name: None`, unlike dataset outputs (`ProvenanceEntity::dataset` requires a name unconditionally).
+`ProvenanceStore::find_producer_before`'s existing by-name disambiguation therefore never engaged
+for tensors: when two *different* operations happened to produce byte-identical output content
+(the same deterministic transform run twice on the same input, e.g. -- not rare), resolution fell
+through to "most recent record with this hash wins," which could attribute an entity's ancestry to
+an unrelated record. Invisible via `EXPLAIN LINEAGE` alone (colliding records share identical
+operation-name/content text), but `PRUNE LINEAGE` (v0.1.87) is the first consumer where this
+became consequential: it could delete a still-live tensor's *true* original provenance record
+while keeping an unrelated look-alike in its place.
+
+Found via `linal-hub` (`05_lineage_and_linear_algebra.ipynb`) while building a real
+end-to-end `PRUNE LINEAGE` demonstration, reported there rather than silently worked around, and
+fixed here: tensor outputs are now named the same way dataset outputs and tensor *inputs* already
+are, at every `eval_*` call site (~25 in `engine/db.rs`) plus the separate multi-output path
+(which also wasn't naming its *input* entity, a related gap fixed alongside it). New regression
+tests reproduce the exact collision end-to-end through real DSL execution (not a hand-built
+`ProvenanceStore`) for both the single- and multi-output paths, each confirmed to genuinely fail
+without the fix before being confirmed to pass with it.
+
+Also corrects `find_producer`'s own doc comment, which previously conflated this (common,
+same-content-from-different-operations) case with a genuine SHA256 collision between different
+content (rare) -- the wrong framing that let the gap go unnoticed since
+`LINEAGE_AND_LINALG_PLAN.md`'s original design.
+
 ## [0.1.88] - 2026-09-20
 
 ### Fixed — `PRUNE LINEAGE` failed on a database with no data dir yet

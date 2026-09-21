@@ -258,8 +258,16 @@ impl ProvenanceStore {
     }
 
     /// Most recent record whose `outputs` include an entity with this content
-    /// hash (most-recent-wins in case of a hash collision across distinct
-    /// operations, which SHA256 makes practically impossible anyway).
+    /// hash. "most-recent-wins" is a real, load-bearing tiebreak here, not a
+    /// hypothetical: two *different* operations producing byte-identical
+    /// content is common (the same deterministic transform run twice on the
+    /// same input, e.g. -- genuinely equal output, not a SHA256 collision
+    /// between different content, which is a separate and actually-rare
+    /// concern this note used to conflate this with). `find_producer_before`
+    /// is what most real ancestry walks (`resolve_ancestry`,
+    /// `ProvenanceStore::reachable_indices`) actually use, since it also
+    /// disambiguates by name when the entity being resolved has one -- see
+    /// its own doc comment.
     pub fn find_producer(&self, content_hash: &str) -> Option<&ProvenanceRecord> {
         self.records
             .iter()
@@ -297,6 +305,25 @@ impl ProvenanceStore {
     /// over a more-recent hash-only match. Content hash stays the primary,
     /// restart-survivable key (per the locked design); name is only a
     /// tiebreaker among candidates that already match on hash.
+    ///
+    /// **Known remaining gap, found while testing the fix above (not fixed
+    /// here -- reported, narrower in practice than the bug that motivated
+    /// this whole disambiguation)**: resolving a bare *input* reference that
+    /// was never itself recorded as any record's output (a literal
+    /// `VECTOR`/`MATRIX`, a genuine root) still falls through to the
+    /// hash-only search if its content happens to coincidentally equal some
+    /// unrelated operation's real output (e.g. `QR` of an already-upper-
+    /// triangular matrix returns `R` byte-identical to the input) -- the
+    /// by-name tiebreak can't help, since a literal is never anyone's
+    /// *named* output to match against. The practical consequence is
+    /// cosmetic (`EXPLAIN LINEAGE` on the literal fabricates a "producer"
+    /// for what's actually a root) rather than data loss, since
+    /// `PRUNE LINEAGE`'s reachability walk treats the spurious match as
+    /// reachable rather than removing anything real. Distinguishing "was
+    /// this content ever truly produced" from "does some byte-identical
+    /// content exist elsewhere" would need each entity to carry a real
+    /// "is this a root" flag, not inferred from the absence of a matching
+    /// record.
     fn find_producer_before(
         &self,
         entity: &ProvenanceEntity,
@@ -593,6 +620,57 @@ mod tests {
         assert_eq!(big_tree.inputs[0].operation, "IMPORT csv");
     }
 
+    /// Regression test for a real bug found via `linal-hub` (engine v0.1.87's
+    /// `PRUNE LINEAGE`, `05_lineage_and_linear_algebra.ipynb`): unlike dataset
+    /// outputs (`ProvenanceEntity::dataset` requires a name, see the test
+    /// above), tensor outputs used to always be recorded with `name: None`
+    /// (`DatabaseInstance::record_tensor_provenance`), so this exact
+    /// disambiguation never engaged for tensors -- two different operations
+    /// producing byte-identical content (e.g. the same deterministic
+    /// transform run twice under different `LET` bindings) could be
+    /// misattributed to each other's record, most-recent-wins. Fixed by
+    /// naming tensor outputs too.
+    #[test]
+    fn resolve_ancestry_disambiguates_tensor_outputs_by_name_on_hash_collision() {
+        let root = crate::core::provenance::ProvenanceEntity::tensor(TensorId::new(), None, "h0");
+
+        let mut store = ProvenanceStore::new();
+        store.append(
+            ProvenanceRecord::new("SCALE(by=2.0000)", ExecutionId::new())
+                .with_inputs(vec![root.clone()])
+                .with_outputs(vec![crate::core::provenance::ProvenanceEntity::tensor(
+                    TensorId::new(),
+                    Some("keeper".to_string()),
+                    "h1",
+                )]),
+        );
+        // A later, unrelated operation that happens to produce byte-identical
+        // output content -- the real-world trigger (same deterministic op,
+        // same input, different binding).
+        store.append(
+            ProvenanceRecord::new("SCALE(by=2.0000)", ExecutionId::new())
+                .with_inputs(vec![root])
+                .with_outputs(vec![crate::core::provenance::ProvenanceEntity::tensor(
+                    TensorId::new(),
+                    Some("orphan".to_string()),
+                    "h1", // identical content to "keeper"'s output
+                )]),
+        );
+
+        let keeper_tree =
+            store.resolve_ancestry(&crate::core::provenance::ProvenanceEntity::tensor(
+                TensorId::new(),
+                Some("keeper".to_string()),
+                "h1",
+            ));
+        assert_eq!(
+            keeper_tree.execution_id,
+            Some(store.records[0].execution_id),
+            "resolving 'keeper' must attribute it to its own (first, chronologically earlier) \
+             record, not the later 'orphan' record that happens to share its content hash"
+        );
+    }
+
     #[test]
     fn resolve_ancestry_of_unknown_hash_is_root() {
         let store = ProvenanceStore::new();
@@ -749,5 +827,60 @@ mod tests {
         assert_eq!(report.total_after, 1);
         assert_eq!(report.retained_because_live, 1);
         assert_eq!(store.records()[0].outputs[0].content_hash(), "still-live");
+    }
+
+    /// Regression test for the same real bug as
+    /// `resolve_ancestry_disambiguates_tensor_outputs_by_name_on_hash_collision`,
+    /// at the `prune_before` level specifically -- this is where the
+    /// misattribution became consequential (real deletion), not just a
+    /// cosmetic `EXPLAIN LINEAGE` inaccuracy. "keeper" is live; "orphan" is
+    /// not (its name was never live / already superseded). Before the fix,
+    /// pruning could delete "keeper"'s own true record (the chronologically
+    /// earlier of the two identical-hash records) while keeping "orphan"'s.
+    #[test]
+    fn prune_before_does_not_misattribute_and_delete_a_live_tensors_true_record_on_hash_collision()
+    {
+        let mut store = ProvenanceStore::new();
+        store.append(record_at(
+            "SCALE(by=2.0000)",
+            days_ago(10),
+            vec![],
+            vec![crate::core::provenance::ProvenanceEntity::tensor(
+                TensorId::new(),
+                Some("keeper".to_string()),
+                "h1",
+            )],
+        ));
+        store.append(record_at(
+            "SCALE(by=2.0000)",
+            days_ago(9),
+            vec![],
+            vec![crate::core::provenance::ProvenanceEntity::tensor(
+                TensorId::new(),
+                Some("orphan".to_string()),
+                "h1", // identical content to "keeper"'s output
+            )],
+        ));
+
+        // Only "keeper" is live -- "orphan" is not among the live roots.
+        let live = vec![crate::core::provenance::ProvenanceEntity::tensor(
+            TensorId::new(),
+            Some("keeper".to_string()),
+            "h1",
+        )];
+        let report = store.prune_before(days_ago(1), &live);
+
+        assert_eq!(report.total_before, 2);
+        assert_eq!(
+            report.pruned, 1,
+            "exactly the genuinely-unreachable 'orphan' record should be pruned"
+        );
+        assert_eq!(store.records().len(), 1);
+        assert_eq!(
+            store.records()[0].outputs[0].name(),
+            Some("keeper"),
+            "the record kept must be 'keeper's own true record, not 'orphan's -- before the \
+             fix, most-recent-wins hash resolution could keep the wrong one"
+        );
     }
 }

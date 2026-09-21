@@ -777,7 +777,11 @@ OpenLineage mapping was clean.
   `provenance.jsonl` as a full rewrite (`save_jsonl`) -- the only place in this module that
   overwrites rather than appends. `PruneReport` distinguishes records actually removed from
   records that were stale but kept anyway because a live root still needs them, so the DSL
-  output message never overclaims what happened.
+  output message never overclaims what happened. Depends on tensor *output* entities being
+  named the same way dataset outputs and every entity's *inputs* already are (fixed alongside
+  `PRUNE LINEAGE` shipping, see `record_tensor_provenance`'s doc comment) -- without that, two
+  operations producing byte-identical content could be resolved to the wrong record, letting
+  a still-live entity's true producer be deleted while an unrelated look-alike survived.
 - **Tensor ops** (`eval_unary`/`eval_binary`/`eval_matmul`/... in
   `engine/db.rs`) still attach the lightweight `core::tensor::Lineage` to
   `TensorMetadata` for the in-memory fast path, *and* record into the same
