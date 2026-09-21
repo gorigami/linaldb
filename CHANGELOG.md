@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.89] - 2026-09-21
+
 ### Fixed — content-hash-collision misattribution in tensor provenance (`EXPLAIN LINEAGE`/`PRUNE LINEAGE`)
 
 `DatabaseInstance::record_tensor_provenance` (and the separate multi-output `eval_linalg_multi`
