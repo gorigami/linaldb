@@ -113,10 +113,24 @@ impl DatabaseInstance {
     /// tensor and dataset ops now emit into one store instead of two. Reuses
     /// `lineage`'s `operation`/`inputs`/`execution_id` directly so each call
     /// site only adds one line, not a re-derivation of data already at hand.
+    ///
+    /// `output_name` is the real binding name this tensor is about to be
+    /// registered under (every caller has one in scope already, since it's
+    /// what they're about to `self.names.insert` right after this call) --
+    /// required, not optional, so the output entity is named the same way
+    /// an input entity already is (see the lookup below). Fixes a real,
+    /// found-via-linal-hub bug: two different operations that happen to
+    /// produce byte-identical output content were indistinguishable by
+    /// content hash alone, so `find_producer_before`'s "most recent hash
+    /// match wins" fallback could misattribute (and, for `PRUNE LINEAGE`,
+    /// delete) the wrong record. Naming the output closes this the same
+    /// way dataset outputs (`ProvenanceEntity::dataset`, name required,
+    /// never `Option`) were never vulnerable to it in the first place.
     fn record_tensor_provenance(
         &mut self,
         tensor: &Tensor,
         lineage: &crate::core::tensor::Lineage,
+        output_name: &str,
     ) {
         let mut inputs = Vec::with_capacity(lineage.inputs.len());
         for id in &lineage.inputs {
@@ -135,7 +149,7 @@ impl DatabaseInstance {
         }
         let output = crate::core::provenance::ProvenanceEntity::tensor(
             tensor.id,
-            None,
+            Some(output_name.to_string()),
             tensor.data_hash().to_string(),
         );
         let record = crate::core::provenance::ProvenanceRecord::new(
@@ -1607,11 +1621,12 @@ impl DatabaseInstance {
             inputs: vec![in_tensor.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind, // hereda el modo del input
@@ -1717,15 +1732,17 @@ impl DatabaseInstance {
                 Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage));
         }
 
+        let output_name = output_name.into();
+
         // `result_tensor.metadata.lineage` is guaranteed `Some` here: either
         // set inline (Distance) or by the catch-all just above.
         if let Some(lineage) = result_tensor.metadata.lineage.clone() {
-            self.record_tensor_provenance(&result_tensor, &lineage);
+            self.record_tensor_provenance(&result_tensor, &lineage, &output_name);
         }
 
         let out_id = self.store.insert_existing_tensor(result_tensor)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: out_kind,
@@ -1765,7 +1782,8 @@ impl DatabaseInstance {
             inputs: vec![a.id, b.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_kind = match (kind_a, kind_b) {
             (TensorKind::Strict, _) | (_, TensorKind::Strict) => TensorKind::Strict,
@@ -1774,7 +1792,7 @@ impl DatabaseInstance {
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: out_kind,
@@ -1807,11 +1825,12 @@ impl DatabaseInstance {
             inputs: vec![in_tensor.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -1908,11 +1927,12 @@ impl DatabaseInstance {
             metadata,
         )
         .map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -1942,11 +1962,12 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -1980,11 +2001,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, Shape::new(vec![n]), x, metadata)
             .map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: kind_a,
@@ -2019,11 +2041,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, Shape::new(vec![n]), x, metadata)
             .map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: kind_a,
@@ -2056,11 +2079,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, Shape::new(vec![n]), eigenvalues, metadata)
             .map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2092,11 +2116,12 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2141,21 +2166,29 @@ impl DatabaseInstance {
 
         let mut output_entities = Vec::with_capacity(outputs_data.len());
         let mut tensors = Vec::with_capacity(outputs_data.len());
-        for (data, shape) in outputs_data {
+        for ((data, shape), name) in outputs_data.into_iter().zip(output_names) {
             let new_id = self.store.gen_id();
             let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
             let t = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
+            // Named the same way a single-output eval_*/record_tensor_provenance
+            // output now is -- see that method's doc comment for why this
+            // matters (a real content-hash-collision misattribution bug,
+            // found via linal-hub, that this multi-output path had too).
             output_entities.push(crate::core::provenance::ProvenanceEntity::tensor(
                 t.id,
-                None,
+                Some(name.clone()),
                 t.data_hash().to_string(),
             ));
             tensors.push(t);
         }
 
+        // Also name the input (this path built it unnamed even before the
+        // bug above -- the single-output record_tensor_provenance path
+        // already looks this up via self.names; here input_name is already
+        // directly at hand, no lookup needed).
         let input_entity = crate::core::provenance::ProvenanceEntity::tensor(
             in_tensor.id,
-            None,
+            Some(input_name.to_string()),
             in_tensor.data_hash().to_string(),
         );
         let record = crate::core::provenance::ProvenanceRecord::new(op_name, ctx.execution_id())
@@ -2230,11 +2263,12 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2317,11 +2351,12 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2352,11 +2387,12 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2406,11 +2442,12 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, data, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2455,11 +2492,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, signal, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2501,11 +2539,12 @@ impl DatabaseInstance {
         };
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result = Tensor::new(new_id, shape, mag, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2572,11 +2611,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, spectrum, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2638,11 +2678,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, whitened, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: signal_kind,
@@ -2700,11 +2741,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, filtered, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: in_kind,
@@ -2766,11 +2808,12 @@ impl DatabaseInstance {
         let metadata = TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let result =
             Tensor::new(new_id, shape, correlation, metadata).map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: data_kind,
@@ -2814,11 +2857,12 @@ impl DatabaseInstance {
             inputs: tensors.iter().map(|t| t.id).collect(),
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names
-            .insert(output_name.into(), NameEntry { id: out_id, kind });
+            .insert(output_name, NameEntry { id: out_id, kind });
         Ok(())
     }
 
@@ -2931,11 +2975,12 @@ impl DatabaseInstance {
             inputs: vec![tensor.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names
-            .insert(output_name.into(), NameEntry { id: out_id, kind });
+            .insert(output_name, NameEntry { id: out_id, kind });
         Ok(())
     }
 
@@ -2961,11 +3006,12 @@ impl DatabaseInstance {
             inputs: vec![tensor.id],
         };
         result.metadata = Arc::new(TensorMetadata::new(new_id, None).with_lineage(lineage.clone()));
-        self.record_tensor_provenance(&result, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&result, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(result)?;
         self.names
-            .insert(output_name.into(), NameEntry { id: out_id, kind });
+            .insert(output_name, NameEntry { id: out_id, kind });
         Ok(())
     }
 
@@ -3021,11 +3067,12 @@ impl DatabaseInstance {
             crate::core::tensor::TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let tensor = crate::core::tensor::Tensor::new(new_id, shape, tensor_data, metadata)
             .map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&tensor, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&tensor, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(tensor)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: TensorKind::Normal,
@@ -3105,11 +3152,12 @@ impl DatabaseInstance {
             crate::core::tensor::TensorMetadata::new(new_id, None).with_lineage(lineage.clone());
         let tensor = crate::core::tensor::Tensor::new(new_id, shape, tensor_data, metadata)
             .map_err(EngineError::InvalidOp)?;
-        self.record_tensor_provenance(&tensor, &lineage);
+        let output_name = output_name.into();
+        self.record_tensor_provenance(&tensor, &lineage, &output_name);
 
         let out_id = self.store.insert_existing_tensor(tensor)?;
         self.names.insert(
-            output_name.into(),
+            output_name,
             NameEntry {
                 id: out_id,
                 kind: TensorKind::Normal,
