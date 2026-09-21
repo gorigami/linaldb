@@ -4,6 +4,26 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.13] - 2026-09-20
+
+Picks up the root engine's `v0.1.88` (linked directly in via the `linal` path
+dependency), which is `v0.1.87` plus one fix on top: `PRUNE LINEAGE` used to
+fail with `"No such file or directory"` on a fresh `Db()` whose data
+directory had never been created on disk yet (found via a real smoke test
+against this very binding while preparing this release) — now fixed.
+
+`v0.1.87` itself added: an HNSW vector index (`CREATE VECTOR INDEX ... USING
+HNSW`, additive opt-in alongside the existing IVF default, top-k `SEARCH`
+acceleration only), `PRUNE LINEAGE BEFORE <timestamp>` for provenance-log
+compaction, a `?format=arrow` binary Arrow IPC response option on `linal
+serve`'s `/execute` (server-only — no effect on this embedded binding, which
+never goes through the HTTP layer), and an optional `faer-matmul` Cargo
+feature for a faster dense matmul kernel (off by default; this package's own
+build doesn't enable it). No Python-side code change — this is a
+release-bump only, so `Db.execute()` picks up the new `CREATE VECTOR INDEX
+... USING HNSW` and `PRUNE LINEAGE` DSL statements through the same
+`execute_line` path already in place.
+
 ## [0.1.12] - 2026-09-17
 
 Picks up the root engine's `v0.1.85` (linked directly in via the `linal` path
