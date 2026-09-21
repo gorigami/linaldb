@@ -830,8 +830,11 @@ For remote execution and production workloads.
 request body with `Content-Type: text/plain` — not JSON. `/execute` additionally accepts
 a legacy `{"command": "..."}` JSON body, but it's deprecated (the server logs a
 deprecation warning on every use); prefer `text/plain`. Append `?format=json` for a JSON
-response on any of the three — the default response format is a plain-text "toon"
-encoding, not JSON. **`/schedule` (`POST`) is the exception**: it takes a real JSON body
+response, or `?format=arrow` for a binary Arrow IPC stream (a successful `Table` result
+only — anything else under `?format=arrow` falls back to the JSON body; see
+`clients/CONTRACT.md` §1 for the wire-level contract), on any of the three — the default
+response format is a plain-text "toon" encoding, not JSON. **`/schedule` (`POST`) is the
+exception**: it takes a real JSON body
 (`{"name": ..., "command": ..., "interval_secs": ..., "target_db": ...}`), since it's
 registering a task definition, not executing a command directly.
 

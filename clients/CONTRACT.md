@@ -2,10 +2,10 @@
 
 This is the contract both `clients/python/` and `clients/r/` implement
 against. It exists so the two implementations can be built independently
-(checkpoints 1-2 and 3-4 of `PYTHON_R_INTEROP_PLAN.md`) without silently
-drifting apart. If either client's actual behavior disagrees with this
-document, that's a bug in the client, the doc, or both — fix the
-disagreement, don't just pick one side.
+(checkpoints 1-2 and 3-4 of the now-completed `PYTHON_R_INTEROP_PLAN.md`
+effort) without silently drifting apart. If either client's actual
+behavior disagrees with this document, that's a bug in the client, the
+doc, or both — fix the disagreement, don't just pick one side.
 
 Everything here was verified directly against the server implementation
 (`src/server/mod.rs`, `src/core/storage.rs`) as of engine v0.1.74, not

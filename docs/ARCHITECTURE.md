@@ -260,9 +260,9 @@ The DSL module implements a full compiler-grade pipeline from source text to eng
 - `Expr` — expression sub-language, 25 variants as of v0.1.47 (see `src/dsl/ast.rs` for the current list): scalar/literal (`Ref`, `Int`, `Scalar`, `StringLit`, `Bool`, `VecLiteral`, `MatLiteral`), boolean/predicate (`Infix`, `And`, `Or`, `Not`, `IsNull`, `IsNotNull`, `In`, `Between`), structural (`Call`, `Index`, `Field`, `DatasetRef`), and SQL-surface (`Case`, `Coalesce`, `Nullif`, `ScalarFn`, `Cast`, `VectorFn`)
   - `Expr::VecLiteral` / `Expr::MatLiteral` — inline vector/matrix constants (`[v1, v2, ...]` / `[[r1c1, r1c2], ...]`) usable anywhere in a SQL expression
   - `Expr::Case` / `Expr::Coalesce` / `Expr::Nullif` / `Expr::Cast` — `CASE WHEN`, `COALESCE`, `NULLIF`/`IFNULL`, `CAST(expr AS type)` (including `CAST(... AS VECTOR(n)/MATRIX(r,c))` for in-query reshaping) — see DSL_REFERENCE.md §4
-  - `Expr::VectorFn` — one of eleven SQL-style vector/matrix functions (see `VectorFnKind`) usable in SELECT, WHERE, ORDER BY
-- `VectorFnKind` — `Normalize`, `L2Norm`, `CosineSim`, `Dot`, `VecAdd`, `VecScale` (v0.1.31), plus `Matmul`, `Transpose`, `MatShape`, `Flatten` (v0.1.40, for in-`SELECT` matrix operations — distinct from the standalone `CallExpr` keyword forms below), plus `Distance` (v0.1.62 — `DISTANCE(a, b)` as a SQL-callable form alongside the pre-existing standalone `DISTANCE a TO b` keyword; see `parser/expr.rs` below for why it needed its own dedicated parser arm)
-- `CallExpr` — 24 named-prefix operations as of v0.1.69: binary (`ADD`, `MATMUL`, `CORRELATE`, …), unary (`NORMALIZE`, `RESHAPE`, …), n-ary (`STACK`), plus the seven frequency-domain operations added in v0.1.63-69 (`Fft`, `Ifft`, `Magnitude`, `Psd { input, window }`, `Whiten { signal, psd }`, `Bandpass { input, low_hz, high_hz, sample_rate }`, `MatchedFilter { data, template }` — see `core::signal` under Core Module above)
+  - `Expr::VectorFn` — SQL-style vector/matrix functions (see `VectorFnKind`, exact count drifts every release) usable in SELECT, WHERE, ORDER BY
+- `VectorFnKind` — `Normalize`, `L2Norm`, `CosineSim`, `Dot`, `VecAdd`, `VecScale` (v0.1.31), plus `Matmul`, `Transpose`, `MatShape`, `Flatten` (v0.1.40, for in-`SELECT` matrix operations — distinct from the standalone `CallExpr` keyword forms below), plus `Distance` (v0.1.62 — `DISTANCE(a, b)` as a SQL-callable form alongside the pre-existing standalone `DISTANCE a TO b` keyword; see `parser/expr.rs` below for why it needed its own dedicated parser arm), plus the Complex-value accessors `Real`, `Imag`, `ComplexAbs`, `Phase`, `Conj`, `ComplexNew` added for the scalar `Complex` value type (exact count drifts every release — see the enum in `src/dsl/ast.rs` for the current, authoritative list)
+- `CallExpr` — named-prefix operations (exact count drifts every release — see the enum in `src/dsl/ast.rs` for the current, authoritative list): binary (`ADD`, `MATMUL`, `CORRELATE`, …), unary (`NORMALIZE`, `RESHAPE`, …), n-ary (`STACK`), the seven frequency-domain operations added in v0.1.63-69 (`Fft`, `Ifft`, `Magnitude`, `Psd { input, window }`, `Whiten { signal, psd }`, `Bandpass { input, low_hz, high_hz, sample_rate }`, `MatchedFilter { data, template }` — see `core::signal` under Core Module above), the classical linear-algebra operators (`Trace`, `Determinant`, `Rank`, `Inverse`, `Solve`, `Lstsq`, `Eigenvalues`, `EigenvaluesGeneral`, `Cholesky`, `Qr`, `Lu`, `Eigen`, `EigenGeneral`, `Svd`, `Pca` — see `core::linalg` above), and the statistical operators (`Variance`, `Median`, `Quantile`, `Covariance`, `CovarianceMatrix`)
 - `AggFuncAst` — aggregate functions: `Sum`, `Avg`, `Count`, `Min`, `Max`, `AvgVec`, `SumVec` (v0.1.31)
   - `AvgVec` / `SumVec` — element-wise vector aggregates for GROUP BY centroid queries
 - All types (`ColType`, `TensorKindAst`, `InfixOp`, `CmpOp`, `FilterValue`) are decoupled from engine internals; the executor maps them
@@ -402,28 +402,35 @@ HTTP server implementation built with **Axum**:
 
 ### 6. Client Bindings (`clients/`)
 
-Not part of the Rust crate — thin, no-compiled-extension HTTP clients in
-`clients/python/` (pip package `linaldb-server`) and `clients/r/` (R package
-`linaldb.server`), consuming exactly the two HTTP surfaces described above:
-`/execute` for ad-hoc DSL and `/delivery` for saved-dataset Parquet
-export. Both were built together against one shared wire-contract
-document, [`clients/CONTRACT.md`](../clients/CONTRACT.md) — written by
-inspecting real server responses (`curl`, and later each client's own
-integration tests against a real `linal serve` subprocess) rather than
-assumed from this document or the DSL reference alone, which caught
-several real discrepancies during development (see
-`PYTHON_R_INTEROP_PLAN.md`'s checkpoint notes, still in the repo root
-until all its checkpoints land, for the specifics — including three real
-server-side bugs this effort found and fixed: the two `/delivery`
-path-resolution issues noted above, and a severe one where `USE
-<database>` sent to `/execute` without the header had no lasting effect
-at all, also noted above).
+Two tiers, both outside the root Rust crate (standalone Cargo projects /
+language packages, not workspace members):
 
-Both clients are Tier A only (HTTP + Parquet, no compiled extension) by
-deliberate design choice — a deeper Tier B (in-process `pyo3`/`extendr`
-bindings with Arrow C Data Interface zero-copy handoff, no server
-process required) was scoped out as a distinct, later effort; see the
-plan file's design decisions for the reasoning.
+- **Tier A — thin HTTP clients**: no-compiled-extension clients in
+  `clients/python/` (pip package `linaldb-server`) and `clients/r/` (R
+  package `linaldb.server`), consuming exactly the two HTTP surfaces
+  described above: `/execute`/`/execute/batch` for ad-hoc DSL and
+  `/delivery` for saved-dataset Parquet export. Both were built together
+  against one shared wire-contract document,
+  [`clients/CONTRACT.md`](../clients/CONTRACT.md) — written by inspecting
+  real server responses (`curl`, and later each client's own integration
+  tests against a real `linal serve` subprocess) rather than assumed from
+  this document or the DSL reference alone, which caught several real
+  discrepancies during development, including three real server-side bugs
+  this effort found and fixed: the two `/delivery` path-resolution issues
+  noted above, and a severe one where `USE <database>` sent to `/execute`
+  without the header had no lasting effect at all, also noted above.
+  Published on PyPI (`linaldb-server`) / not yet published to CRAN
+  (`linaldb.server`) — see each client's own README for current release
+  status.
+- **Tier B — embedded native bindings**: `clients/python-embedded/` (pip
+  package `linaldb`, PyO3) and `clients/r-embedded/` (R package `linaldb`,
+  extendr) link `linal::engine::TensorDb`/`linal::dsl::execute_line`
+  directly into the host process — no server, no HTTP, no JSON, "use it
+  like SQLite." Governed by
+  [`clients/EMBEDDED_CONTRACT.md`](../clients/EMBEDDED_CONTRACT.md), the
+  in-process counterpart to `CONTRACT.md`. `clients/python-embedded` is
+  published on PyPI (`linaldb`); `clients/r-embedded` is not yet published
+  to CRAN (see `clients/CRAN_PUBLISHING_PLAN.md`).
 
 ### 7. Utils Module (`src/utils/`)
 
