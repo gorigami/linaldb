@@ -83,13 +83,11 @@ fn write_buffer(path: &Path, data: &[f32]) -> std::io::Result<()> {
 
 fn read_buffer(path: &Path) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    if bytes.len() % 4 != 0 {
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    if !rest.is_empty() {
         return Err(format!("{}: length is not a multiple of 4", path.display()));
     }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+    Ok(chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
 }
 
 /// The checkpoint to restore from: `checkpoint/`, or `checkpoint.old/` if a
