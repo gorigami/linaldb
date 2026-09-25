@@ -69,6 +69,12 @@ impl Parser {
                 self.advance();
                 ShowTarget::Pipelines
             }
+            // `SHOW BACKEND` -- a contextual keyword rather than a lexer token,
+            // so it only shadows a tensor/dataset literally named `BACKEND`.
+            Some(Token::Ident(_)) if self.at_ident("BACKEND") && self.peek_at(1).is_none() => {
+                self.advance();
+                ShowTarget::Backend
+            }
             Some(Token::Str(_)) => ShowTarget::StringLiteral(self.eat_str()?),
             Some(Token::Ident(_)) => ShowTarget::Named(self.eat_ident()?),
             _ => return Err(self.unexpected("a SHOW target")),

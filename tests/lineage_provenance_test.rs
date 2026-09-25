@@ -289,6 +289,7 @@ fn prune_lineage_succeeds_on_a_database_with_no_data_dir_yet() {
             default_db: "default".to_string(),
         },
         wal: Default::default(),
+        compute: Default::default(),
     });
 
     let output = execute_line(&mut db, r#"PRUNE LINEAGE BEFORE "2099-01-01T00:00:00Z""#, 1)
@@ -326,6 +327,7 @@ fn prune_lineage_does_not_misattribute_a_live_tensor_on_a_real_content_hash_coll
             default_db: "default".to_string(),
         },
         wal: Default::default(),
+        compute: Default::default(),
     });
 
     execute_line(&mut db, "VECTOR a = [1.0, 2.0, 3.0]", 1).expect("setup failed");
@@ -410,6 +412,7 @@ fn prune_lineage_does_not_misattribute_a_multi_output_binding_on_a_real_content_
             default_db: "default".to_string(),
         },
         wal: Default::default(),
+        compute: Default::default(),
     });
 
     execute_line(&mut db, "MATRIX m = [[2.0, 1.0], [1.0, 3.0]]", 1).expect("setup failed");

@@ -9,6 +9,29 @@ pub struct EngineConfig {
     /// without this section keeps the WAL off, the pre-WAL behavior.
     #[serde(default)]
     pub wal: WalConfig,
+    /// Compute backend (`[compute]` in `linal.toml`). Optional; defaults to
+    /// the CPU backend.
+    #[serde(default)]
+    pub compute: ComputeConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ComputeConfig {
+    #[serde(default)]
+    pub backend: ComputeBackendKind,
+}
+
+/// Which `ComputeBackend` each database uses (`core::backend::from_config`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputeBackendKind {
+    /// SIMD/Rayon CPU kernels.
+    #[default]
+    Cpu,
+    /// Large dense matmuls on the GPU via wgpu, everything else on the CPU.
+    /// Needs a build with the `gpu-wgpu` feature; otherwise, or without a
+    /// usable GPU, falls back to `Cpu` with a warning.
+    Gpu,
 }
 
 /// Write-ahead log settings -- see `engine::wal`.
@@ -67,6 +90,7 @@ impl Default for EngineConfig {
                 default_db: "default".to_string(),
             },
             wal: WalConfig::default(),
+            compute: ComputeConfig::default(),
         }
     }
 }

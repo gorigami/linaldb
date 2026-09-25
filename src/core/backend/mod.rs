@@ -201,8 +201,48 @@ pub trait ComputeBackend: std::fmt::Debug + Send + Sync {
 }
 
 pub mod cpu;
+#[cfg(feature = "gpu-wgpu")]
+pub mod gpu;
 pub mod scalar;
 pub mod simd;
+
+/// The backend `[compute] backend` asks for (see `ComputeConfig`). Asking
+/// for `gpu` without a usable GPU -- or in a build without the `gpu-wgpu`
+/// feature -- warns once and falls back to the CPU backend.
+pub fn from_config(config: &crate::core::config::ComputeConfig) -> Box<dyn ComputeBackend> {
+    use crate::core::config::ComputeBackendKind;
+    match config.backend {
+        ComputeBackendKind::Cpu => Box::new(CpuBackend::new()),
+        ComputeBackendKind::Gpu => gpu_or_cpu(),
+    }
+}
+
+#[cfg(feature = "gpu-wgpu")]
+fn gpu_or_cpu() -> Box<dyn ComputeBackend> {
+    match gpu::GpuBackend::new() {
+        Ok(b) => Box::new(b),
+        Err(e) => {
+            warn_gpu_fallback(&e);
+            Box::new(CpuBackend::new())
+        }
+    }
+}
+
+#[cfg(not(feature = "gpu-wgpu"))]
+fn gpu_or_cpu() -> Box<dyn ComputeBackend> {
+    warn_gpu_fallback("this build doesn't include the `gpu-wgpu` feature");
+    Box::new(CpuBackend::new())
+}
+
+fn warn_gpu_fallback(reason: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "Warning: [compute] backend = \"gpu\" requested, using the CPU backend instead: {}",
+            reason
+        )
+    });
+}
 
 pub use cpu::CpuBackend;
 pub use scalar::ScalarBackend;

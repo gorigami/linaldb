@@ -58,12 +58,21 @@ instant-distance = { version = "0.6.1", default-features = false, features = ["w
 # (benches/matmul_backend.rs) measured it ~8-22x faster than the existing
 # hand-rolled/Rayon kernel across 50..1000-square matrices, growing with N.
 faer = { version = "0.24.4", optional = true }
+# Optional GPU compute backend (src/core/backend/gpu/) -- see
+# SCALING_AND_GPU_PLAN.md Track C. Only linked in when the `gpu-wgpu`
+# feature is enabled. wgpu is pure Rust over the OS's own graphics API
+# (Metal on macOS, Vulkan/DX12 elsewhere), so like faer it keeps the "no
+# system library dependency" build property; CUDA would not.
+wgpu = { version = "30.0.1", optional = true }
+pollster = { version = "1.0.1", optional = true }
+bytemuck = { version = "1.25.2", features = ["derive"], optional = true }
 
 [features]
 default = []
 zero-copy = []  # Enable Arc-based tensor storage
 experimental = ["zero-copy"]  # Bundle experimental features
 faer-matmul = ["dep:faer"]  # Opt-in faer-backed dense matmul kernel
+gpu-wgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]  # Opt-in wgpu compute backend (spike)
 
 [[example]]
 name = "gen_test_data"
@@ -110,3 +119,8 @@ harness = false
 [[bench]]
 name = "matmul_backend"
 harness = false
+
+[[bench]]
+name = "gpu_backend"
+harness = false
+required-features = ["gpu-wgpu"]

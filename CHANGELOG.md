@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — experimental GPU backend spike (`gpu-wgpu` feature, `[compute] backend`, `SHOW BACKEND`)
+
+Track C of `SCALING_AND_GPU_PLAN.md`: a measured spike, not a stable feature.
+
+**What it adds.**
+- Behind the new opt-in `gpu-wgpu` Cargo feature, it isn't in the default build or the release
+  binaries. `wgpu` is pure Rust over Metal/Vulkan/DX12, so it adds no system library dependency.
+- `[compute] backend = "gpu"` sends large rank-2 `MATMUL`s to the GPU through a tiled WGSL GEMM.
+  Everything else stays on the CPU.
+- The engine warns and falls back to the CPU when there's no adapter or the feature is missing.
+- `SHOW BACKEND` reports the active backend.
+- CPU↔GPU parity tests pass on an Apple M4 (Metal).
+
+**Result: the decision gate is closed.** On an Apple M4, the GPU beat the engine's current CPU
+matmul 3–7×, but `faer` beat the GPU 4–5× at every size. Batched cosine scoring was 10–16×
+slower on the GPU than a Rayon CPU scan, because re-uploading the matrix on every query
+dominates. Full tables are in `benches/gpu_backend.rs` and the plan. VRAM residency is not being
+pursued on this evidence.
+
+**Flagged, not fixed.** The DSL's `MATMUL` takes `SimdBackend::matmul_simd` and never reaches
+`faer`, even with `faer-matmul` enabled. That feature only swaps `engine::kernels::matmul`,
+which the scalar path (under 1024 elements), non-contiguous views and lazy expressions use.
+Routing the backend's matmul through `faer` would make DSL `MATMUL` ~34× faster at 1024²
+(169 ms → 5 ms).
+
 ### Added — write-ahead log (`[wal] enabled = true`) and `CHECKPOINT`
 
 Until now, anything not explicitly `SAVE`d was lost when the process stopped: startup recovery
