@@ -1015,47 +1015,73 @@ pub fn matmul_with_timestamp(
 
 /// `faer`-backed dense GEMM, gated behind the `faer-matmul` feature -- see
 /// that feature's doc comment in `Cargo.toml`. Honors `a`/`b`'s strides and
-/// offset directly (no materialization needed first), same as the built-in
-/// kernel below, so a transposed/sliced zero-copy view multiplies correctly
-/// without requiring a contiguous copy.
+/// offset, so a transposed or sliced zero-copy view multiplies correctly.
+///
+/// Row-major inputs (a fresh tensor) and column-major ones (a transpose of
+/// one) are handed to faer as views over their existing buffers, and faer
+/// writes straight into the output buffer. Any other layout is copied into
+/// a faer matrix first. The per-element copies in and out used to cost ~25%
+/// of the whole multiply at 1000^2.
 #[cfg(feature = "faer-matmul")]
 fn matmul_data_faer(a: &Tensor, b: &Tensor, m: usize, n: usize, p: usize) -> Vec<f32> {
-    let a_strides = &a.strides;
-    let b_strides = &b.strides;
-    let a_data = a.data_ref();
-    let b_data = b.data_ref();
-    let a_offset = a.offset;
-    let b_offset = b.offset;
+    let a_owned;
+    let a_mat = match faer_view(a, m, n) {
+        Some(view) => view,
+        None => {
+            a_owned = faer_copy(a, m, n);
+            a_owned.as_ref()
+        }
+    };
+    let b_owned;
+    let b_mat = match faer_view(b, n, p) {
+        Some(view) => view,
+        None => {
+            b_owned = faer_copy(b, n, p);
+            b_owned.as_ref()
+        }
+    };
 
-    let a_mat = faer::Mat::<f32>::from_fn(m, n, |i, j| {
-        a_data[a_offset + i * a_strides[0] + j * a_strides[1]]
-    });
-    let b_mat = faer::Mat::<f32>::from_fn(n, p, |i, j| {
-        b_data[b_offset + i * b_strides[0] + j * b_strides[1]]
-    });
-
-    let mut dst = faer::Mat::<f32>::zeros(m, p);
+    let mut data = vec![0.0f32; m * p];
+    let dst = faer::MatMut::from_row_major_slice_mut(&mut data, m, p);
     faer::linalg::matmul::matmul(
-        &mut dst,
+        dst,
         faer::Accum::Replace,
-        &a_mat,
-        &b_mat,
+        a_mat,
+        b_mat,
         1.0f32,
         faer::Par::rayon(0),
     );
-
-    let mut data = vec![0.0f32; m * p];
-    for i in 0..m {
-        for j in 0..p {
-            data[i * p + j] = dst[(i, j)];
-        }
-    }
     data
 }
 
-/// The original hand-rolled, Rayon-parallelized-above-`PARALLEL_THRESHOLD`
-/// kernel -- unchanged, and still the default (the `faer-matmul` feature is
-/// opt-in, not on by default).
+/// A zero-copy faer view of a `rows x cols` tensor laid out row-major or
+/// column-major over `rows * cols` consecutive elements from its offset,
+/// or `None` for any other stride pattern.
+#[cfg(feature = "faer-matmul")]
+fn faer_view(t: &Tensor, rows: usize, cols: usize) -> Option<faer::MatRef<'_, f32>> {
+    let len = rows * cols;
+    let slice = t.data_ref().get(t.offset..t.offset + len)?;
+    if t.strides == [cols, 1] {
+        Some(faer::MatRef::from_row_major_slice(slice, rows, cols))
+    } else if t.strides == [1, rows] {
+        Some(faer::MatRef::from_column_major_slice(slice, rows, cols))
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "faer-matmul")]
+fn faer_copy(t: &Tensor, rows: usize, cols: usize) -> faer::Mat<f32> {
+    let data = t.data_ref();
+    faer::Mat::<f32>::from_fn(rows, cols, |i, j| {
+        data[t.offset + i * t.strides[0] + j * t.strides[1]]
+    })
+}
+
+/// The original hand-rolled kernel, Rayon-parallelized above
+/// `PARALLEL_THRESHOLD`. It's unchanged, and used only in builds without the
+/// `faer-matmul` feature (`--no-default-features`); the feature is on by
+/// default.
 #[cfg_attr(feature = "faer-matmul", allow(dead_code))]
 fn matmul_data_builtin(a: &Tensor, b: &Tensor, m: usize, n: usize, p: usize) -> Vec<f32> {
     let mut data = vec![0.0; m * p];

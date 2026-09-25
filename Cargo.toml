@@ -49,9 +49,11 @@ indicatif = "0.17"
 # build philosophy (vendored HDF5, rustls-tls). `with-serde` needed for
 # CREATE VECTOR INDEX ... USING HNSW's SAVE/LOAD DATASET persistence.
 instant-distance = { version = "0.6.1", default-features = false, features = ["with-serde"] }
-# Optional dense-matmul backend (src/engine/kernels.rs) -- see
-# PERFORMANCE_OPTIMIZATION_PLAN.md Phase 4. Only linked in when the
-# `faer-matmul` feature is enabled; pure Rust, no C/Fortran BLAS toolchain,
+# Dense-matmul backend (src/engine/kernels.rs, reached from
+# CpuBackend::matmul) -- see PERFORMANCE_OPTIMIZATION_PLAN.md Phase 4 and
+# docs/SCALING_AND_GPU_ROADMAP.md. Linked in through the `faer-matmul`
+# feature, on by default since the DSL's MATMUL was routed through it
+# (~34x at 1024^2); `--no-default-features` drops it. Pure Rust, no C/Fortran BLAS toolchain,
 # chosen specifically to preserve this repo's existing "no system library
 # dependency" build property (vendored HDF5, rustls-tls) -- an OpenBLAS-style
 # backend would have reintroduced exactly that. A real benchmark
@@ -68,10 +70,10 @@ pollster = { version = "1.0.1", optional = true }
 bytemuck = { version = "1.25.2", features = ["derive"], optional = true }
 
 [features]
-default = []
+default = ["faer-matmul"]
 zero-copy = []  # Enable Arc-based tensor storage
 experimental = ["zero-copy"]  # Bundle experimental features
-faer-matmul = ["dep:faer"]  # Opt-in faer-backed dense matmul kernel
+faer-matmul = ["dep:faer"]  # faer-backed dense matmul kernel (on by default; `--no-default-features` for the hand-rolled SIMD kernel)
 gpu-wgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]  # Opt-in wgpu compute backend (spike)
 
 [[example]]
