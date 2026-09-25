@@ -10,6 +10,8 @@ use super::error::EngineError;
 use super::operations::{BinaryOp, TensorKind, UnaryOp};
 use crate::engine::context::ExecutionContext;
 
+mod snapshot;
+
 struct NameEntry {
     id: TensorId,
     kind: TensorKind,
@@ -32,6 +34,22 @@ pub struct DatabaseInstance {
     /// `LINEAGE_AND_LINALG_PLAN.md` / `src/core/provenance.rs`). Loaded from
     /// disk on construction so a recovered DB has its full prior ancestry.
     pub provenance: crate::core::provenance::ProvenanceStore,
+    /// Open write-ahead log when `[wal] enabled` (see `engine::wal`); opened
+    /// by startup recovery, or lazily on this database's first logged write.
+    wal: Option<crate::engine::wal::Wal>,
+    /// Set while restoring a checkpoint, replaying the WAL, or writing a
+    /// checkpoint. Suppresses WAL appends and provenance records -- the
+    /// original execution already wrote those to `provenance.jsonl`.
+    replaying: bool,
+    /// Set when appending to the WAL failed after a statement had already
+    /// been applied in memory: the log no longer describes the state, so
+    /// further mutating statements are refused until a `CHECKPOINT`
+    /// succeeds (it snapshots the current state and starts a fresh log).
+    wal_broken: Option<String>,
+    /// Set when WAL recovery failed on startup. Every statement against
+    /// this database then fails with it, rather than silently running on
+    /// partially recovered state.
+    recovery_error: Option<String>,
 }
 
 impl DatabaseInstance {
@@ -50,6 +68,10 @@ impl DatabaseInstance {
             lazy_store: HashMap::new(),
             db_dir,
             provenance,
+            wal: None,
+            replaying: false,
+            wal_broken: None,
+            recovery_error: None,
         }
     }
 
@@ -67,6 +89,9 @@ impl DatabaseInstance {
     /// not erase `t`'s ancestry from `EXPLAIN LINEAGE d`. A record with real
     /// inputs, or whose output is genuinely new content, is always kept.
     pub fn record_provenance(&mut self, record: crate::core::provenance::ProvenanceRecord) {
+        if self.replaying {
+            return;
+        }
         let redundant = record.inputs.is_empty()
             && !record.outputs.is_empty()
             && record
@@ -623,6 +648,10 @@ impl TensorDb {
 
         // Try to recover existing databases
         let _ = db.recover_databases();
+
+        if db.config.wal.enabled {
+            db.recover_all_from_wal();
+        }
 
         db
     }

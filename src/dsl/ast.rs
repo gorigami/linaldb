@@ -105,6 +105,9 @@ pub enum Statement {
     // ─── Session ─────────────────────────────────────────────────────────────
     /// `RESET`
     Reset,
+    /// `CHECKPOINT` -- snapshot the active database and truncate its
+    /// write-ahead log (requires `[wal] enabled = true`).
+    Checkpoint,
 
     // ─── Provenance maintenance ─────────────────────────────────────────────
     /// `PRUNE LINEAGE BEFORE <RFC3339 timestamp string>`. `before` is kept as
@@ -115,6 +118,83 @@ pub enum Statement {
 }
 
 impl Statement {
+    /// Whether a successful execution changes the active database's
+    /// in-memory state in a way the write-ahead log (`engine::wal`) must
+    /// record so a restart can replay it.
+    ///
+    /// Exhaustive on purpose -- no `_` arm -- so adding a `Statement`
+    /// variant fails to compile until it's classified here.
+    ///
+    /// Deliberately `false` for:
+    /// - database-catalog statements (`CREATE`/`DROP`/`USE DATABASE`):
+    ///   the directory on disk is the catalog, and the log is per database;
+    /// - statements whose only effect is already durable on disk: `SAVE`
+    ///   (followed by a checkpoint instead), `EXPORT`, `PRUNE LINEAGE`;
+    /// - `SHOW <lazy tensor>`, which materializes a lazy tensor as a cache,
+    ///   not a logical change;
+    /// - `SELECT`, whose CTE temp datasets are dropped before it returns.
+    pub fn is_mutating(&self) -> bool {
+        match self {
+            Statement::DefineTensor(_)
+            | Statement::Vector(_)
+            | Statement::Matrix(_)
+            | Statement::Let(_)
+            | Statement::LetMulti(_)
+            | Statement::Derive(_)
+            | Statement::Bind(_)
+            | Statement::Attach(_)
+            | Statement::CreateDataset(_)
+            | Statement::AlterDataset(_)
+            | Statement::InsertInto(_)
+            | Statement::Materialize(_)
+            | Statement::Load(_)
+            | Statement::Import(_)
+            | Statement::ImportCsv(_)
+            | Statement::CreateIndex(_)
+            | Statement::SetMetadata(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Transform(_)
+            | Statement::DefinePipeline(_)
+            | Statement::ApplyPipeline(_)
+            | Statement::DropPipeline(_)
+            | Statement::Reset => true,
+            Statement::Search(s) => s.target.is_some(),
+            Statement::Select(_)
+            | Statement::Deliver(_)
+            | Statement::Show(_)
+            | Statement::Explain(_)
+            | Statement::Audit(_)
+            | Statement::Save(_)
+            | Statement::List(_)
+            | Statement::Export(_)
+            | Statement::CreateDatabase(_)
+            | Statement::DropDatabase(_)
+            | Statement::UseDatabase(_)
+            | Statement::DescribePipeline(_)
+            | Statement::Checkpoint
+            | Statement::PruneLineage(_) => false,
+        }
+    }
+
+    /// For statements that read an external file (`LOAD`, `IMPORT`, `USE
+    /// DATASET FROM`, `IMPORT CSV`): `Some(explicit target name)`, where the
+    /// inner `None` means the name is derived from the file. The WAL records
+    /// a fingerprint of what such a statement loaded, so replaying it
+    /// against a file that has since changed fails loudly instead of
+    /// silently diverging.
+    pub fn external_input_target(&self) -> Option<Option<String>> {
+        match self {
+            Statement::Load(s) => Some(Some(match s.kind {
+                PersistKind::Pipeline => format!("pipeline:{}", s.name),
+                _ => s.name.clone(),
+            })),
+            Statement::Import(s) => Some(s.name.clone()),
+            Statement::ImportCsv(s) => Some(s.name.clone()),
+            _ => None,
+        }
+    }
+
     /// Returns `true` for statements that only read state and never mutate it.
     /// Used to gate shared-reference execution paths.
     pub fn is_read_only(&self) -> bool {

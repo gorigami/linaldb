@@ -4,6 +4,7 @@ pub mod error;
 pub mod executor;
 pub mod kernels;
 pub mod operations;
+pub mod wal;
 
 pub use db::{PipelineRegistry, TensorDb};
 pub use error::EngineError;

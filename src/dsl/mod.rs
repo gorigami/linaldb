@@ -241,7 +241,16 @@ pub fn execute_line_shared(
     line: &str,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    match crate::dsl::parser::parse(line) {
+    let parsed = crate::dsl::parser::parse(line);
+    if let Ok(stmt) = &parsed {
+        // A database whose WAL recovery failed must not serve reads from
+        // partially recovered state either.
+        db.wal_precheck(stmt).map_err(|source| DslError::Engine {
+            line: line_no,
+            source,
+        })?;
+    }
+    match parsed {
         Ok(crate::dsl::ast::Statement::Explain(s)) => {
             executor::execute_explain(db, s.target, line_no)
         }
@@ -285,6 +294,62 @@ pub fn execute_line_shared(
     }
 }
 
+/// Executes `stmt` and, when the write-ahead log is enabled, records it
+/// (see `engine::wal`). Every entry point that mutates the engine -- CLI,
+/// REPL, scripts, `linal serve`, the embedded bindings -- goes through
+/// `execute_line_with_context`, so this is the one place logging happens.
+fn execute_logged(
+    db: &mut TensorDb,
+    stmt: crate::dsl::ast::Statement,
+    line: &str,
+    line_no: usize,
+    ctx: Option<&mut crate::engine::context::ExecutionContext>,
+) -> Result<DslOutput, DslError> {
+    let engine_err = |source| DslError::Engine {
+        line: line_no,
+        source,
+    };
+    db.wal_precheck(&stmt).map_err(engine_err)?;
+    let log = db.wal_should_log(&stmt);
+    let checkpoint_after = db.wal_checkpoint_after(&stmt);
+    let external = if log {
+        stmt.external_input_target()
+    } else {
+        None
+    };
+    let names_before = match &external {
+        Some(None) => Some(db.object_names()),
+        _ => None,
+    };
+
+    let output = executor::execute_statement(db, stmt, line_no, ctx)?;
+
+    if log {
+        // Fingerprint what an external-input statement loaded: the explicit
+        // target, or whatever names it created when the name came from the
+        // file.
+        let targets: Vec<String> = match external {
+            Some(Some(name)) => vec![name],
+            Some(None) => {
+                let before = names_before.unwrap_or_default();
+                db.object_names()
+                    .into_iter()
+                    .filter(|n| !before.contains(n))
+                    .collect()
+            }
+            None => vec![],
+        };
+        let fingerprints = targets
+            .into_iter()
+            .filter_map(|name| db.object_fingerprint(&name).map(|fp| (name, fp)))
+            .collect();
+        db.wal_append(line, fingerprints).map_err(engine_err)?;
+    } else if checkpoint_after {
+        db.checkpoint().map_err(engine_err)?;
+    }
+    Ok(output)
+}
+
 /// Execute a single DSL line with an optional execution context
 pub fn execute_line_with_context(
     db: &mut TensorDb,
@@ -306,7 +371,7 @@ pub fn execute_line_with_context(
                 }
                 other => other,
             };
-            executor::execute_statement(db, stmt, line_no, ctx)
+            execute_logged(db, stmt, line, line_no, ctx)
         }
         Err(parse_err) => {
             let trimmed = line.trim();

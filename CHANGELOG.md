@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — write-ahead log (`[wal] enabled = true`) and `CHECKPOINT`
+
+Until now, anything not explicitly `SAVE`d was lost when the process stopped: startup recovery
+only recreated empty database instances. With the new opt-in write-ahead log, each database's
+in-memory state survives a restart, a crash or a `kill -9`. The WAL is off by default, so
+existing behavior is unchanged.
+
+**What gets logged.**
+- Every successful mutating statement is appended to `{data_dir}/{db}/wal.log`.
+- The classification is `Statement::is_mutating()`, an exhaustive match: new variants must be
+  classified to compile.
+- On startup, each database restores its last checkpoint and replays the log after it.
+- Replay records no provenance, so `provenance.jsonl` never duplicates.
+
+**Checkpoints.** `CHECKPOINT` (new statement) writes a private snapshot to
+`{db}/checkpoint/` and truncates the log.
+- It preserves tensor ids, aliases, zero-copy views, lazy tensors, tensor-first datasets, record
+  datasets with their indexes, and pipelines.
+- It happens automatically after every `SAVE` and once the log passes
+  `checkpoint_bytes` (default 64 MiB).
+- The post-`SAVE` checkpoint is what keeps a "LOAD, INSERT, SAVE, crash" sequence from applying
+  the `INSERT` twice on replay.
+
+**External files.** `LOAD`/`IMPORT` records carry a fingerprint of what they loaded. If the file
+has changed since, recovery fails loudly and the database refuses statements with the cause.
+It doesn't silently diverge.
+
+**Sync modes.** `sync = "always"` fsyncs every record and survives power loss. `sync = "never"`
+survives a process crash only. Measured over HTTP on macOS (release build, 500 sequential
+`INSERT`s), median latency was:
+- 0.25 ms with the WAL off;
+- 0.23 ms with `never`;
+- 5.0 ms with `always` (`F_FULLFSYNC`).
+
+Found and fixed while building this, before release:
+- With a relative `data_dir` (the default `./data`), checkpoint dataset packages were written to
+  a nested `data/<db>/data/<db>/...` path.
+- After recovery dropped a torn final record, the next append would have been glued onto the
+  partial line, making it unreadable too.
+
+Both have regression tests in `tests/wal_test.rs`. See `docs/ARCHITECTURE.md` ("Write-ahead
+log") and `docs/ERROR_REFERENCE.md`.
+
 ### Changed — per-database locking in `linal serve`
 
 `linal serve` used to share one `Arc<RwLock<TensorDb>>` across every request.
