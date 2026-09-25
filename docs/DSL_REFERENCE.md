@@ -824,6 +824,26 @@ automatically:
 - `SHOW SHAPE <name>`: Display only the shape dimensions of a tensor.
 - `SHOW LINEAGE <name>`: Display the recursive derivation graph that produced a tensor *or* a dataset — superseded by `EXPLAIN LINEAGE` (§9, Query Planning) below, kept working as an alias for backward compatibility.
 - `SHOW INDEXES [<dataset>]`: List all indexes; optionally filter to a specific dataset.
+- `SHOW BACKEND`: The active database's compute backend: CPU (SIMD/Rayon), or GPU when enabled
+  (see below). `BACKEND` is a contextual keyword, so a tensor or dataset literally named `BACKEND`
+  can't be shown with `SHOW BACKEND`.
+
+### Compute backend (experimental GPU)
+
+```toml
+# linal.toml
+[compute]
+backend = "gpu"   # default: "cpu"
+```
+
+With a `linal` built with `--features gpu-wgpu` (not part of the default build or the release
+binaries), `backend = "gpu"` sends large dense `MATMUL`s to the GPU through `wgpu`: Metal on
+macOS, Vulkan/DX12 elsewhere. Everything else stays on the CPU, and so does any matmul under
+about 2M multiply-adds (roughly 128×128×128).
+
+If the build lacks the feature or no GPU adapter is found, it warns once and uses the CPU backend.
+Results match the CPU within f32 rounding, but not bit-for-bit. This is a measured spike (see
+`SCALING_AND_GPU_PLAN.md`), not a stable feature.
 
 ### Dataset Metadata & Versioning
 

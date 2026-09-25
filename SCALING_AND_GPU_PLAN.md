@@ -1,6 +1,6 @@
 # Scaling & GPU Plan
 
-**Status**: Tracks A–B done, Track C not started. Per this repo's tracked-plan-doc convention,
+**Status**: Tracks A–C done (Track C closed at its decision gate: no VRAM residency on this evidence). Per this repo's tracked-plan-doc convention,
 when the last track closes this file is deleted. The analysis and backlog sections move to
 `docs/SCALING_AND_GPU_ROADMAP.md` as a permanent reference.
 
@@ -113,28 +113,69 @@ Deviations from the original design, and why:
   added because replaying a `LOAD` after a later `SAVE` of the same package would have
   double-applied changes. That was found while designing this track, not in the original plan.
 
-### Track C — GPU spike, `gpu-wgpu` feature (not started)
+### Track C — GPU spike, `gpu-wgpu` feature
 
-Goal: measure first, without committing the architecture. `Tensor.data` is untouched, and data
-is copied host→device per operation.
+Goal: measure first, without committing the architecture. `Tensor.data` is untouched, and every
+GPU call uploads its inputs and reads the result back.
 
 Checklist:
-- [ ] Optional `wgpu`/`pollster`/`bytemuck` behind `gpu-wgpu`. All are pure Rust (Metal on
-      macOS, Vulkan/DX12 elsewhere). The feature is outside the default build and the CI matrix,
-      like `faer-matmul`.
-- [ ] `src/core/backend/gpu/`: `GpuBackend: ComputeBackend`.
-      - Accelerates `matmul`, `dot` and `cosine_similarity` above a size threshold.
-      - Everything else, and anything below the threshold, delegates to an inner `CpuBackend`.
-      - If no adapter is found, it falls back to CPU with a warning. No panic.
-- [ ] `[compute] backend = "cpu" | "gpu"` (default `cpu`). `DatabaseInstance::new` builds the
-      backend from config. `SHOW BACKEND` reports it.
-- [ ] `benches/gpu_backend.rs`:
-      - matmul 256²–4096²: CPU-SIMD vs `faer` vs GPU, transfer included;
-      - batched cosine 10k–1M × 384/768.
-- [ ] Parity tests CPU↔GPU (relative tolerance 1e-4, including transposed/sliced views). They
-      skip cleanly without an adapter.
-- [ ] **Decision gate**: record the results here. If GPU wins at realistic sizes, open the
-      residency phase (Backlog 1). If not, record that and stop.
+- [x] Optional `wgpu` 30 / `pollster` / `bytemuck` behind `gpu-wgpu`. All are pure Rust. The
+      feature is outside the default build and the CI matrix, like `faer-matmul`.
+- [x] `src/core/backend/gpu/`: `GpuContext` (process-wide device, WGSL tiled GEMM + batched
+      cosine) and `GpuBackend: ComputeBackend`.
+      - `GpuBackend` sends rank-2 `matmul` ≥ 2M multiply-adds to the GPU. Everything else,
+        including the per-pair `dot`/`cosine`, goes to an inner `CpuBackend`.
+      - With no adapter or no feature, it warns and falls back to the CPU.
+- [x] `[compute] backend = "cpu" | "gpu"` (default `cpu`), applied per database, and
+      `SHOW BACKEND`.
+- [x] Parity tests (`tests/gpu_backend_test.rs`, 4 cases, relative tolerance 1e-4, including a
+      transposed view and the DSL `MATMUL` path). They skip without an adapter. Run on the Apple
+      M4 (Metal).
+- [x] `benches/gpu_backend.rs`, with results below.
+- [x] **Decision gate: closed, not proceeding to VRAM residency on this evidence.**
+
+Results (Apple M4: 10 CPU cores, 8-core GPU, 16 GB unified memory; criterion medians; GPU
+includes the per-call transfer):
+
+| matmul (square) | `CpuBackend` (DSL `MATMUL` path) | `faer` | GPU (wgpu) |
+|---|---|---|---|
+| 256 | 2.62 ms | 0.16 ms | 0.82 ms |
+| 512 | 21.6 ms | 0.74 ms | 3.84 ms |
+| 1024 | 169 ms | 4.97 ms | 25.6 ms |
+| 2048 | 1.34 s | 45.0 ms | 196 ms |
+| 4096 | 10.8 s | 344 ms | 1.52 s |
+
+| batch cosine (rows × dim) | CPU (Rayon) | GPU (wgpu) |
+|---|---|---|
+| 10k × 384 | 0.33 ms | 3.01 ms |
+| 100k × 384 | 2.95 ms | 29.5 ms |
+| 1M × 384 | 28.6 ms | 471 ms |
+| 10k × 768 | 0.66 ms | 5.16 ms |
+| 100k × 768 | 6.14 ms | 55.6 ms |
+| 1M × 768 | 59.9 ms | 998 ms |
+
+What the numbers say:
+- **Matmul.** The GPU beats the engine's current CPU kernel by 3–7×, but `faer` beats the GPU by
+  4–5× at every size. A hand-written WGSL GEMM on an integrated 8-core GPU isn't competitive
+  with a tuned CPU GEMM.
+- **Batched cosine.** The GPU is 10–16× *slower*. The work is memory-bound, and re-uploading the
+  whole matrix on every query dominates. On unified memory the CPU scan already runs at ~54 GB/s
+  (1.5 GB in 28.6 ms), so VRAM residency could at best recover the transfer, not beat the CPU by
+  much.
+- **Not settled.** This spike can't say how CUDA/cuBLAS/cuVS would do on a discrete datacenter
+  GPU, where compute is ~10–50× higher and a resident index avoids the transfer. That's the only
+  path left worth measuring (Backlog 2), and only if a real workload lives on NVIDIA hardware.
+
+**The actual win found by this spike: flagged, not fixed.**
+- The DSL's `MATMUL` (`eval_matmul` → `backend.matmul` → `SimdBackend::matmul_simd`) never
+  reaches `faer`.
+- The `faer-matmul` feature only swaps `engine::kernels::matmul`. That's reached from
+  `ScalarBackend` (matrices under 1024 elements), from non-contiguous views, and from lazy
+  `MatMul` expressions.
+- `PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 4's benchmark compared `faer` against
+  `kernels::matmul`, not against the SIMD path the DSL actually uses.
+- Routing `SimdBackend`/`CpuBackend::matmul` through `faer` when the feature is on would make
+  DSL `MATMUL` **~34× faster at 1024²** (169 ms → 5 ms), with no GPU.
 
 ## Analysis (verified against v0.1.89)
 
@@ -207,7 +248,10 @@ Checklist:
 
 ## Backlog (evidence-gated, not scheduled)
 
-1. **VRAM residency + fusion** (only if Track C wins):
+0. **Route DSL `MATMUL` through `faer`** when `faer-matmul` is on (see Track C). This is the
+   cheapest real speedup found, and it needs a maintainer decision.
+1. **VRAM residency + fusion** (Track C's spike did *not* justify this on integrated/unified-memory
+   hardware; revisit only with discrete-GPU evidence):
    - `TensorStorage { Host(Arc<Vec<f32>>), Device(..) }` with lazy migration.
    - A VRAM cache keyed by content hash, with a VRAM budget in `EngineConfig`.
    - GPU evaluation of `Expression`.

@@ -543,6 +543,8 @@ pub enum ShowTarget {
     Named(String),
     /// `SHOW PIPELINES`
     Pipelines,
+    /// `SHOW BACKEND` -- the active database's compute backend
+    Backend,
 }
 
 /// What `EXPLAIN` should show a query plan for.

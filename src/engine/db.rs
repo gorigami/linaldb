@@ -649,6 +649,12 @@ impl TensorDb {
         // Try to recover existing databases
         let _ = db.recover_databases();
 
+        if db.config.compute.backend != crate::core::config::ComputeBackendKind::Cpu {
+            for instance in db.databases.values_mut() {
+                instance.backend = crate::core::backend::from_config(&db.config.compute);
+            }
+        }
+
         if db.config.wal.enabled {
             db.recover_all_from_wal();
         }
@@ -748,8 +754,9 @@ impl TensorDb {
             })?;
         }
 
-        self.databases
-            .insert(name.clone(), DatabaseInstance::new(name, db_path));
+        let mut instance = DatabaseInstance::new(name.clone(), db_path);
+        instance.backend = crate::core::backend::from_config(&self.config.compute);
+        self.databases.insert(name, instance);
         Ok(())
     }
 
