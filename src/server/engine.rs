@@ -106,7 +106,8 @@ impl SharedEngine {
                 EngineError::InvalidOp(format!("Failed to create DB directory: {}", e))
             })?;
         }
-        let instance = DatabaseInstance::new(name.clone(), db_path);
+        let mut instance = DatabaseInstance::new(name.clone(), db_path);
+        instance.backend = crate::core::backend::from_config(&self.config.compute);
         let engine = TensorDb::from_instance(self.config.clone(), instance, self.pipelines.clone());
         dbs.insert(name, Arc::new(RwLock::new(engine)));
         Ok(())

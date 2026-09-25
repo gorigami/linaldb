@@ -587,13 +587,51 @@ LINAL implements a connector-based architecture for high-performance scientific 
 ### Recovery
 
 On engine startup (`TensorDb::recover_databases`), the engine scans `data_dir`
-for subdirectories and registers an **empty** `DatabaseInstance` per directory
-name found. This only makes existing database names selectable via `USE`; it
-does **not** load any dataset, tensor, or pipeline content — there is
-currently no metadata scan and no lazy-load-on-first-access mechanism for any
-persisted object kind. Datasets, tensors, and pipelines must each be restored
-explicitly with `LOAD DATASET` / `LOAD TENSOR` / `LOAD PIPELINE` — there is
-no bulk "load everything" command for any object kind.
+for subdirectories and registers a `DatabaseInstance` per directory name found.
+With the WAL off (the default), each instance starts **empty**: existing
+database names become selectable via `USE`, but no dataset, tensor, or
+pipeline content is loaded. Datasets, tensors, and pipelines must each be
+restored explicitly with `LOAD DATASET` / `LOAD TENSOR` / `LOAD PIPELINE`, and
+there is no bulk "load everything" command.
+
+### Write-ahead log (`engine/wal.rs`, `engine/db/snapshot.rs`)
+
+With `[wal] enabled = true`, each database's in-memory state survives a
+restart (see DSL_REFERENCE.md §8 for configuration).
+
+- **Logical log.** Every successful statement with `Statement::is_mutating()` is appended as one
+  JSON line `{seq, ts, statement, fingerprints}` to `{data_dir}/{db}/wal.log`.
+  - It's appended *after* the statement succeeds, so the log never holds a statement that failed.
+  - The hook is `dsl::execute_logged`, the single funnel for every entry point: CLI, REPL,
+    scripts, `linal serve`, and the embedded bindings.
+  - `is_mutating` is an exhaustive match with no `_` arm, so a new `Statement` variant doesn't
+    compile until it's classified.
+- **Checkpoints.** A checkpoint is a private snapshot at `{db}/checkpoint/`.
+  - `manifest.json` holds tensor headers with their original `TensorId`s (tensor-first datasets
+    reference tensors by id), the name table (aliases stay aliases), lazy expressions,
+    tensor-first datasets, dataset variables and pipeline sources.
+  - `buffers/*.f32` holds one file per distinct `Arc` buffer, so zero-copy views still share
+    storage after a restore.
+  - `datasets/` holds record datasets, written through the same package SAVE/LOAD path as user
+    data.
+  - It's written to `checkpoint.tmp/` and swapped in by rename (keeping `checkpoint.old/` until
+    the swap completes), and only then is the log truncated.
+- **Replay** restores the checkpoint, then re-executes records with `seq` greater than the
+  checkpoint's `seq`, with `DatabaseInstance::replaying` set.
+  - While replaying, nothing is re-logged and no provenance is recorded: the original execution
+    already wrote it to `provenance.jsonl`, so ancestry doesn't duplicate across restarts.
+  - A truncated final record (a crash mid-append) is dropped with a warning and the file is
+    rewritten clean. Corruption anywhere else is an error.
+- **External inputs.** `LOAD`/`IMPORT` records carry a content fingerprint of what they loaded.
+  - Replay compares it and fails loudly if the file changed, rather than silently diverging.
+  - The checkpoint after every `SAVE` means a replay never re-runs a `LOAD` against a package
+    that a later `SAVE` in the same log overwrote. Without it, the "LOAD, INSERT, SAVE, crash"
+    sequence would apply the `INSERT` twice.
+- **Failure states** (`DatabaseInstance`):
+  - `recovery_error`: startup replay failed. Every statement on that database, reads included,
+    errors with the cause, rather than running on partial state.
+  - `wal_broken`: an append failed after the statement had been applied. Further mutations are
+    refused until a `CHECKPOINT` captures the current state and starts a fresh log.
 
 ---
 
@@ -975,6 +1013,21 @@ Operation → CpuBackend:
 ├─ ≥1024 elements → SimdBackend (SIMD optimized, if contiguous)
 └─ Otherwise → ScalarBackend (fallback)
 ```
+
+**Backend selection**: each `DatabaseInstance` holds a `Box<dyn ComputeBackend>` built from
+`[compute] backend` by `core::backend::from_config`. The default is `CpuBackend`.
+
+`backend = "gpu"` selects `core::backend::gpu::GpuBackend`, an experimental spike behind the
+`gpu-wgpu` Cargo feature (see `SCALING_AND_GPU_PLAN.md` Track C).
+- **What runs on the GPU:** only rank-2 `matmul` at or above `MATMUL_GPU_MIN_FLOPS`, via a tiled
+  WGSL GEMM (`gpu/kernels.wgsl`) on a process-wide `GpuContext`. Every other operation, and any
+  smaller or ill-shaped matmul, delegates to an inner `CpuBackend`.
+- **Transfers:** `Tensor.data` stays in host memory. Each call uploads its inputs and reads the
+  result back.
+- **Batched cosine:** `GpuContext::batch_cosine` (many vectors against one query, chunked to the
+  device's binding limit) exists for the benchmark but isn't wired into vector search.
+- **No usable GPU:** without an adapter, or without the feature, the engine warns once and uses
+  `CpuBackend`.
 
 `CpuBackend::use_simd` dispatches to `SimdBackend` purely on element count (≥1024); the contiguity check happens one layer down, inside each of `SimdBackend`'s individual op methods, which fall back to scalar internally for non-contiguous input rather than at the `CpuBackend` dispatch point. There is no separate Rayon backend tier — Rayon parallelism is embedded directly inside the kernel functions in `engine/kernels.rs`.
 

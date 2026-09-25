@@ -629,6 +629,14 @@ pub fn execute_statement(
         Statement::Delete(s) => query::execute_delete(db, s, line_no),
 
         // ── Session ─────────────────────────────────────────────────────────
+        Statement::Checkpoint => {
+            let report = db.checkpoint().map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            Ok(DslOutput::Message(report))
+        }
+
         Statement::Reset => {
             db.reset_session();
             Ok(DslOutput::Message(

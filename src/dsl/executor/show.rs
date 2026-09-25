@@ -304,6 +304,11 @@ pub(crate) fn execute_show_shared(
 
         ShowTarget::Pipelines => super::pipeline::execute_show_pipelines(db),
 
+        ShowTarget::Backend => Ok(DslOutput::Message(format!(
+            "Compute backend: {}",
+            db.active_instance().backend.name()
+        ))),
+
         ShowTarget::StringLiteral(s) => Ok(DslOutput::Message(s)),
 
         ShowTarget::Named(name) => {

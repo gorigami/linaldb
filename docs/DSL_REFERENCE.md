@@ -772,6 +772,44 @@ SHOW DATABASES          -- also: SHOW ALL DATABASES
 
 Clears all in-memory registers (Tensors and Datasets) for the current session.
 
+### Write-ahead log & CHECKPOINT
+
+With the write-ahead log enabled in `linal.toml`, in-memory state survives a restart or crash
+without an explicit `SAVE`:
+
+```toml
+[wal]
+enabled = true          # default: false
+sync = "always"         # "always" (fsync per write, survives power loss) or "never"
+                        # (survives a process crash / kill -9, not an OS crash)
+checkpoint_bytes = 67108864   # auto-checkpoint once wal.log passes this size (default 64 MiB)
+```
+
+Every successful mutating statement (`VECTOR`, `LET`, `INSERT`, `UPDATE`, `CREATE INDEX`,
+`LOAD`, `IMPORT`, `DEFINE PIPELINE`, ...) is appended to `{data_dir}/{db}/wal.log`. On startup,
+each database restores its last checkpoint and replays the log after it. Read-only statements,
+database-catalog statements (`CREATE`/`DROP`/`USE DATABASE`) and statements already durable on
+disk (`SAVE`, `EXPORT`, `PRUNE LINEAGE`) aren't logged.
+
+```sql
+CHECKPOINT      -- snapshot the active database and truncate its log
+```
+
+`CHECKPOINT` writes a private snapshot of the active database to `{data_dir}/{db}/checkpoint/`.
+It doesn't touch your own `SAVE`d packages or their versions. A checkpoint also happens
+automatically:
+- after every successful `SAVE`;
+- when `wal.log` outgrows `checkpoint_bytes`.
+
+`CHECKPOINT` is an error when the WAL is disabled.
+
+**Limitations:**
+- A `LOAD` or `IMPORT` is replayed by re-reading its file. If that file changed since it was
+  logged, recovery refuses to guess: the database reports a recovery error on every statement
+  until the file is restored or `wal.log` is moved aside. That means losing the changes since the
+  last checkpoint.
+- Lazy *columns* on record datasets don't survive a checkpoint, the same as `SAVE`/`LOAD`.
+
 ---
 
 ## 9. Diagnostics
@@ -786,6 +824,26 @@ Clears all in-memory registers (Tensors and Datasets) for the current session.
 - `SHOW SHAPE <name>`: Display only the shape dimensions of a tensor.
 - `SHOW LINEAGE <name>`: Display the recursive derivation graph that produced a tensor *or* a dataset — superseded by `EXPLAIN LINEAGE` (§9, Query Planning) below, kept working as an alias for backward compatibility.
 - `SHOW INDEXES [<dataset>]`: List all indexes; optionally filter to a specific dataset.
+- `SHOW BACKEND`: The active database's compute backend: CPU (SIMD/Rayon), or GPU when enabled
+  (see below). `BACKEND` is a contextual keyword, so a tensor or dataset literally named `BACKEND`
+  can't be shown with `SHOW BACKEND`.
+
+### Compute backend (experimental GPU)
+
+```toml
+# linal.toml
+[compute]
+backend = "gpu"   # default: "cpu"
+```
+
+With a `linal` built with `--features gpu-wgpu` (not part of the default build or the release
+binaries), `backend = "gpu"` sends large dense `MATMUL`s to the GPU through `wgpu`: Metal on
+macOS, Vulkan/DX12 elsewhere. Everything else stays on the CPU, and so does any matmul under
+about 2M multiply-adds (roughly 128×128×128).
+
+If the build lacks the feature or no GPU adapter is found, it warns once and uses the CPU backend.
+Results match the CPU within f32 rounding, but not bit-for-bit. This is a measured spike (see
+`SCALING_AND_GPU_PLAN.md`), not a stable feature.
 
 ### Dataset Metadata & Versioning
 

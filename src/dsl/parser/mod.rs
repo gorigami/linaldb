@@ -358,6 +358,10 @@ impl Parser {
                 }
                 Ok(Statement::Reset)
             }
+            Some(Token::Checkpoint) => {
+                self.advance();
+                Ok(Statement::Checkpoint)
+            }
             Some(Token::Prune) => self.parse_prune_lineage(),
             Some(Token::Ident(_)) if self.peek_at(1) == Some(&Token::Dot) => {
                 self.parse_method_call()

@@ -1,6 +1,6 @@
 # Scaling & GPU Plan
 
-**Status**: Track A done, Tracks B–C not started. Per this repo's tracked-plan-doc convention,
+**Status**: Tracks A–C done (Track C closed at its decision gate: no VRAM residency on this evidence). Per this repo's tracked-plan-doc convention,
 when the last track closes this file is deleted. The analysis and backlog sections move to
 `docs/SCALING_AND_GPU_ROADMAP.md` as a permanent reference.
 
@@ -64,55 +64,118 @@ Flagged, not changed (need a maintainer decision):
 - `/delivery` hard-codes `./data` (`server/mod.rs`, `ParquetStorage::new("./data")`) instead of
   `config.storage.data_dir`.
 
-### Track B — Write-ahead log (not started)
+### Track B — Write-ahead log
 
-The problem: there is no WAL and no fsync anywhere. On restart, `recover_databases` recreates
-empty instances and reloads `provenance.jsonl`, so anything not `SAVE`d is lost.
+The problem: there was no WAL and no fsync anywhere. On restart, `recover_databases` recreated
+empty instances and reloaded `provenance.jsonl`, so anything not `SAVE`d was lost.
 
 Checklist:
-- [ ] Config: `[storage] wal = "off" | "on"` (default `off`, no behavior change) and
-      `wal_sync = "always" | "batch"`.
-- [ ] `src/core/wal.rs`: `{db_dir}/wal.log`, JSONL `{seq, ts, statement}`.
-      - Append only after a statement succeeds, and only if it mutates.
-      - `Statement::is_mutating()` is an exhaustive `match` with no `_` arm, so every new
-        variant must be classified.
-- [ ] Determinism: statements that depend on external files (`IMPORT`, `LOAD`, `USE DATASET`)
-      are re-executed on replay. Replay fails loudly if the file is gone. Persist timestamps in
-      the record where the executor already accepts `*_with_timestamp`.
-- [ ] `CHECKPOINT`: saves every named dataset/tensor (`save_dataset_core`/`save_tensor_core`),
-      writes `checkpoint.json` (names + seq), then atomically truncates the WAL
-      (`wal.log.new` + `rename`).
-- [ ] Recovery on startup (with `wal = on`): load the checkpoint, then replay `seq >
-      checkpoint.seq`.
-      - A truncated tail record is dropped with a warning.
-      - Corruption mid-file is a loud error.
-- [ ] Tests: simulated crash, truncated tail, checkpoint + replay, `wal = off` creates nothing,
-      missing import file.
-- [ ] Docs: `DSL_REFERENCE.md` (`CHECKPOINT`), `ARCHITECTURE.md` (Persistence),
+- [x] Config: a `[wal]` section with `enabled` (default `false`), `sync = "always" | "never"`
+      and `checkpoint_bytes`.
+- [x] `src/engine/wal.rs`: `{db_dir}/wal.log`, JSONL `{seq, ts, statement, fingerprints}`.
+      - Appended only after success, and only if `Statement::is_mutating()` (exhaustive, no
+        `_` arm).
+      - Hook: `dsl::execute_logged`, the one funnel for CLI, REPL, scripts, server and bindings.
+- [x] External inputs: `LOAD`/`IMPORT` records fingerprint what they loaded. Replay fails loudly
+      on a mismatch.
+- [x] `CHECKPOINT` + `src/engine/db/snapshot.rs`: a private snapshot (tensor ids, aliases,
+      views, lazy tensors, tensor-first datasets, record datasets via the SAVE/LOAD package path,
+      pipelines).
+      - Swapped in by rename, then the log is truncated.
+      - Automatic after every `SAVE` and past `checkpoint_bytes`.
+- [x] Recovery on startup: restore the checkpoint, then replay `seq > checkpoint.seq`.
+      - Provenance is suppressed during replay.
+      - A torn tail is dropped and the file is rewritten.
+      - Mid-file corruption is an error.
+      - A failed recovery leaves the database refusing every statement (`recovery_error`).
+- [x] Tests: `tests/wal_test.rs` (9) + `engine::wal` unit tests (4).
+- [x] End-to-end: `linal serve` with the WAL on, writes to two databases (dataset + vector
+      index), `kill -9`, restart. Everything served back, including after a `CHECKPOINT` +
+      further writes.
+- [x] Measured: INSERT median over HTTP was 0.25 ms (off), 0.23 ms (`never`) and 5.0 ms
+      (`always`, macOS `F_FULLFSYNC`).
+- [x] Docs: `DSL_REFERENCE.md` §8, `ARCHITECTURE.md` (Recovery + Write-ahead log),
       `ERROR_REFERENCE.md`.
 
-### Track C — GPU spike, `gpu-wgpu` feature (not started)
+Deviations from the original design, and why:
+- **Config.** It's a `[wal]` section rather than keys under `[storage]`. Tests and embedders
+  build `StorageConfig` literally, and a separate `#[serde(default)]` section keeps every
+  existing `linal.toml` parsing unchanged.
+- **Sync modes.** They're `always`/`never` rather than `always`/`batch`. A timed batch flush
+  needs a background flusher thread per database. `never` gives the same crash-only durability
+  at zero cost.
+- **Timestamps.** Original timestamps aren't re-injected on replay: a replayed tensor's
+  `created_at` is the replay time. Ancestry is unaffected, because provenance is content-hash
+  addressed and already durable.
+- **Checkpoint mechanism.** Checkpoints are a private snapshot, not "SAVE everything". Going
+  through user-visible SAVE would have bumped user dataset versions, lost aliasing, and changed
+  tensor ids (which tensor-first datasets reference). The automatic checkpoint after `SAVE` was
+  added because replaying a `LOAD` after a later `SAVE` of the same package would have
+  double-applied changes. That was found while designing this track, not in the original plan.
 
-Goal: measure first, without committing the architecture. `Tensor.data` is untouched, and data
-is copied host→device per operation.
+### Track C — GPU spike, `gpu-wgpu` feature
+
+Goal: measure first, without committing the architecture. `Tensor.data` is untouched, and every
+GPU call uploads its inputs and reads the result back.
 
 Checklist:
-- [ ] Optional `wgpu`/`pollster`/`bytemuck` behind `gpu-wgpu`. All are pure Rust (Metal on
-      macOS, Vulkan/DX12 elsewhere). The feature is outside the default build and the CI matrix,
-      like `faer-matmul`.
-- [ ] `src/core/backend/gpu/`: `GpuBackend: ComputeBackend`.
-      - Accelerates `matmul`, `dot` and `cosine_similarity` above a size threshold.
-      - Everything else, and anything below the threshold, delegates to an inner `CpuBackend`.
-      - If no adapter is found, it falls back to CPU with a warning. No panic.
-- [ ] `[compute] backend = "cpu" | "gpu"` (default `cpu`). `DatabaseInstance::new` builds the
-      backend from config. `SHOW BACKEND` reports it.
-- [ ] `benches/gpu_backend.rs`:
-      - matmul 256²–4096²: CPU-SIMD vs `faer` vs GPU, transfer included;
-      - batched cosine 10k–1M × 384/768.
-- [ ] Parity tests CPU↔GPU (relative tolerance 1e-4, including transposed/sliced views). They
-      skip cleanly without an adapter.
-- [ ] **Decision gate**: record the results here. If GPU wins at realistic sizes, open the
-      residency phase (Backlog 1). If not, record that and stop.
+- [x] Optional `wgpu` 30 / `pollster` / `bytemuck` behind `gpu-wgpu`. All are pure Rust. The
+      feature is outside the default build and the CI matrix, like `faer-matmul`.
+- [x] `src/core/backend/gpu/`: `GpuContext` (process-wide device, WGSL tiled GEMM + batched
+      cosine) and `GpuBackend: ComputeBackend`.
+      - `GpuBackend` sends rank-2 `matmul` ≥ 2M multiply-adds to the GPU. Everything else,
+        including the per-pair `dot`/`cosine`, goes to an inner `CpuBackend`.
+      - With no adapter or no feature, it warns and falls back to the CPU.
+- [x] `[compute] backend = "cpu" | "gpu"` (default `cpu`), applied per database, and
+      `SHOW BACKEND`.
+- [x] Parity tests (`tests/gpu_backend_test.rs`, 4 cases, relative tolerance 1e-4, including a
+      transposed view and the DSL `MATMUL` path). They skip without an adapter. Run on the Apple
+      M4 (Metal).
+- [x] `benches/gpu_backend.rs`, with results below.
+- [x] **Decision gate: closed, not proceeding to VRAM residency on this evidence.**
+
+Results (Apple M4: 10 CPU cores, 8-core GPU, 16 GB unified memory; criterion medians; GPU
+includes the per-call transfer):
+
+| matmul (square) | `CpuBackend` (DSL `MATMUL` path) | `faer` | GPU (wgpu) |
+|---|---|---|---|
+| 256 | 2.62 ms | 0.16 ms | 0.82 ms |
+| 512 | 21.6 ms | 0.74 ms | 3.84 ms |
+| 1024 | 169 ms | 4.97 ms | 25.6 ms |
+| 2048 | 1.34 s | 45.0 ms | 196 ms |
+| 4096 | 10.8 s | 344 ms | 1.52 s |
+
+| batch cosine (rows × dim) | CPU (Rayon) | GPU (wgpu) |
+|---|---|---|
+| 10k × 384 | 0.33 ms | 3.01 ms |
+| 100k × 384 | 2.95 ms | 29.5 ms |
+| 1M × 384 | 28.6 ms | 471 ms |
+| 10k × 768 | 0.66 ms | 5.16 ms |
+| 100k × 768 | 6.14 ms | 55.6 ms |
+| 1M × 768 | 59.9 ms | 998 ms |
+
+What the numbers say:
+- **Matmul.** The GPU beats the engine's current CPU kernel by 3–7×, but `faer` beats the GPU by
+  4–5× at every size. A hand-written WGSL GEMM on an integrated 8-core GPU isn't competitive
+  with a tuned CPU GEMM.
+- **Batched cosine.** The GPU is 10–16× *slower*. The work is memory-bound, and re-uploading the
+  whole matrix on every query dominates. On unified memory the CPU scan already runs at ~54 GB/s
+  (1.5 GB in 28.6 ms), so VRAM residency could at best recover the transfer, not beat the CPU by
+  much.
+- **Not settled.** This spike can't say how CUDA/cuBLAS/cuVS would do on a discrete datacenter
+  GPU, where compute is ~10–50× higher and a resident index avoids the transfer. That's the only
+  path left worth measuring (Backlog 2), and only if a real workload lives on NVIDIA hardware.
+
+**The actual win found by this spike: flagged, not fixed.**
+- The DSL's `MATMUL` (`eval_matmul` → `backend.matmul` → `SimdBackend::matmul_simd`) never
+  reaches `faer`.
+- The `faer-matmul` feature only swaps `engine::kernels::matmul`. That's reached from
+  `ScalarBackend` (matrices under 1024 elements), from non-contiguous views, and from lazy
+  `MatMul` expressions.
+- `PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 4's benchmark compared `faer` against
+  `kernels::matmul`, not against the SIMD path the DSL actually uses.
+- Routing `SimdBackend`/`CpuBackend::matmul` through `faer` when the feature is on would make
+  DSL `MATMUL` **~34× faster at 1024²** (169 ms → 5 ms), with no GPU.
 
 ## Analysis (verified against v0.1.89)
 
@@ -185,7 +248,10 @@ Checklist:
 
 ## Backlog (evidence-gated, not scheduled)
 
-1. **VRAM residency + fusion** (only if Track C wins):
+0. **Route DSL `MATMUL` through `faer`** when `faer-matmul` is on (see Track C). This is the
+   cheapest real speedup found, and it needs a maintainer decision.
+1. **VRAM residency + fusion** (Track C's spike did *not* justify this on integrated/unified-memory
+   hardware; revisit only with discrete-GPU evidence):
    - `TensorStorage { Host(Arc<Vec<f32>>), Device(..) }` with lazy migration.
    - A VRAM cache keyed by content hash, with a VRAM budget in `EngineConfig`.
    - GPU evaluation of `Expression`.

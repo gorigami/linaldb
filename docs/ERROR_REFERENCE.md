@@ -62,6 +62,17 @@ Errors related to Parquet/JSON persistence or disk access (`src/core/storage.rs`
 | `DatasetNotFound` | Attempted to `LOAD`/read a dataset package that doesn't exist on disk. |
 | `TensorNotFound` | Attempted to `LOAD`/read a tensor JSON file that doesn't exist on disk. |
 
+### Write-ahead log errors
+
+These only occur with `[wal] enabled = true` (see DSL_REFERENCE.md §8).
+
+| Message (prefix) | Cause | Fix |
+|---|---|---|
+| `CHECKPOINT requires the write-ahead log` | `CHECKPOINT` with the WAL disabled. | Set `[wal] enabled = true` in `linal.toml`, or don't checkpoint. |
+| `Database '<db>' failed WAL recovery on startup and is unavailable: ...` | Replay at startup failed. The cause follows: typically a `LOAD`/`IMPORT` whose file `has changed` since it was logged, or a replayed statement that now errors. | Restore the original file and restart. Or move `{data_dir}/<db>/wal.log` aside and restart, which loses changes since the last checkpoint. |
+| `... corrupt record at line N` | `wal.log` has an unreadable record before its last line. | Same as above. A torn *final* record is repaired automatically. |
+| `The statement was applied but could not be written to the WAL` / `has un-logged changes because a WAL write failed` | An append failed (e.g. a full disk) after the statement took effect in memory. | Free space, then run `CHECKPOINT`. It snapshots the current state and resumes logging. |
+
 ---
 
 ## 4. Common Troubleshooting
