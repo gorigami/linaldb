@@ -6,9 +6,16 @@
 //! not ML-training scale). `faer` is a dev-dependency only at this point --
 //! not wired into the engine -- this bench exists purely to produce a real
 //! number to decide Phase 4's scope with, per design decision #1.
+//!
+//! `cpu_backend` measures `CpuBackend::matmul`, the path the DSL's `MATMUL`
+//! actually takes. With the default `faer-matmul` feature it's faer; run with
+//! `--no-default-features` to measure the hand-rolled SIMD kernel it used
+//! before (see docs/SCALING_AND_GPU_ROADMAP.md).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use linal::core::backend::{ComputeBackend, CpuBackend};
 use linal::core::tensor::{Shape, Tensor, TensorId, TensorMetadata};
+use linal::engine::context::ExecutionContext;
 use linal::engine::kernels::matmul;
 
 fn make_square_tensor(n: usize, seed: f32) -> Tensor {
@@ -35,8 +42,10 @@ fn faer_matmul(a: &faer::Mat<f32>, b: &faer::Mat<f32>, n: usize) -> faer::Mat<f3
 
 fn matmul_backend_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("matmul_backend");
+    group.sample_size(10);
 
-    for &n in &[50usize, 200, 500, 1000] {
+    let cpu = CpuBackend::new();
+    for &n in &[50usize, 200, 500, 1000, 2048] {
         let a = make_square_tensor(n, 1.0);
         let b = make_square_tensor(n, 2.0);
 
@@ -45,6 +54,11 @@ fn matmul_backend_comparison(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("current_kernel", n), &n, |bench, _| {
             bench.iter(|| black_box(matmul(&a, &b, TensorId::new()).unwrap()));
+        });
+
+        group.bench_with_input(BenchmarkId::new("cpu_backend", n), &n, |bench, _| {
+            let mut ctx = ExecutionContext::new();
+            bench.iter(|| black_box(cpu.matmul(&mut ctx, &a, &b, TensorId::new()).unwrap()));
         });
 
         group.bench_with_input(BenchmarkId::new("faer", n), &n, |bench, _| {

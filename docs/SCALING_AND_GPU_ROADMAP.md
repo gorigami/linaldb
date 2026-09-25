@@ -171,7 +171,8 @@ What the numbers say:
   GPU, where compute is ~10–50× higher and a resident index avoids the transfer. That's the only
   path left worth measuring (Backlog 2), and only if a real workload lives on NVIDIA hardware.
 
-**The actual win found by this spike: flagged, not fixed.**
+**The actual win found by this spike** (flagged here, then fixed; see "Follow-up: DSL `MATMUL` on
+`faer`" below):
 - The DSL's `MATMUL` (`eval_matmul` → `backend.matmul` → `SimdBackend::matmul_simd`) never
   reaches `faer`.
 - The `faer-matmul` feature only swaps `engine::kernels::matmul`. That's reached from
@@ -181,6 +182,34 @@ What the numbers say:
   `kernels::matmul`, not against the SIMD path the DSL actually uses.
 - Routing `SimdBackend`/`CpuBackend::matmul` through `faer` when the feature is on would make
   DSL `MATMUL` **~34× faster at 1024²** (169 ms → 5 ms), with no GPU.
+
+### Follow-up: DSL `MATMUL` on `faer` (done)
+
+The maintainer approved acting on the finding above:
+- `CpuBackend::matmul` now calls `kernels::matmul_with_timestamp` (faer) whenever `faer-matmul`
+  is enabled.
+- `faer-matmul` became a **default** feature, so CI, the release binaries and the Python/R
+  bindings all get it. `--no-default-features` keeps the old SIMD/scalar path.
+- `tests/cpu_matmul_backend_test.rs` covers:
+  - parity with an f64 reference across tiny, odd and large shapes;
+  - transposed views;
+  - shape errors;
+  - bit-for-bit determinism over repeated multithreaded runs at 512²;
+  - the DSL `MATMUL` path.
+
+  All pass with and without the feature.
+- faer reads row-major and column-major inputs as views over their existing buffers, and writes
+  straight into the output.
+- Measured in `benches/matmul_backend.rs` (`cpu_backend`, Apple M4, "before" =
+  `--no-default-features`):
+
+  | n × n | before (SIMD) | after (faer) | speedup |
+  |---|---|---|---|
+  | 50 | 26 µs | 4.3 µs | 6.1× |
+  | 200 | 1.28 ms | 0.105 ms | 12.1× |
+  | 500 | 20.1 ms | 0.69 ms | 29.1× |
+  | 1000 | 157 ms | 4.57 ms | 34.3× |
+  | 2048 | 1.31 s | 45.9 ms | 28.6× |
 
 ## Analysis (as verified against v0.1.89, before Tracks A–C)
 
@@ -255,8 +284,8 @@ What the numbers say:
 
 Ordered by expected return per effort. **Near-term** (cheap, measured or clearly scoped):
 
-1. **Route DSL `MATMUL` through `faer`** when `faer-matmul` is on (see Track C): ~34× at 1024²,
-   no GPU needed. It's the cheapest real speedup found, and needs a maintainer decision.
+1. ~~Route DSL `MATMUL` through `faer`~~: **done** (see "Follow-up" under Track C).
+   `faer-matmul` is now a default feature.
 2. **Let `SELECT`/`SEARCH` run under a read lock.** Today `execute_select` creates CTE temp
    datasets, so both take their database's write lock, and queries on *one* database run one at a
    time. This is the main remaining limit on vertical scaling (see `ARCHITECTURE.md` → "Scaling &

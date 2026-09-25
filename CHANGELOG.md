@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — DSL `MATMUL` runs on `faer`, and `faer-matmul` is now a default feature
+
+The DSL's `MATMUL` (`eval_matmul` → `CpuBackend::matmul`) took the hand-rolled SIMD kernel for
+any large contiguous input, so it never reached `faer`, even with `faer-matmul` enabled. That
+feature only swapped `engine::kernels::matmul`, which is used for small, non-contiguous and lazy
+products. Found while benchmarking the GPU spike (`docs/SCALING_AND_GPU_ROADMAP.md`, Track C).
+
+- **Routing.** `CpuBackend::matmul` now calls `kernels::matmul_with_timestamp` (faer's GEMM)
+  whenever `faer-matmul` is enabled.
+- **Default feature.** `faer-matmul` is now a default feature, so CI, the release binaries and
+  the Python/R bindings all get it. `--no-default-features` restores the previous SIMD/scalar
+  kernels. `faer` is pure Rust, so this adds no system dependency.
+- **No copies.** `matmul_data_faer` no longer copies inputs and output element by element. It
+  hands row-major and column-major (transposed-view) inputs to faer as views over their existing
+  buffers, and faer writes straight into the output. That's worth 30–40% on its own, and also
+  speeds up lazy `MatMul` expressions.
+- **Measured** on an Apple M4 (`benches/matmul_backend.rs`, new `cpu_backend` case):
+
+| n × n | before (SIMD) | after (faer) | speedup |
+|---|---|---|---|
+| 50 | 26 µs | 4.3 µs | 6.1× |
+| 200 | 1.28 ms | 0.105 ms | 12.1× |
+| 500 | 20.1 ms | 0.69 ms | 29.1× |
+| 1000 | 157 ms | 4.57 ms | 34.3× |
+| 2048 | 1.31 s | 45.9 ms | 28.6× |
+
+- **Numerics.** Results match an f64 reference within f32 rounding but aren't bit-identical to
+  the old kernel, because the summation order differs. They are bit-for-bit deterministic run to
+  run, including multithreaded. New `tests/cpu_matmul_backend_test.rs` (6 cases) covers
+  reference parity, transposed, row-offset and submatrix views, shape errors, determinism and the
+  DSL path, and passes with and without the feature.
+- **Shape errors** now come from `kernels::matmul_with_timestamp` and name the offending
+  dimensions (`Matrix dimension mismatch in matmul: A is [2x3], B is [2x3]...`) instead of the
+  SIMD path's bare `Dimension mismatch`.
+
 ### Docs — scaling & deployment model
 
 - **`docs/ARCHITECTURE.md`** has a new "Scaling & Deployment" section:

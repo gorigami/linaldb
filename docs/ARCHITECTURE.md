@@ -966,9 +966,10 @@ they serialize on its write lock.
 **Getting the most from one machine today:**
 1. **Split data across databases** (per tenant, project or domain). It's the direct way to turn
    more cores into more throughput.
-2. **The `faer-matmul` Cargo feature** speeds up `engine::kernels::matmul` (lazy expressions,
-   small or non-contiguous inputs). The DSL's `MATMUL` on large contiguous matrices doesn't use it
-   yet; wiring that up would make it ~34× faster at 1024² (roadmap backlog item 1).
+2. **Dense `MATMUL` runs on `faer`** (the `faer-matmul` feature, on by default). It's a
+   cache-blocked, multithreaded CPU GEMM that uses all cores well, so large products scale with
+   the machine. A build with `--no-default-features` falls back to the slower hand-rolled SIMD
+   kernel.
 3. **Durability versus write latency**, via `[wal] sync` (see "Write-ahead log"). Measured on
    macOS: `never` is free (≈0.23 ms per `INSERT` over HTTP, same as no WAL), and `always` costs
    ≈5 ms per write in exchange for surviving a power loss.
@@ -1161,6 +1162,7 @@ Tensor Size → Allocation Strategy:
 
 ```
 Operation → CpuBackend:
+├─ matmul (faer-matmul, default) → kernels::matmul_with_timestamp → faer GEMM
 ├─ ≥1024 elements → SimdBackend (SIMD optimized, if contiguous)
 └─ Otherwise → ScalarBackend (fallback)
 ```
@@ -1180,6 +1182,19 @@ Operation → CpuBackend:
 - **No usable GPU:** without an adapter, or without the feature, the engine warns once and uses
   `CpuBackend`.
 
+**`matmul` is the exception to the dispatch above.** With the default `faer-matmul` feature,
+`CpuBackend::matmul` skips the SIMD/scalar split and always calls
+`kernels::matmul_with_timestamp`. That validates shapes, then runs faer's GEMM.
+- Row-major and column-major (transposed) inputs are passed to faer as views over their existing
+  buffers, and faer writes straight into the output. Other strided views are copied first.
+- Measured on an Apple M4 against the SIMD kernel (`benches/matmul_backend.rs`,
+  `cpu_backend`): 6× faster at 50², 12× at 200², and 29–34× from 500² up.
+- It's bit-deterministic run to run (`tests/cpu_matmul_backend_test.rs`).
+- Without the feature, `matmul` follows the element-count dispatch like every other operation.
+
+Before this, the DSL's `MATMUL` took `SimdBackend::matmul_simd` for any large contiguous input, so
+`faer` was never reached on that path even with the feature enabled.
+
 `CpuBackend::use_simd` dispatches to `SimdBackend` purely on element count (≥1024); the contiguity check happens one layer down, inside each of `SimdBackend`'s individual op methods, which fall back to scalar internally for non-contiguous input rather than at the `CpuBackend` dispatch point. There is no separate Rayon backend tier — Rayon parallelism is embedded directly inside the kernel functions in `engine/kernels.rs`.
 
 **SIMD Kernels** (`src/core/backend/simd.rs`):
@@ -1195,21 +1210,17 @@ Rayon parallelism fires inside individual kernel functions in `engine/kernels.rs
 
 - `add`, `sub`, `multiply`: `par_iter()` for contiguous tensors ≥50k elements
 - `scalar_mul` (backing `SCALE`): `par_iter()` at ≥50k elements
-- `matmul`: `par_chunks_mut` for large tile passes -- this is `matmul_data_builtin`
-  (`engine/kernels.rs`) specifically, the default. An alternate `matmul_data_faer`
-  backend (`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 4), gated behind the opt-in
-  `faer-matmul` Cargo feature (`faer` promoted from a dev-dependency to a real
-  optional one only when that feature is on -- pure Rust, no C/Fortran BLAS
-  toolchain, chosen specifically to preserve this repo's "no system library
-  dependency" build property), measured ~8-22x faster than the built-in kernel
-  across 50..1000-square matrices in `benches/matmul_backend.rs`, growing with N.
-  `matmul_with_timestamp` picks whichever is compiled in via `#[cfg(feature =
-  "faer-matmul")]`; the shape/dimension validation in front of it and the
-  `Tensor::new` construction after it are both unchanged and feature-independent
-  -- only the numeric kernel itself swaps. Not part of the default build or CI's
-  test matrix (same as the pre-existing `zero-copy`/`experimental` features);
-  validated locally against the existing `engine_matrix_ops.rs`/`dsl_matrix_ops.rs`
-  integration suites with `--features faer-matmul` before landing.
+- `matmul`: `kernels::matmul_with_timestamp` runs `matmul_data_faer`, faer's multithreaded
+  GEMM. This is the default via the `faer-matmul` feature (`PERFORMANCE_OPTIMIZATION_PLAN.md`
+  Phase 4). `faer` is pure Rust, with no C/Fortran BLAS toolchain, which preserves this repo's
+  "no system library dependency" build property.
+  - The shape validation in front of the kernel and the `Tensor::new` construction after it are
+    feature-independent; only the numeric kernel swaps.
+  - Without the feature (`--no-default-features`), the kernel is `matmul_data_builtin`
+    (`par_chunks_mut` over large tile passes), and `CpuBackend::matmul` uses the SIMD/scalar
+    kernels instead (see "Backend Dispatch").
+  - The feature became the default when the DSL's `MATMUL` was routed through it (see CHANGELOG),
+    so CI, the release binaries and the Python/R bindings all build with it.
 - Dataset batch operations: `par_chunks` for row processing ≥10k rows
 - 2.5x speedup on 100k-element vectors
 
@@ -1315,8 +1326,7 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 See [`SCALING_AND_GPU_ROADMAP.md`](SCALING_AND_GPU_ROADMAP.md) for the evidence-gated backlog and
 its reasoning. In short:
 
-- **Faster single-database concurrency**: `SELECT`/`SEARCH` under a read lock, and DSL `MATMUL`
-  through `faer`.
+- **Faster single-database concurrency**: `SELECT`/`SEARCH` under a read lock.
 - **Read replicas per database** (H1), built on the write-ahead log.
 - **Distributed execution** (H2): cross-instance queries, and databases larger than one machine.
 - **Columnar execution engine** (a prerequisite for H2).

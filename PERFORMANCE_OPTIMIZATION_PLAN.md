@@ -207,8 +207,9 @@ findings and a sequenced, risk-ranked execution order for what remains.
   `faer` is only used on the scalar path (under 1024 elements), for non-contiguous views, and for
   lazy `MatMul` expressions. This phase's benchmark compared `faer` against `kernels::matmul`,
   not against the SIMD path the DSL actually uses. Measured on an Apple M4: `CpuBackend::matmul`
-  169 ms vs `faer` 4.97 ms at 1024². Routing the backend's matmul through `faer` when the feature
-  is on is backlog item 1 there.
+  169 ms vs `faer` 4.97 ms at 1024².
+  - **Resolved:** `CpuBackend::matmul` now calls the faer kernel when the feature is on, and
+    `faer-matmul` is a default feature.
 
 ## Backlog (not scheduled — profiling-gated future items)
 

@@ -32,7 +32,14 @@ impl CpuBackend {
 
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &str {
-        "Cpu (Hybrid Scalar/SIMD)"
+        #[cfg(feature = "faer-matmul")]
+        {
+            "Cpu (Hybrid Scalar/SIMD; matmul via faer)"
+        }
+        #[cfg(not(feature = "faer-matmul"))]
+        {
+            "Cpu (Hybrid Scalar/SIMD)"
+        }
     }
 
     fn add(
@@ -95,11 +102,26 @@ impl ComputeBackend for CpuBackend {
         b: &Tensor,
         new_id: TensorId,
     ) -> Result<Tensor, String> {
-        // Try SIMD backend which handles contiguous optimization, fallback to scalar otherwise
-        if self.use_simd(a.len()) {
-            self.simd.matmul(ctx, a, b, new_id)
-        } else {
-            self.scalar.matmul(ctx, a, b, new_id)
+        // With `faer-matmul` (a default feature), every matmul goes through
+        // `kernels::matmul_with_timestamp`, which uses faer's cache-blocked
+        // GEMM. It honors strides and offsets and validates shapes itself.
+        // Measured on an Apple M4: 169 ms -> 5 ms at 1024^2, versus the
+        // hand-rolled SIMD kernel below (see docs/SCALING_AND_GPU_ROADMAP.md).
+        // Before this, the DSL's `MATMUL` took the SIMD path for any large
+        // contiguous input, so the feature never reached it.
+        #[cfg(feature = "faer-matmul")]
+        {
+            crate::engine::kernels::matmul_with_timestamp(a, b, new_id, ctx.created_at)
+        }
+
+        // Without the feature: SIMD for large contiguous inputs, scalar otherwise.
+        #[cfg(not(feature = "faer-matmul"))]
+        {
+            if self.use_simd(a.len()) {
+                self.simd.matmul(ctx, a, b, new_id)
+            } else {
+                self.scalar.matmul(ctx, a, b, new_id)
+            }
         }
     }
 
