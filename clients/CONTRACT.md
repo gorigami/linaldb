@@ -35,9 +35,18 @@ column), which is the workload this option exists for. Only a *successful*
 check the response `Content-Type` before attempting to decode it as Arrow.
 
 Headers: `X-Linal-Database: <name>` to target a non-default database for
-that one request only (the server reverts to whatever was active before
-once this request finishes, so concurrent requests targeting different
-databases via the header can't clobber each other's context).
+that one request only. The request is pinned to that database and never
+touches the server's active database, so concurrent requests targeting
+different databases via the header can't clobber each other's context.
+Each database has its own lock on the server, so requests to different
+databases also run in parallel.
+
+**Clients should send this header on every request.** Beyond isolation,
+it's the routing key for multi-instance deployments: a reverse proxy
+sends each database to the instance that owns it (see
+`docs/ARCHITECTURE.md` → "Scaling & Deployment"). A client that relies on
+headerless requests or `USE` only ever reaches the proxy's default
+instance.
 
 **A request with no `X-Linal-Database` header operates on — and can
 change — the server's session-wide active database.** A plain `USE <db>`
@@ -151,18 +160,19 @@ Request: a whole multi-statement script as the request body
 accepts from a `.lnl` file — one statement per line, or a statement
 spanning multiple lines (it ends once its parentheses balance out, not
 at the next line break), with `#`/`--`/`//` comment lines skipped between
-statements. Statements execute in order, under one write-lock hold, and
-the batch stops at the first error.
+statements. Statements execute in order, and the batch stops at the first
+error. Consecutive statements on one database run under one hold of that
+database's write lock.
 
 Query params: `?format=json` (same as `/execute`).
 
 Headers: `X-Linal-Database: <name>`, same semantics as `/execute` but
-scoped to the whole batch instead of one statement — the server restores
-the previously active database once, after the batch finishes (or stops
-on an error), not after each individual statement. This is why `USE`/
-`CREATE DATABASE` inside a batch body works exactly as written and
-*does* persist for the rest of that batch: nothing restores the active
-database mid-batch, only at the very end. Send a script that needs `USE`
+scoped to the whole batch instead of one statement. A header-bearing
+batch starts pinned to that database, and a `USE` inside it switches
+databases for the rest of *that batch only*: it never leaves the batch.
+In a headerless batch, a `USE` also becomes the server's active database,
+like a headerless `/execute` `USE`. Either way, `USE`/`CREATE DATABASE`
+inside a batch body works exactly as written for the statements after it. Send a script that needs `USE`
 to control several subsequent statements here instead of as separate
 `/execute` calls (where the identical combination is now a `400` error —
 see §1).

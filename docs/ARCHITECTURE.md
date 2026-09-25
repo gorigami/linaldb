@@ -14,7 +14,8 @@ This document provides a comprehensive overview of the LINAL engine architecture
 8. [Lineage & Provenance](#lineage--provenance)
 9. [Classical Linear Algebra](#classical-linear-algebra)
 10. [Consistency & Auditing](#consistency--auditing)
-11. [Design Principles](#design-principles)
+11. [Scaling & Deployment](#scaling--deployment)
+12. [Design Principles](#design-principles)
 
 ---
 
@@ -914,6 +915,140 @@ As LINAL moves toward a "Reference Graph" model for data, the engine provides to
 
 ---
 
+## Scaling & Deployment
+
+How LINAL uses a bigger machine, how to spread it over several machines today, and what isn't
+possible yet. The measurements and the reasoning behind these limits are in
+[`SCALING_AND_GPU_ROADMAP.md`](SCALING_AND_GPU_ROADMAP.md).
+
+### Deployment modes
+
+- **Embedded** (CLI/REPL, `linal run`, the Python/R native bindings): one process owns one
+  `TensorDb` through `&mut`. There's no internal locking; concurrency is the host application's
+  concern, the same as SQLite.
+- **Server** (`linal serve`): a multi-tenant HTTP server over `server::engine::SharedEngine`,
+  described below. It's one process per data directory.
+
+### Concurrency model (`linal serve`)
+
+Each database is its own single-database `TensorDb` behind its own `RwLock`. A request only locks
+the database it targets: the `X-Linal-Database` header, or else the server's active database.
+
+| Statement | Lock taken |
+|---|---|
+| `EXPLAIN`, `AUDIT`, `LIST`, `DELIVER`, `SHOW` (except `SHOW <lazy tensor>`), `DESCRIBE PIPELINE` | **read** lock on the target database. Any number run in parallel |
+| Everything else, **including `SELECT` and `SEARCH`** (they create temporary datasets), and `SHOW` of a lazy tensor (it materializes it) | **write** lock on the target database |
+| `CREATE`/`DROP`/`USE DATABASE`, `SHOW DATABASES` | none: answered by the router. `DROP` waits for in-flight work on that database |
+| `/execute/batch` | holds the target database's write lock across consecutive statements, and switches databases only at a `USE` |
+
+What that means in practice:
+- **Requests against different databases never wait on each other.**
+- **Requests against the same database run one at a time**, except the read-only statements
+  above. This is the main vertical-scaling limit today (roadmap backlog item 2).
+- Per-request limits: `QUERY_TIMEOUT_SECS` = 30 s, and a 16 KiB command/batch body
+  (`MAX_COMMAND_LENGTH`).
+
+### Scaling vertically (one bigger machine)
+
+**What a bigger machine buys:**
+- **More cores speed up a single large operation.** SIMD kicks in at ≥1,024 elements and Rayon
+  parallelism at ≥50k elements (see "Execution Model"), plus tiled parallel matmul and parallel
+  batch processing of large datasets.
+- **More cores also run different databases concurrently.** With per-database locks, *N* busy
+  databases can use *N* cores' worth of request concurrency.
+- **More RAM holds more data.** Everything is in memory. Record datasets are row-oriented (a
+  `Value` per cell, a heap vector per `Vector` cell), so plan for noticeably more RAM than the raw
+  data size.
+
+**What a bigger machine does *not* buy:** more concurrent queries on the *same* database, since
+they serialize on its write lock.
+
+**Getting the most from one machine today:**
+1. **Split data across databases** (per tenant, project or domain). It's the direct way to turn
+   more cores into more throughput.
+2. **The `faer-matmul` Cargo feature** speeds up `engine::kernels::matmul` (lazy expressions,
+   small or non-contiguous inputs). The DSL's `MATMUL` on large contiguous matrices doesn't use it
+   yet; wiring that up would make it ~34× faster at 1024² (roadmap backlog item 1).
+3. **Durability versus write latency**, via `[wal] sync` (see "Write-ahead log"). Measured on
+   macOS: `never` is free (≈0.23 ms per `INSERT` over HTTP, same as no WAL), and `always` costs
+   ≈5 ms per write in exchange for surviving a power loss.
+4. **The GPU backend doesn't help here.** `gpu-wgpu` and `[compute] backend = "gpu"` are an
+   experimental spike, not a scaling lever. On an Apple M4, `faer` beat it 4–5× on matmul, and it
+   was 10–16× slower than the CPU for batched similarity scoring.
+
+### Durability and restarts
+
+- **WAL off (the default):** a restart recovers the database *names* only. Content comes back
+  only through explicit `LOAD`.
+- **WAL on (`[wal] enabled = true`):** each database restores its last checkpoint and replays its
+  `wal.log`, so unsaved state survives a crash or `kill -9` (see "Write-ahead log" under Storage
+  Layer).
+- **The WAL is strictly local to one process.** Never point two `linal` processes at the same
+  data directory: both would append to the same logs and overwrite each other's checkpoints.
+
+### Scaling horizontally today: one instance per group of databases
+
+LINAL instances don't talk to each other, but multi-tenant load can still be spread across
+machines. Give each instance its own data directory, each database to exactly one instance, and
+route requests by database with a reverse proxy keyed on the `X-Linal-Database` header:
+
+```nginx
+map $http_x_linal_database $linal_upstream {
+    default      linal_a;     # includes headerless requests
+    tenant_b     linal_b;
+    tenant_c     linal_b;
+}
+upstream linal_a { server 10.0.0.11:8080; }
+upstream linal_b { server 10.0.0.12:8080; }
+server {
+    listen 8080;
+    location / { proxy_pass http://$linal_upstream; }
+}
+```
+
+Rules for this setup:
+- **Every client request carries `X-Linal-Database`.** The Python and R clients already do, via
+  their `database` connection parameter. A headerless request, and anything it does (`USE`,
+  `SHOW DATABASES`, `GET /databases`), only sees whichever instance the proxy's default routes
+  to.
+- **Creating a database is an operator action against the instance that will own it.** Send
+  `CREATE DATABASE` or `POST /databases/:name` directly to that instance, then add it to the
+  proxy's map. A header naming a database that doesn't exist yet is an error, so creation can't
+  go through header routing.
+- **Jobs and schedules are per instance.** Submit them through the proxy with the header, so they
+  land on the owning instance.
+- **Give each instance its own working directory.** `/delivery` currently reads `./data`
+  relative to the process's working directory, not `config.storage.data_dir` (roadmap backlog
+  item 3).
+- **Each instance is a single point of failure for its databases.** Use `[wal] enabled = true`
+  plus restart supervision (systemd, Kubernetes) so a restart restores its state. There's no
+  replica to fail over to yet.
+
+**Moving data between instances** is file-based:
+1. `SAVE DATASET` on the source writes a Parquet package.
+2. Copy it through a shared filesystem or object-storage sync, or fetch it over HTTP from
+   `GET /delivery/datasets/<name>/...`.
+3. `LOAD DATASET` / `IMPORT DATASET` on the destination.
+
+Pipelines move the same way with `SAVE PIPELINE` / `LOAD PIPELINE`.
+
+### Not supported (yet)
+
+- **Queries that span instances.** No cross-instance `JOIN`, and no single database spread over
+  several machines. A database must fit, in RAM, on one machine.
+- **Replication and failover.** No read replicas, no standby, no shared catalog. The instances
+  behind a proxy don't know about each other.
+- **Instance-to-instance protocol.** There's no Arrow Flight or gRPC between nodes. Clients talk
+  REST, and the `?format=arrow` IPC response is client-facing only.
+
+The designed path forward is evidence-gated (roadmap "Backlog"):
+- **H1: read replicas per database.** Ship `wal.log` and `checkpoint/` to another node that
+  replays them. Track B built that machinery. Dataset packages would live in object storage.
+- **H2: distributed queries.** Evaluate DataFusion/Ballista first. It requires the columnar
+  dataset unification.
+
+---
+
 ## Design Principles
 
 ### 1. Modularity
@@ -956,10 +1091,26 @@ Engine configuration via `linal.toml`:
 [storage]
 data_dir = "./data"
 default_db = "default"
+
+[wal]                          # optional; the whole section defaults to off
+enabled = false
+sync = "always"                # "always" | "never"
+checkpoint_bytes = 67108864    # auto-checkpoint once wal.log passes this (64 MiB)
+
+[compute]                      # optional
+backend = "cpu"                # "cpu" | "gpu" (experimental, needs the gpu-wgpu build feature)
 ```
 
-- **data_dir**: Root directory for persistence
-- **default_db**: Default database name
+- **`storage.data_dir`**: root directory for persistence. Each database is a subdirectory.
+- **`storage.default_db`**: default database name.
+- **`wal.*`**: the write-ahead log (see Storage Layer → "Write-ahead log", and "Scaling &
+  Deployment" → "Durability and restarts").
+- **`compute.backend`**: the per-database compute backend (see "Execution Model" → "Backend
+  selection").
+
+`linal.toml` is read from the process's working directory. `linal init` writes only the
+`[storage]` section. `[wal]` and `[compute]` are optional, and a file without them keeps
+pre-WAL, CPU-only behavior.
 
 ---
 
@@ -1018,7 +1169,7 @@ Operation → CpuBackend:
 `[compute] backend` by `core::backend::from_config`. The default is `CpuBackend`.
 
 `backend = "gpu"` selects `core::backend::gpu::GpuBackend`, an experimental spike behind the
-`gpu-wgpu` Cargo feature (see `SCALING_AND_GPU_PLAN.md` Track C).
+`gpu-wgpu` Cargo feature (see `docs/SCALING_AND_GPU_ROADMAP.md` Track C).
 - **What runs on the GPU:** only rank-2 `matmul` at or above `MATMUL_GPU_MIN_FLOPS`, via a tiled
   WGSL GEMM (`gpu/kernels.wgsl`) on a process-wide `GpuContext`. Every other operation, and any
   smaller or ill-shaped matmul, delegates to an inner `CpuBackend`.
@@ -1161,10 +1312,17 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 
 ## Future Enhancements
 
-- GPU-backed tensor execution
-- Distributed execution
-- Columnar execution engine
-- Python/WASM integration
+See [`SCALING_AND_GPU_ROADMAP.md`](SCALING_AND_GPU_ROADMAP.md) for the evidence-gated backlog and
+its reasoning. In short:
+
+- **Faster single-database concurrency**: `SELECT`/`SEARCH` under a read lock, and DSL `MATMUL`
+  through `faer`.
+- **Read replicas per database** (H1), built on the write-ahead log.
+- **Distributed execution** (H2): cross-instance queries, and databases larger than one machine.
+- **Columnar execution engine** (a prerequisite for H2).
+- **GPU execution beyond the spike** (VRAM residency, CUDA). Deferred: the `gpu-wgpu` spike
+  didn't beat `faer` on the measured hardware.
+- WASM integration
 - Native ML operators (KNN, clustering, PCA)
 
 ---

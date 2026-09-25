@@ -59,7 +59,7 @@ instant-distance = { version = "0.6.1", default-features = false, features = ["w
 # hand-rolled/Rayon kernel across 50..1000-square matrices, growing with N.
 faer = { version = "0.24.4", optional = true }
 # Optional GPU compute backend (src/core/backend/gpu/) -- see
-# SCALING_AND_GPU_PLAN.md Track C. Only linked in when the `gpu-wgpu`
+# docs/SCALING_AND_GPU_ROADMAP.md Track C. Only linked in when the `gpu-wgpu`
 # feature is enabled. wgpu is pure Rust over the OS's own graphics API
 # (Metal on macOS, Vulkan/DX12 elsewhere), so like faer it keeps the "no
 # system library dependency" build property; CUDA would not.

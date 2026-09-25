@@ -1,5 +1,5 @@
 //! Optional GPU compute backend over `wgpu` (feature `gpu-wgpu`) -- the
-//! Track C spike of `SCALING_AND_GPU_PLAN.md`.
+//! Track C spike of `docs/SCALING_AND_GPU_ROADMAP.md`.
 //!
 //! Scope is deliberately narrow: measure whether a GPU pays off for this
 //! engine's workloads before committing to device-resident tensors.
