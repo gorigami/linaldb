@@ -4,6 +4,25 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.15] - 2026-09-25
+
+Picks up the root engine's `v0.1.90`, linked directly in via the `linal` path dependency. No
+Python-side code change. What reaches Python:
+
+- **Faster `MATMUL`.** It now runs on `faer`: 6× at 50², and 29–34× from 500² up (1000²:
+  157 ms → 4.6 ms on an Apple M4). Results agree with the previous kernel to f32 rounding, not
+  bit for bit, and are deterministic run to run.
+- **Bug fix.** `SELECT * FROM (SELECT ...) AS x` no longer leaves `x` behind as a dataset. Before,
+  running the same query twice in one `Db` failed with `Dataset name already exists`. A CTE can
+  also now reuse the name of an existing dataset.
+- **Opt-in write-ahead log.** With `[wal] enabled = true` in `linal.toml`, a `Db`'s unsaved state
+  survives a crash or restart. `CHECKPOINT` is a new statement. The WAL is off by default, so
+  nothing changes unless it's enabled.
+- **`SHOW BACKEND`** is a new statement that reports the compute backend.
+
+The server-side changes in `v0.1.90` (per-database locking, `SELECT` under a read lock) don't
+affect the embedded binding, which owns its engine directly.
+
 ## [0.1.14] - 2026-09-21
 
 Picks up the root engine's `v0.1.89` (linked directly in via the `linal` path dependency): a
