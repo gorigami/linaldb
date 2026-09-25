@@ -214,11 +214,13 @@ pub fn is_read_only(line: &str) -> bool {
 }
 
 /// Whether `line` can run through `execute_line_shared` (a read lock) against
-/// `db` right now. Wider than `is_read_only`, which is static: `SHOW` and
-/// `DESCRIBE PIPELINE` never mutate the engine, except `SHOW <name>` on a
-/// lazy tensor, which materializes it -- so that case depends on `db`'s
-/// current state, and the caller must check and execute under the same lock
-/// guard.
+/// `db` right now. Wider than `is_read_only`, which is static:
+/// - `SELECT` and `SEARCH` without `INTO` only read -- `execute_select` and
+///   `run_search` take `&TensorDb`, so the compiler guarantees it;
+/// - `SHOW` and `DESCRIBE PIPELINE` never mutate the engine, except `SHOW
+///   <name>` on a lazy tensor, which materializes it. That case depends on
+///   `db`'s current state, so the caller must check and execute under the same
+///   lock guard.
 pub fn can_execute_shared(db: &TensorDb, line: &str) -> bool {
     use crate::dsl::ast::{ShowTarget, Statement};
     match crate::dsl::parser::parse(line) {
@@ -228,14 +230,17 @@ pub fn can_execute_shared(db: &TensorDb, line: &str) -> bool {
             _ => true,
         },
         Ok(Statement::DescribePipeline(_)) => true,
+        Ok(Statement::Select(_)) => true,
+        Ok(Statement::Search(s)) => s.target.is_none(),
         _ => false,
     }
 }
 
 /// Execute a single DSL line with an immutable reference to the DB (shared/read-lock path).
 ///
-/// Dispatches read-only statements (EXPLAIN, AUDIT, LIST, DELIVER) plus SHOW
-/// and DESCRIBE PIPELINE -- see `can_execute_shared` for when SHOW is safe here.
+/// Dispatches read-only statements (EXPLAIN, AUDIT, LIST, DELIVER) plus SHOW,
+/// DESCRIBE PIPELINE, SELECT and SEARCH without INTO -- see
+/// `can_execute_shared` for when each is safe here.
 pub fn execute_line_shared(
     db: &TensorDb,
     line: &str,
@@ -279,6 +284,11 @@ pub fn execute_line_shared(
         }
         Ok(crate::dsl::ast::Statement::DescribePipeline(name)) => {
             executor::execute_describe_pipeline(db, name, line_no)
+        }
+        Ok(crate::dsl::ast::Statement::Select(s)) => executor::execute_select(db, s, line_no),
+        Ok(crate::dsl::ast::Statement::Search(s)) if s.target.is_none() => {
+            let (schema, rows) = executor::run_search(db, &s, line_no)?;
+            executor::search_result_table(schema, rows, line_no)
         }
         Ok(crate::dsl::ast::Statement::Deliver(s)) => Ok(DslOutput::Message(format!(
             "Delivery Projection for '{}' created. (Phase 1 Read-Only View)",

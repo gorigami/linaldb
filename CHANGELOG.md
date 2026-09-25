@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — `SELECT` and `SEARCH` run under a read lock; fixed a `FROM`-subquery leak
+
+**The bug.** `FROM (SELECT ...) AS x` registered `x` as a real dataset and never removed it.
+Every such query leaked a dataset into the catalog, and **running the same query a second time
+failed** with `Dataset name already exists: x`. This affected every mode: CLI, REPL, the
+Python/R bindings and the server.
+
+**Scoped intermediate results.** CTEs (`WITH x AS (...)`) and `FROM` subqueries now keep their
+rows in a per-query scope, as a new `LogicalPlan::Values` node with a `ValuesExec` operator.
+They're no longer datasets. A CTE is visible to later CTEs, joins, nested subqueries and the
+right side of a `UNION`, and it now shadows a real dataset with the same name for that query
+instead of failing.
+
+**Read lock in the server.** `execute_select` and the new `run_search` take `&TensorDb`, so the
+compiler guarantees a query can't modify the database. `linal serve` now runs `SELECT` and
+`SEARCH` without `INTO` under the database's **read** lock (`dsl::can_execute_shared`), so
+concurrent reads of the same database no longer queue behind each other. `SEARCH ... INTO` and
+every other write keep the write lock.
+
+**Measured** (Apple M4, 10 cores, release builds, concurrent `GROUP BY` on one database):
+
+| clients | 300k rows before → after | 30k rows before → after |
+|---|---|---|
+| 1 | 23.9 → 24.1 q/s | 174 → 178 q/s |
+| 2 | 25.0 → 34.4 q/s | 237 → 242 q/s |
+| 4 | 25.2 → 44.7 q/s (median latency 158 → 89 ms) | 241 → 355 q/s |
+| 8 | 25.0 → 28.4 q/s | 242 → 275 q/s |
+
+Past ~4 concurrent queries, throughput flattens: each large query already parallelizes
+internally, and every scan clones its rows. Cheaper scans are the next step
+(`docs/SCALING_AND_GPU_ROADMAP.md` backlog item 2).
+
+New `tests/select_read_only_test.rs` (6 cases) covers:
+- the leak regression;
+- CTE scoping and shadowing;
+- CTE visibility through joins, later CTEs, subqueries and `UNION`;
+- `SELECT`/`SEARCH` completing while another reader holds the lock, while `SEARCH ... INTO`
+  waits;
+- 16 concurrent `SELECT`s on one database.
+
 ### Changed — DSL `MATMUL` runs on `faer`, and `faer-matmul` is now a default feature
 
 The DSL's `MATMUL` (`eval_matmul` → `CpuBackend::matmul`) took the hand-rolled SIMD kernel for

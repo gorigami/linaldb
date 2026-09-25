@@ -936,15 +936,25 @@ the database it targets: the `X-Linal-Database` header, or else the server's act
 
 | Statement | Lock taken |
 |---|---|
-| `EXPLAIN`, `AUDIT`, `LIST`, `DELIVER`, `SHOW` (except `SHOW <lazy tensor>`), `DESCRIBE PIPELINE` | **read** lock on the target database. Any number run in parallel |
-| Everything else, **including `SELECT` and `SEARCH`** (they create temporary datasets), and `SHOW` of a lazy tensor (it materializes it) | **write** lock on the target database |
+| `SELECT` (including CTEs, `FROM` subqueries, joins and `UNION`), `SEARCH` without `INTO`, `EXPLAIN`, `AUDIT`, `LIST`, `DELIVER`, `SHOW` (except `SHOW <lazy tensor>`), `DESCRIBE PIPELINE` | **read** lock on the target database. Any number run in parallel |
+| Everything else: `INSERT`/`UPDATE`/`DELETE`, `SEARCH ... INTO`, `DATASET ... FROM`, `TRANSFORM`, `APPLY PIPELINE`, tensor statements, `SHOW` of a lazy tensor (it materializes it), ... | **write** lock on the target database |
 | `CREATE`/`DROP`/`USE DATABASE`, `SHOW DATABASES` | none: answered by the router. `DROP` waits for in-flight work on that database |
 | `/execute/batch` | holds the target database's write lock across consecutive statements, and switches databases only at a `USE` |
 
 What that means in practice:
 - **Requests against different databases never wait on each other.**
-- **Requests against the same database run one at a time**, except the read-only statements
-  above. This is the main vertical-scaling limit today (roadmap backlog item 2).
+- **Reads of the same database run in parallel. Writes are exclusive:** a write waits for
+  in-flight reads, and new reads wait behind a queued write.
+- **Why `SELECT` can take a read lock.** `execute_select` takes `&TensorDb`, so the compiler
+  guarantees a query can't modify the database. Its CTEs and `FROM` subqueries live in a
+  per-query scope (`LogicalPlan::Values`) instead of being registered as datasets.
+- **Measured** (Apple M4, 10 cores, release build, concurrent `GROUP BY` on one database):
+  - 300k rows: throughput went from 25 to 34 queries/s with 2 clients (1.4×), and to 45 with 4
+    clients (1.8×). Median latency at 4 clients dropped from 158 ms to 89 ms.
+  - 30k rows: 4 clients went from 241 to 355 queries/s (1.5×).
+  - Past ~4 concurrent queries, throughput flattens or dips. Each large query already
+    parallelizes internally with Rayon, and every scan clones its rows, so more simultaneous
+    queries compete for the same cores and memory bandwidth (roadmap backlog).
 - Per-request limits: `QUERY_TIMEOUT_SECS` = 30 s, and a 16 KiB command/batch body
   (`MAX_COMMAND_LENGTH`).
 
@@ -960,12 +970,14 @@ What that means in practice:
   `Value` per cell, a heap vector per `Vector` cell), so plan for noticeably more RAM than the raw
   data size.
 
-**What a bigger machine does *not* buy:** more concurrent queries on the *same* database, since
-they serialize on its write lock.
+**What a bigger machine buys less of:**
+- Concurrent *writes* to the same database: they're exclusive.
+- Concurrent heavy reads past ~4 on the machine measured above: they're already internally
+  parallel.
 
 **Getting the most from one machine today:**
-1. **Split data across databases** (per tenant, project or domain). It's the direct way to turn
-   more cores into more throughput.
+1. **Split write-heavy data across databases** (per tenant, project or domain). Writes to
+   different databases run in parallel. Reads of one database already do.
 2. **Dense `MATMUL` runs on `faer`** (the `faer-matmul` feature, on by default). It's a
    cache-blocked, multithreaded CPU GEMM that uses all cores well, so large products scale with
    the machine. A build with `--no-default-features` falls back to the slower hand-rolled SIMD
@@ -1326,7 +1338,8 @@ To ensure a stable foundation, LINAL guarantees the following semantic behaviors
 See [`SCALING_AND_GPU_ROADMAP.md`](SCALING_AND_GPU_ROADMAP.md) for the evidence-gated backlog and
 its reasoning. In short:
 
-- **Faster single-database concurrency**: `SELECT`/`SEARCH` under a read lock.
+- **Cheaper scans**: avoid cloning every row in `SeqScanExec`, so concurrent reads scale past
+  the ~4-query plateau.
 - **Read replicas per database** (H1), built on the write-ahead log.
 - **Distributed execution** (H2): cross-instance queries, and databases larger than one machine.
 - **Columnar execution engine** (a prerequisite for H2).

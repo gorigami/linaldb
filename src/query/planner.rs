@@ -4,7 +4,7 @@ use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
     AggregateExec, CosineFilterExec, DistinctExec, FilterExec, HashJoinExec, IndexScanExec,
     LimitExec, PartitionPrunedScanExec, PhysicalPlan, ProjectionExec, SeqScanExec,
-    SimilarityJoinExec, SortExec, UnionExec, VectorSearchExec,
+    SimilarityJoinExec, SortExec, UnionExec, ValuesExec, VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -38,6 +38,10 @@ impl<'a> Planner<'a> {
             } => Ok(Box::new(SeqScanExec {
                 dataset_name: dataset_name.clone(),
                 schema: schema.clone(),
+            })),
+            LogicalPlan::Values { schema, rows, .. } => Ok(Box::new(ValuesExec {
+                schema: schema.clone(),
+                rows: rows.clone(),
             })),
             LogicalPlan::Filter { input, predicate } => {
                 // OPTIMIZATION: Check if we can use an Index (replaces the

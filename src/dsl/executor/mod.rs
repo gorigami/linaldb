@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::core::dataset_legacy;
 use crate::core::storage::ParquetStorage;
 use crate::core::tensor::Shape;
 use crate::core::tuple::{Field, Schema, Tuple};
@@ -9,8 +8,6 @@ use crate::dsl::ast::*;
 use crate::dsl::{DslError, DslOutput};
 use crate::engine::context::ExecutionContext;
 use crate::engine::{TensorDb, TensorKind};
-use crate::query::logical::LogicalPlan;
-use crate::query::planner::Planner;
 
 mod eval;
 mod explain;
@@ -21,6 +18,7 @@ mod show;
 pub use eval::expr_to_string;
 pub use explain::execute_explain;
 pub(crate) use pipeline::{execute_describe_pipeline, execute_show_pipelines};
+pub(crate) use query::{execute_select, run_search, search_result_table};
 pub(crate) use show::execute_show_shared;
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
@@ -511,64 +509,7 @@ pub fn execute_statement(
 
         // ── Search ──────────────────────────────────────────────────────────
         Statement::Search(s) => {
-            let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?;
-            let schema = source_ds.schema.clone();
-            let query_tensor = match s.query {
-                SearchQuery::TensorRef(ref name) => db
-                    .get(name)
-                    .map_err(|e| DslError::Engine {
-                        line: line_no,
-                        source: e,
-                    })?
-                    .clone(),
-                SearchQuery::Inline(ref values) => {
-                    use crate::core::tensor::{TensorId, TensorMetadata};
-                    let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-                    let n = vals_f32.len();
-                    let id = TensorId::new();
-                    let meta = TensorMetadata::new(id, None);
-                    crate::core::tensor::Tensor::new(id, Shape::new(vec![n]), vals_f32, meta)
-                        .map_err(|e| DslError::Parse {
-                            line: line_no,
-                            msg: e,
-                        })?
-                }
-            };
-            let mut plan = LogicalPlan::VectorSearch {
-                input: Box::new(LogicalPlan::Scan {
-                    dataset_name: s.dataset.clone(),
-                    schema: schema.clone(),
-                }),
-                column: s.column.clone(),
-                query: query_tensor,
-                k: s.top_k,
-            };
-            if let Some(filter_expr) = &s.filter {
-                plan = LogicalPlan::Filter {
-                    input: Box::new(plan),
-                    predicate: query::dsl_expr_to_logical_expr(
-                        filter_expr,
-                        &schema,
-                        &std::collections::HashSet::new(),
-                    ),
-                };
-            }
-            let planner = Planner::new(db);
-            let physical_plan =
-                planner
-                    .create_physical_plan(&plan)
-                    .map_err(|e| DslError::Engine {
-                        line: line_no,
-                        source: e,
-                    })?;
-            let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?;
-            let result_schema = physical_plan.schema();
+            let (result_schema, result_rows) = query::run_search(db, &s, line_no)?;
             let row_count = result_rows.len();
             match s.target {
                 // No `INTO <target>`: return the top-k rows inline, matching
@@ -577,19 +518,7 @@ pub fn execute_statement(
                 // used to always materialize into a `search_results` dataset
                 // and return a message even without INTO, contradicting the
                 // documented default.
-                None => {
-                    let ds = dataset_legacy::Dataset::with_rows(
-                        dataset_legacy::DatasetId(0),
-                        result_schema,
-                        result_rows,
-                        Some("Search Result".into()),
-                    )
-                    .map_err(|e| DslError::Parse {
-                        line: line_no,
-                        msg: e,
-                    })?;
-                    Ok(DslOutput::Table(ds))
-                }
+                None => query::search_result_table(result_schema, result_rows, line_no),
                 Some(target) => {
                     if let Ok(ds) = db.get_dataset_mut(&target) {
                         ds.rows = result_rows;

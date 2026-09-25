@@ -54,6 +54,24 @@ impl PhysicalPlan for SeqScanExec {
     }
 }
 
+/// Produces rows computed earlier in the same query (`LogicalPlan::Values`:
+/// a CTE or a `FROM` subquery) without reading the database at all.
+#[derive(Debug)]
+pub struct ValuesExec {
+    pub schema: Arc<Schema>,
+    pub rows: Arc<Vec<Tuple>>,
+}
+
+impl PhysicalPlan for ValuesExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    fn execute(&self, _db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        Ok(self.rows.as_ref().clone())
+    }
+}
+
 /// Like `SeqScanExec`, but only reads the given `row_ranges` (start..end
 /// index ranges into `Dataset.rows`) instead of every row. Produced by
 /// `Planner::try_prune_partitions` when a range predicate's column has

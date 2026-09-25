@@ -190,9 +190,9 @@ linal server --port 8080 stop
 ```
 
 **Scaling:**
-- **Vertically:** more cores speed up large operations and serve different databases in
-  parallel. Queries on the *same* database run one at a time, so split heavy workloads across
-  databases.
+- **Vertically:** more cores speed up large operations, serve different databases in parallel,
+  and run concurrent reads (`SELECT`, `SEARCH`) of the *same* database in parallel. Writes to
+  one database are exclusive, so split write-heavy workloads across databases.
 - **Horizontally:** run one instance per group of databases behind a reverse proxy that routes
   on the `X-Linal-Database` header.
 - **Not yet:** instances don't talk to each other. Cross-instance queries and replication are on

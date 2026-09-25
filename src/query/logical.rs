@@ -154,6 +154,17 @@ pub enum LogicalPlan {
         dataset_name: String,
         schema: Arc<Schema>,
     },
+    /// Rows already computed earlier in the same query -- a CTE (`WITH name
+    /// AS (...)`) or a `FROM (SELECT ...) AS name` subquery. They live only
+    /// in the query that produced them and never touch the database's
+    /// catalog, so a `SELECT` never needs to write to the database.
+    /// `rows` is shared (`Arc`) so a CTE referenced several times isn't
+    /// copied per reference. `name` is used only for display (`EXPLAIN`).
+    Values {
+        name: String,
+        schema: Arc<Schema>,
+        rows: Arc<Vec<crate::core::tuple::Tuple>>,
+    },
     /// Filter rows
     Filter {
         input: Box<LogicalPlan>,
@@ -216,6 +227,7 @@ impl LogicalPlan {
     pub fn schema(&self) -> Arc<Schema> {
         match self {
             LogicalPlan::Scan { schema, .. } => schema.clone(),
+            LogicalPlan::Values { schema, .. } => schema.clone(),
             LogicalPlan::Filter { input, .. } => input.schema(),
             LogicalPlan::Project { input, columns } => {
                 let input_schema = input.schema();

@@ -50,7 +50,8 @@ Checklist:
 - [x] Wider read-lock path: `SHOW` (except `SHOW <name>` on a lazy tensor, which materializes
       it) and `DESCRIBE PIPELINE` now run through `execute_line_shared`
       (`dsl::can_execute_shared`).
-      - `SELECT`/`SEARCH` stay on the write path: `execute_select` creates datasets.
+      - `SELECT`/`SEARCH` stayed on the write path at the time, because `execute_select` created
+        datasets. That was fixed later: see backlog item 2.
 - [x] `InMemoryTensorStore::get` is O(1): an id index alongside the insertion-ordered `Vec`.
 - [x] Tests: `tests/server_per_db_locking_test.rs`, 10 cases.
 - [x] Measured with release builds, 300k-row CSV in db `a`, two threads looping a `GROUP BY` on
@@ -286,10 +287,19 @@ Ordered by expected return per effort. **Near-term** (cheap, measured or clearly
 
 1. ~~Route DSL `MATMUL` through `faer`~~: **done** (see "Follow-up" under Track C).
    `faer-matmul` is now a default feature.
-2. **Let `SELECT`/`SEARCH` run under a read lock.** Today `execute_select` creates CTE temp
-   datasets, so both take their database's write lock, and queries on *one* database run one at a
-   time. This is the main remaining limit on vertical scaling (see `ARCHITECTURE.md` → "Scaling &
-   Deployment").
+2. ~~Let `SELECT`/`SEARCH` run under a read lock~~: **done**.
+   - **How.** CTEs and `FROM` subqueries now live in a per-query scope (`LogicalPlan::Values`)
+     instead of the catalog. `execute_select` and `run_search` take `&TensorDb`, so reads being
+     read-only is compiler-enforced. `SEARCH ... INTO` still writes.
+   - **Bug fixed along the way.** A `FROM (SELECT ...) AS x` alias used to leak as a permanent
+     dataset, and re-running the query failed.
+   - **Measured** (Apple M4, concurrent `GROUP BY` on one database): 1.4× with 2 clients and
+     1.8× with 4 (300k rows); 1.5× with 4 (30k rows). Throughput flattens or dips past ~4.
+   - **Next: cheaper scans.** `SeqScanExec` clones every row of the dataset on every query, and
+     large queries already parallelize internally with Rayon. Together these cap concurrent-read
+     scaling at ~4 queries on a 10-core machine. The fix is to scan by reference (or go
+     columnar, which H2 needs anyway), and possibly to bound per-query Rayon parallelism under
+     load.
 3. **Small server items flagged during Track A**:
    - a headerless `/jobs` `USE` is undone when the job finishes;
    - a scheduled task's `target_db` switch leaks into later headerless requests (documented as
