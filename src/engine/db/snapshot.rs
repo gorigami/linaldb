@@ -499,7 +499,10 @@ impl TensorDb {
                 // it and truncating the log.
                 continue;
             }
-            crate::dsl::execute_line(self, &record.statement, 0).map_err(|e| {
+            self.active_instance_mut().replaying_wal_records = true;
+            let result = crate::dsl::execute_line(self, &record.statement, 0);
+            self.active_instance_mut().replaying_wal_records = false;
+            result.map_err(|e| {
                 format!(
                     "replaying WAL record {} (`{}`) failed: {}",
                     record.seq, record.statement, e

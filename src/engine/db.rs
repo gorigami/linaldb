@@ -41,6 +41,12 @@ pub struct DatabaseInstance {
     /// checkpoint. Suppresses WAL appends and provenance records -- the
     /// original execution already wrote those to `provenance.jsonl`.
     replaying: bool,
+    /// Set (together with `replaying`) only while re-executing WAL records.
+    /// Narrows the provenance suppression to records whose outputs already
+    /// have a producer, so a re-run that yields different content still gets
+    /// lineage (see `record_provenance`). Checkpoint write/restore keeps full
+    /// suppression: those are internal SAVE/LOADs, never real operations.
+    replaying_wal_records: bool,
     /// Set when appending to the WAL failed after a statement had already
     /// been applied in memory: the log no longer describes the state, so
     /// further mutating statements are refused until a `CHECKPOINT`
@@ -70,6 +76,7 @@ impl DatabaseInstance {
             provenance,
             wal: None,
             replaying: false,
+            replaying_wal_records: false,
             wal_broken: None,
             recovery_error: None,
         }
@@ -89,7 +96,21 @@ impl DatabaseInstance {
     /// not erase `t`'s ancestry from `EXPLAIN LINEAGE d`. A record with real
     /// inputs, or whose output is genuinely new content, is always kept.
     pub fn record_provenance(&mut self, record: crate::core::provenance::ProvenanceRecord) {
-        if self.replaying {
+        // While replaying the WAL (or restoring/writing a checkpoint), a
+        // record whose outputs all already have a producer is a re-run of
+        // something the original execution already recorded: skip it so
+        // provenance.jsonl doesn't grow on every restart. A record producing
+        // content with *no* known producer is kept, because the re-run
+        // yielded different content than the original (e.g. a GROUP BY
+        // before its row order was made deterministic). Skipping it would
+        // leave that object with no lineage at all.
+        if self.replaying
+            && (!self.replaying_wal_records
+                || record
+                    .outputs
+                    .iter()
+                    .all(|o| self.provenance.find_producer(o.content_hash()).is_some()))
+        {
             return;
         }
         let redundant = record.inputs.is_empty()

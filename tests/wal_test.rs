@@ -268,3 +268,86 @@ fn checkpoint_works_with_a_relative_data_dir() {
     let mut db = open(&rel);
     assert_eq!(row_count(&mut db, "items"), 2);
 }
+
+#[test]
+fn group_by_lineage_survives_restarts() {
+    // Regression: GROUP BY row order used to be random per process, so the
+    // replayed dataset's content hash never matched the recorded one, and
+    // since replay recorded no provenance, `EXPLAIN LINEAGE d` degraded to
+    // `ROOT (d)` after every restart.
+    let dir = tempfile::tempdir().unwrap();
+    let provenance = dir.path().join("default").join("provenance.jsonl");
+    let lines = || {
+        std::fs::read_to_string(&provenance)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+    {
+        let mut db = open(dir.path());
+        run(&mut db, "DATASET t COLUMNS (g: Int, x: Float)");
+        for i in 0..40 {
+            run(
+                &mut db,
+                &format!("INSERT INTO t VALUES ({}, {}.5)", i % 20, i),
+            );
+        }
+        run(&mut db, "DATASET d FROM t GROUP BY g SELECT g, SUM(x) AS s");
+        assert_eq!(
+            db.get_dataset_lineage_tree("d").unwrap().operation,
+            "DATASET FROM (GROUP BY)"
+        );
+    }
+    let before = lines();
+    for restart in 0..3 {
+        let db = open(dir.path());
+        let tree = db.get_dataset_lineage_tree("d").unwrap();
+        assert_eq!(
+            tree.operation, "DATASET FROM (GROUP BY)",
+            "restart {restart}"
+        );
+        assert_eq!(tree.inputs.len(), 1, "restart {restart}");
+        assert_eq!(lines(), before, "restart {restart} must not add provenance");
+    }
+}
+
+#[test]
+fn replay_records_lineage_for_content_the_log_never_recorded() {
+    // Safety net: a replayed statement whose output has no known producer
+    // (here, a record appended to the log by hand, so provenance.jsonl never
+    // saw it) gets its provenance recorded instead of being left with none,
+    // and exactly once: the next restart finds it already known.
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut db = open(dir.path());
+        run(&mut db, "VECTOR a = [1, 2]");
+        run(&mut db, "LET b = a * 2");
+    }
+    let wal = dir.path().join("default").join("wal.log");
+    let mut log = std::fs::read_to_string(&wal).unwrap();
+    log.push_str("{\"seq\":3,\"ts\":\"2026-09-25T00:00:00Z\",\"statement\":\"LET z = a * 3\"}\n");
+    std::fs::write(&wal, log).unwrap();
+
+    let provenance = dir.path().join("default").join("provenance.jsonl");
+    let lines = || {
+        std::fs::read_to_string(&provenance)
+            .unwrap()
+            .lines()
+            .count()
+    };
+    let before = lines();
+    {
+        let mut db = open(dir.path());
+        assert_eq!(tensor(&mut db, "z"), vec![3.0, 6.0]);
+        let tree = db.get_tensor_lineage_tree("z").unwrap();
+        assert!(
+            tree.inputs
+                .iter()
+                .any(|i| i.entity.display_name().contains('a')),
+            "z's lineage should lead back to a, got {:?}",
+            tree
+        );
+    }
+    assert_eq!(lines(), before + 1, "the unknown output is recorded once");
+    let _db = open(dir.path());
+    assert_eq!(lines(), before + 1, "and not again on the next restart");
+}

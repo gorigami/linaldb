@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "linal"
-version = "0.1.90"
+version = "0.1.91"
 dependencies = [
  "arrow",
  "arrow-csv",

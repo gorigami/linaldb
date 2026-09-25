@@ -419,6 +419,12 @@ impl PhysicalPlan for AggregateExec {
                 MedianAccumulators,
             ),
         > = HashMap::new();
+        // Group keys in first-appearance order. `groups` is a HashMap, whose
+        // iteration order is random per process, so emitting groups by
+        // iterating it made GROUP BY's row order (and every content hash
+        // derived from it, e.g. provenance) differ run to run. Emitting in
+        // first-appearance order makes the result deterministic.
+        let mut group_order: Vec<GroupKey> = Vec::new();
 
         // VARIANCE/MEDIAN are scalar-only (Int/Float/Float64) -- promotes
         // any of the three to `f64`, or `None` for a non-scalar `Value`
@@ -443,6 +449,9 @@ impl PhysicalPlan for AggregateExec {
                 .map(|expr| evaluate_expression(expr, &row))
                 .collect();
 
+            if !groups.contains_key(&key) {
+                group_order.push(key.clone());
+            }
             let (accs, avg_accs, var_accs, median_accs) = groups.entry(key).or_insert_with(|| {
                 // Init accumulators
                 let mut regular_accs = Vec::new();
@@ -865,7 +874,10 @@ impl PhysicalPlan for AggregateExec {
         // Output rows - compute AVG/VARIANCE/MEDIAN from their accumulators
         // before outputting
         let mut output_rows = Vec::new();
-        for (key, (accs, avg_accs, var_accs, median_accs)) in groups {
+        for key in group_order {
+            let (accs, avg_accs, var_accs, median_accs) = groups
+                .remove(&key)
+                .expect("every key in group_order was inserted into groups");
             let mut values = key; // Group keys first
 
             // Build final accumulator values, computing AVG/VARIANCE/MEDIAN where needed

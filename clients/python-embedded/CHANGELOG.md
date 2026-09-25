@@ -4,6 +4,18 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [0.1.16] - 2026-09-25
+
+Picks up the root engine's `v0.1.91`. No Python-side code change.
+
+- **Deterministic `GROUP BY`.** Groups come out in first-appearance order (unless `ORDER BY`
+  says otherwise). The same query returns the same row order and content hash every run. It used
+  to be random per run, which also made `ORDER BY ... LIMIT` with ties vary.
+- **WAL lineage fix.** With the write-ahead log enabled, a `GROUP BY` dataset no longer loses its
+  `EXPLAIN LINEAGE` ancestry after a restart.
+
+Found by re-running `linal-hub`'s notebooks against the published `0.1.15` wheel.
+
 ## [0.1.15] - 2026-09-25
 
 Picks up the root engine's `v0.1.90`, linked directly in via the `linal` path dependency. No
