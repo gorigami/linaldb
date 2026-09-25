@@ -13,6 +13,7 @@ fn setup_test_db(temp_dir: &str) -> TensorDb {
             data_dir: PathBuf::from(temp_dir),
             default_db: "default".to_string(),
         },
+        wal: Default::default(),
     };
     TensorDb::with_config(config)
 }
@@ -127,6 +128,7 @@ fn test_database_recovery() {
             data_dir: PathBuf::from(temp_dir),
             default_db: "default".to_string(),
         },
+        wal: Default::default(),
     };
     let mut db2 = TensorDb::with_config(config);
 

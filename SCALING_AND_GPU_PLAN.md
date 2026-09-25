@@ -1,6 +1,6 @@
 # Scaling & GPU Plan
 
-**Status**: Track A done, Tracks B–C not started. Per this repo's tracked-plan-doc convention,
+**Status**: Tracks A–B done, Track C not started. Per this repo's tracked-plan-doc convention,
 when the last track closes this file is deleted. The analysis and backlog sections move to
 `docs/SCALING_AND_GPU_ROADMAP.md` as a permanent reference.
 
@@ -64,32 +64,54 @@ Flagged, not changed (need a maintainer decision):
 - `/delivery` hard-codes `./data` (`server/mod.rs`, `ParquetStorage::new("./data")`) instead of
   `config.storage.data_dir`.
 
-### Track B — Write-ahead log (not started)
+### Track B — Write-ahead log
 
-The problem: there is no WAL and no fsync anywhere. On restart, `recover_databases` recreates
-empty instances and reloads `provenance.jsonl`, so anything not `SAVE`d is lost.
+The problem: there was no WAL and no fsync anywhere. On restart, `recover_databases` recreated
+empty instances and reloaded `provenance.jsonl`, so anything not `SAVE`d was lost.
 
 Checklist:
-- [ ] Config: `[storage] wal = "off" | "on"` (default `off`, no behavior change) and
-      `wal_sync = "always" | "batch"`.
-- [ ] `src/core/wal.rs`: `{db_dir}/wal.log`, JSONL `{seq, ts, statement}`.
-      - Append only after a statement succeeds, and only if it mutates.
-      - `Statement::is_mutating()` is an exhaustive `match` with no `_` arm, so every new
-        variant must be classified.
-- [ ] Determinism: statements that depend on external files (`IMPORT`, `LOAD`, `USE DATASET`)
-      are re-executed on replay. Replay fails loudly if the file is gone. Persist timestamps in
-      the record where the executor already accepts `*_with_timestamp`.
-- [ ] `CHECKPOINT`: saves every named dataset/tensor (`save_dataset_core`/`save_tensor_core`),
-      writes `checkpoint.json` (names + seq), then atomically truncates the WAL
-      (`wal.log.new` + `rename`).
-- [ ] Recovery on startup (with `wal = on`): load the checkpoint, then replay `seq >
-      checkpoint.seq`.
-      - A truncated tail record is dropped with a warning.
-      - Corruption mid-file is a loud error.
-- [ ] Tests: simulated crash, truncated tail, checkpoint + replay, `wal = off` creates nothing,
-      missing import file.
-- [ ] Docs: `DSL_REFERENCE.md` (`CHECKPOINT`), `ARCHITECTURE.md` (Persistence),
+- [x] Config: a `[wal]` section with `enabled` (default `false`), `sync = "always" | "never"`
+      and `checkpoint_bytes`.
+- [x] `src/engine/wal.rs`: `{db_dir}/wal.log`, JSONL `{seq, ts, statement, fingerprints}`.
+      - Appended only after success, and only if `Statement::is_mutating()` (exhaustive, no
+        `_` arm).
+      - Hook: `dsl::execute_logged`, the one funnel for CLI, REPL, scripts, server and bindings.
+- [x] External inputs: `LOAD`/`IMPORT` records fingerprint what they loaded. Replay fails loudly
+      on a mismatch.
+- [x] `CHECKPOINT` + `src/engine/db/snapshot.rs`: a private snapshot (tensor ids, aliases,
+      views, lazy tensors, tensor-first datasets, record datasets via the SAVE/LOAD package path,
+      pipelines).
+      - Swapped in by rename, then the log is truncated.
+      - Automatic after every `SAVE` and past `checkpoint_bytes`.
+- [x] Recovery on startup: restore the checkpoint, then replay `seq > checkpoint.seq`.
+      - Provenance is suppressed during replay.
+      - A torn tail is dropped and the file is rewritten.
+      - Mid-file corruption is an error.
+      - A failed recovery leaves the database refusing every statement (`recovery_error`).
+- [x] Tests: `tests/wal_test.rs` (9) + `engine::wal` unit tests (4).
+- [x] End-to-end: `linal serve` with the WAL on, writes to two databases (dataset + vector
+      index), `kill -9`, restart. Everything served back, including after a `CHECKPOINT` +
+      further writes.
+- [x] Measured: INSERT median over HTTP was 0.25 ms (off), 0.23 ms (`never`) and 5.0 ms
+      (`always`, macOS `F_FULLFSYNC`).
+- [x] Docs: `DSL_REFERENCE.md` §8, `ARCHITECTURE.md` (Recovery + Write-ahead log),
       `ERROR_REFERENCE.md`.
+
+Deviations from the original design, and why:
+- **Config.** It's a `[wal]` section rather than keys under `[storage]`. Tests and embedders
+  build `StorageConfig` literally, and a separate `#[serde(default)]` section keeps every
+  existing `linal.toml` parsing unchanged.
+- **Sync modes.** They're `always`/`never` rather than `always`/`batch`. A timed batch flush
+  needs a background flusher thread per database. `never` gives the same crash-only durability
+  at zero cost.
+- **Timestamps.** Original timestamps aren't re-injected on replay: a replayed tensor's
+  `created_at` is the replay time. Ancestry is unaffected, because provenance is content-hash
+  addressed and already durable.
+- **Checkpoint mechanism.** Checkpoints are a private snapshot, not "SAVE everything". Going
+  through user-visible SAVE would have bumped user dataset versions, lost aliasing, and changed
+  tensor ids (which tensor-first datasets reference). The automatic checkpoint after `SAVE` was
+  added because replaying a `LOAD` after a later `SAVE` of the same package would have
+  double-applied changes. That was found while designing this track, not in the original plan.
 
 ### Track C — GPU spike, `gpu-wgpu` feature (not started)
 

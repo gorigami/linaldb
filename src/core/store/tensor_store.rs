@@ -90,6 +90,11 @@ impl InMemoryTensorStore {
             .ok_or(StoreError::TensorNotFound(id))
     }
 
+    /// Every stored tensor, in insertion order.
+    pub fn tensors(&self) -> &[Tensor] {
+        &self.tensors
+    }
+
     /// Removes a tensor by ID. Returns true if it was found and removed.
     pub fn remove(&mut self, id: TensorId) -> bool {
         let len_before = self.tensors.len();

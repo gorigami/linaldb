@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 /// Registry to track datasets within the runtime scope.
 /// This registry is typically owned by a DatabaseInstance or ExecutionContext.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DatasetRegistry {
     datasets: HashMap<String, Dataset>,
 }

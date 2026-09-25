@@ -79,7 +79,7 @@ impl fmt::Display for UnaryOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TensorKind {
     /// Comportamiento por defecto (permite operaciones relajadas)
     Normal,

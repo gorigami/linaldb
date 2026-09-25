@@ -54,6 +54,26 @@ pub fn get_connector_registry() -> ConnectorRegistry {
 
 // ─── Save ─────────────────────────────────────────────────────────────────────
 
+/// Writes dataset `name` as a regular dataset package under `dir` (an
+/// absolute path) -- used by the WAL checkpoint (`engine::db::snapshot`) so
+/// a snapshot goes through exactly the SAVE/LOAD code path user data does.
+pub(crate) fn save_dataset_to_dir(db: &mut TensorDb, name: &str, dir: &Path) -> Result<(), String> {
+    save_dataset_core(db, name, Some(&dir.to_string_lossy()), 0)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Counterpart of `save_dataset_to_dir`.
+pub(crate) fn load_dataset_from_dir(
+    db: &mut TensorDb,
+    name: &str,
+    dir: &Path,
+) -> Result<(), String> {
+    load_dataset_core(db, name, Some(&dir.to_string_lossy()), 0)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn save_dataset_core(
     db: &mut TensorDb,
     dataset_name: &str,

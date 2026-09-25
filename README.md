@@ -162,7 +162,17 @@ Pipelines are stored as human-readable JSON containing the original DSL source, 
 
 ### 6. High-Concurrency Analytics
 
-Multi-platform server with parallel execution and background workload management.
+Multi-platform server with parallel execution and background workload management. Each database has its own lock, so tenants never wait on each other. The opt-in write-ahead log makes in-memory state survive a restart or crash without an explicit `SAVE`:
+
+```toml
+# linal.toml
+[wal]
+enabled = true
+```
+
+```sql
+CHECKPOINT   -- snapshot the active database and truncate its log (also automatic after SAVE)
+```
 
 ```bash
 # Check server health
