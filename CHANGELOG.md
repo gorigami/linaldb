@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.90] - 2026-09-25
+
 ### Changed — `SELECT` and `SEARCH` run under a read lock; fixed a `FROM`-subquery leak
 
 **The bug.** `FROM (SELECT ...) AS x` registered `x` as a real dataset and never removed it.
