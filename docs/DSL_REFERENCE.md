@@ -400,6 +400,11 @@ HAVING AVG(score) > 0.5
 LIMIT 10
 ```
 
+- **`GROUP BY` output order**: without `ORDER BY`, groups come out in the order each group's
+  first row appears in the input. That order is deterministic, so the same query over the same
+  data always returns the same row order and the same content hash. Before v0.1.91 the order was
+  random per run. Use `ORDER BY` for any other order. Rows that tie under `ORDER BY` keep their
+  group order, so `ORDER BY ... LIMIT n` with ties is also reproducible.
 - **Aggregate Functions**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `AVG_VEC`, `SUM_VEC`, `VARIANCE`, `MEDIAN`. A `SELECT` with an aggregate and no `GROUP BY` computes a single "global" aggregate row over the whole result set (e.g. `SELECT COUNT(*) FROM t`).
 - **`VARIANCE(col)`/`MEDIAN(col)`**: population variance and median of a scalar (`Int`/`Float`/`Float64`) column, computed per group (or globally, with no `GROUP BY`) exactly like `SUM`/`AVG`. Both always produce a `DOUBLE` result regardless of the input column's own numeric type. Neither is supported as a window function (`OVER`) — `SELECT VARIANCE(x) OVER (...)` is a parse error, not a silently wrong result.
 - **`SUM`/`AVG` on a `Complex` column**: well-defined and fully supported, plain or windowed (`OVER (...)`). **`MIN`/`MAX` on a `Complex` column are a hard error** — `Complex` has no ordering (§3), so there is no "smallest"/"largest" value to silently guess at.

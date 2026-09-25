@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.91] - 2026-09-25
+
+### Fixed — `GROUP BY` row order is deterministic; WAL replay no longer loses lineage
+
+**The bug.** `AggregateExec` gathered groups in a `HashMap` and emitted them by iterating it.
+Rust randomizes that order per map, so the same `GROUP BY` over the same data returned its groups
+in a different order on every run. Every content hash derived from the result changed with it: a
+`DATASET ... FROM ... GROUP BY` dataset's hash, its provenance identity, and `ORDER BY ... LIMIT`
+results whenever rows tied.
+
+**How it surfaced.** Found after the v0.1.90 release by re-running `linal-hub`'s notebooks against
+the published wheel: notebook 05's lineage hashes changed between runs of the same version. Traced
+to a real v0.1.90 regression. With `[wal] enabled = true`, a `GROUP BY` dataset **lost its
+lineage after a restart**, and `EXPLAIN LINEAGE d` degraded from `DATASET FROM (GROUP BY) ← t` to
+`ROOT (d)`, with a different hash each restart. Replay re-created the dataset in a new row order
+(so a new hash) and recorded no provenance, on the assumption that re-execution reproduces the
+original content. The data itself was always correct.
+
+**Fixes:**
+- `GROUP BY` emits groups in first-appearance order: deterministic across runs and processes.
+  `ORDER BY` still decides the order when given.
+- WAL replay skips a provenance record only when all of its outputs already have a producer.
+  Content the log never recorded now gets its lineage recorded, once, instead of being left
+  without any. Checkpoint write/restore still suppresses provenance entirely.
+
+**Tests:**
+- New `tests/group_by_determinism_test.rs` (3 cases): first-appearance order stable across
+  repeated runs, identical content hash across separate engines, and `ORDER BY` still applies.
+  The first two fail without the fix.
+- New `tests/wal_test.rs` cases: `GROUP BY` lineage survives 3 restarts with no provenance growth,
+  and the replay safety net records lineage for never-recorded content exactly once.
+
 ## [0.1.90] - 2026-09-25
 
 ### Changed — `SELECT` and `SEARCH` run under a read lock; fixed a `FROM`-subquery leak

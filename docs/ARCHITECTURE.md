@@ -619,8 +619,16 @@ restart (see DSL_REFERENCE.md §8 for configuration).
     the swap completes), and only then is the log truncated.
 - **Replay** restores the checkpoint, then re-executes records with `seq` greater than the
   checkpoint's `seq`, with `DatabaseInstance::replaying` set.
-  - While replaying, nothing is re-logged and no provenance is recorded: the original execution
-    already wrote it to `provenance.jsonl`, so ancestry doesn't duplicate across restarts.
+  - While replaying, nothing is re-logged. A provenance record is skipped only if all of its
+    outputs already have a producer in `provenance.jsonl`: the original execution recorded it,
+    so ancestry doesn't duplicate across restarts. If a re-executed statement yields content the
+    log never saw, its record is kept, so the object still has lineage instead of degrading to
+    `ROOT` (`DatabaseInstance::replaying_wal_records`).
+  - Checkpoint write/restore suppresses provenance entirely. Those are internal `SAVE`/`LOAD`s,
+    never real operations.
+  - Replay relies on statements being deterministic. `GROUP BY` wasn't until v0.1.91 (its row
+    order was random per process), which made a `GROUP BY` dataset lose its lineage after every
+    restart.
   - A truncated final record (a crash mid-append) is dropped with a warning and the file is
     rewritten clean. Corruption anywhere else is an error.
 - **External inputs.** `LOAD`/`IMPORT` records carry a content fingerprint of what they loaded.
