@@ -1,24 +1,29 @@
-# Scaling & GPU Plan
+# Scaling & GPU Roadmap
 
-**Status**: Tracks A–C done (Track C closed at its decision gate: no VRAM residency on this evidence). Per this repo's tracked-plan-doc convention,
-when the last track closes this file is deleted. The analysis and backlog sections move to
-`docs/SCALING_AND_GPU_ROADMAP.md` as a permanent reference.
+The permanent record of LINAL's horizontal-scaling and GPU design review (2026-09-24): what was
+analyzed, what was built and measured, and what's deliberately deferred and why. For how to
+scale a deployment *today*, see `ARCHITECTURE.md` → "Scaling & Deployment". This document
+explains the reasoning behind that section.
 
-## Why this plan exists
+This started as the tracked plan `SCALING_AND_GPU_PLAN.md` at the repo root. All three tracks closed, so per the
+repo convention it moved here as a reference.
 
-Came out of a design review on 2026-09-24: what would it take for LINAL to (a) scale
-horizontally across nodes and (b) compute on GPU/VRAM, how would that fit with today's engine,
-and is it worth it? Every claim below was checked against `main` at v0.1.89. The review found
-three steps worth taking now:
+## Why this exists
 
-1. **Track A**: per-database locking in `linal serve`.
-2. **Track B**: a write-ahead log.
-3. **Track C**: a measured GPU spike.
+The design review asked three things:
+- What would it take for LINAL to scale horizontally across nodes?
+- What would it take to compute on GPU/VRAM?
+- How would that fit with the engine as it was, and is it worth it?
 
-Everything else is a backlog item that needs evidence first, the same gate
-`PERFORMANCE_OPTIMIZATION_PLAN.md` uses.
+Every claim was checked against `main` at v0.1.89. Three steps were worth taking immediately:
+- **Track A**: per-database locking in `linal serve`.
+- **Track B**: a write-ahead log.
+- **Track C**: a measured GPU spike.
 
-## Checkpoints
+All three shipped (#127, #128, #129). Everything else is a backlog item that needs evidence
+first, the same gate `PERFORMANCE_OPTIMIZATION_PLAN.md` uses.
+
+## Completed work
 
 ### Track A — Per-database locking in `linal serve`
 
@@ -177,7 +182,7 @@ What the numbers say:
 - Routing `SimdBackend`/`CpuBackend::matmul` through `faer` when the feature is on would make
   DSL `MATMUL` **~34× faster at 1024²** (169 ms → 5 ms), with no GPU.
 
-## Analysis (verified against v0.1.89)
+## Analysis (as verified against v0.1.89, before Tracks A–C)
 
 ### How the engine is built today
 
@@ -248,29 +253,45 @@ What the numbers say:
 
 ## Backlog (evidence-gated, not scheduled)
 
-0. **Route DSL `MATMUL` through `faer`** when `faer-matmul` is on (see Track C). This is the
-   cheapest real speedup found, and it needs a maintainer decision.
-1. **VRAM residency + fusion** (Track C's spike did *not* justify this on integrated/unified-memory
-   hardware; revisit only with discrete-GPU evidence):
+Ordered by expected return per effort. **Near-term** (cheap, measured or clearly scoped):
+
+1. **Route DSL `MATMUL` through `faer`** when `faer-matmul` is on (see Track C): ~34× at 1024²,
+   no GPU needed. It's the cheapest real speedup found, and needs a maintainer decision.
+2. **Let `SELECT`/`SEARCH` run under a read lock.** Today `execute_select` creates CTE temp
+   datasets, so both take their database's write lock, and queries on *one* database run one at a
+   time. This is the main remaining limit on vertical scaling (see `ARCHITECTURE.md` → "Scaling &
+   Deployment").
+3. **Small server items flagged during Track A**:
+   - a headerless `/jobs` `USE` is undone when the job finishes;
+   - a scheduled task's `target_db` switch leaks into later headerless requests (documented as
+     intentional);
+   - `/delivery` hard-codes `./data` instead of `config.storage.data_dir`, which matters when
+     several instances share a host.
+
+**Horizontal** (needs real multi-tenant/HA demand):
+
+4. **H1: read replicas per database.**
+   - Ship `wal.log` plus `checkpoint/` to another node, which replays them (the Track B machinery,
+     already there).
+   - Put dataset packages in object storage (`object_store`, pure Rust).
+   - Promote a replica on failover.
+   - Open questions: replay verifies external-file fingerprints, so inputs must be reachable from
+     the replica too; and routing reads vs. writes.
+5. **H2: distributed queries.** Cross-instance joins, and one database spread over nodes.
+   - Evaluate DataFusion/Ballista first.
+   - Requires the columnar `dataset_legacy`↔`dataset` unification.
+
+**GPU** (the Track C spike did *not* justify these on integrated/unified-memory hardware; revisit
+only with discrete-GPU evidence):
+
+6. **VRAM residency + fusion**:
    - `TensorStorage { Host(Arc<Vec<f32>>), Device(..) }` with lazy migration.
-   - A VRAM cache keyed by content hash, with a VRAM budget in `EngineConfig`.
+   - A VRAM cache keyed by content hash, with a budget in `EngineConfig`.
    - GPU evaluation of `Expression`.
-   - Explicit `SET DEVICE`, and the device shown in `EXPLAIN`.
+   - `SET DEVICE`, and the device shown in `EXPLAIN`.
    - A device field in provenance records (not part of the hash).
-2. **`gpu-cuda`**:
+7. **`gpu-cuda`**:
    - `cudarc` + cuBLAS/cuSOLVER.
    - A `LinalgBackend` trait.
    - Optional cuVS ANN indexes.
    - `linaldb[cuda]` wheels and DLPack.
-3. **H1 cluster per database** (needs Track B).
-4. **H2 distributed queries**: DataFusion/Ballista evaluation first. Requires the columnar
-   unification.
-
-## Process for every PR
-
-- `cargo fmt -- --check`, `cargo clippy -- -D warnings`, and the full `cargo test`. For Track C,
-  also `cargo test --features gpu-wgpu`.
-- Then `cargo clean` and `rm -rf ./data`.
-- A CHANGELOG entry under `[Unreleased]`. There is no version bump in feature PRs: a release is
-  a separate PR.
-- Before/after numbers recorded in this file.

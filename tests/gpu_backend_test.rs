@@ -1,6 +1,6 @@
 // tests/gpu_backend_test.rs
 //
-// CPU <-> GPU parity for the `gpu-wgpu` backend (SCALING_AND_GPU_PLAN.md
+// CPU <-> GPU parity for the `gpu-wgpu` backend (docs/SCALING_AND_GPU_ROADMAP.md
 // Track C). Only built with `--features gpu-wgpu`; every test skips cleanly
 // (with a note on stderr) on a machine with no usable GPU adapter.
 #![cfg(feature = "gpu-wgpu")]

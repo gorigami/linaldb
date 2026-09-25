@@ -1,6 +1,7 @@
 # Performance & Operational Hardening Plan
 
-**Status**: not started. This file is deleted in the commit that closes the final checkpoint,
+**Status**: Phases 1–4 implemented. One deferred item is still open: Phase 1's HNSW/IVF latency
+benchmark. Phase 4 also carries a post-hoc finding (see its note). This file is deleted in the commit that closes the final checkpoint,
 per this repo's established tracked-plan-doc convention (`PYTHON_R_INTEROP_PLAN.md`,
 `LINEAGE_AND_LINALG_PLAN.md`, `FLOAT64_PLAN.md`, `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`).
 
@@ -199,6 +200,15 @@ findings and a sequenced, risk-ranked execution order for what remains.
       `engine_matrix_ops.rs`/`dsl_matrix_ops.rs` (including transposed/strided-input coverage)
       -- not part of the default build or CI's test matrix, same as the pre-existing
       `zero-copy`/`experimental` features
+- **Post-hoc finding (2026-09-24, while benchmarking the GPU spike in
+  `docs/SCALING_AND_GPU_ROADMAP.md` Track C): flagged, not fixed.** The DSL's `MATMUL` doesn't go
+  through `kernels::matmul`: it takes `eval_matmul` → `backend.matmul` →
+  `SimdBackend::matmul_simd`, so `faer-matmul` never reaches it for large contiguous matrices.
+  `faer` is only used on the scalar path (under 1024 elements), for non-contiguous views, and for
+  lazy `MatMul` expressions. This phase's benchmark compared `faer` against `kernels::matmul`,
+  not against the SIMD path the DSL actually uses. Measured on an Apple M4: `CpuBackend::matmul`
+  169 ms vs `faer` 4.97 ms at 1024². Routing the backend's matmul through `faer` when the feature
+  is on is backlog item 1 there.
 
 ## Backlog (not scheduled — profiling-gated future items)
 

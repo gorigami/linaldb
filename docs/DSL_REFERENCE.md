@@ -843,7 +843,7 @@ about 2M multiply-adds (roughly 128×128×128).
 
 If the build lacks the feature or no GPU adapter is found, it warns once and uses the CPU backend.
 Results match the CPU within f32 rounding, but not bit-for-bit. This is a measured spike (see
-`SCALING_AND_GPU_PLAN.md`), not a stable feature.
+`docs/SCALING_AND_GPU_ROADMAP.md`), not a stable feature.
 
 ### Dataset Metadata & Versioning
 
@@ -937,11 +937,11 @@ Submit recurring DSL commands that execute on a fixed interval:
 | `/delivery/...` | `GET` | Read-only dataset delivery endpoints. |
 
 Multi-tenant isolation is provided via the `X-Linal-Database: <db_name>` request header.
-A request that itself supplies this header restores the previously active database once
-it finishes, so concurrent requests targeting different databases via the header cannot
-affect each other's context — this applies to `/execute/batch` too, just scoped to the
-whole batch rather than one statement: the restore happens once, after every statement in
-the batch has run. **The target database must already exist before you address it with
+A request that supplies this header is pinned to that database for its whole duration and
+never changes the server's active database, so concurrent requests targeting different
+databases via the header can't affect each other's context. This applies to
+`/execute/batch` too, scoped to the whole batch: a `USE` inside a header-bearing batch
+switches databases for the rest of that batch only. **The target database must already exist before you address it with
 this header** — `CREATE DATABASE <name>` itself has to run *without* the header (or with
 it pointed at an existing database), since the header resolves its target before the
 statement runs, and the database you're trying to create doesn't exist yet.
@@ -954,9 +954,22 @@ a single statement has no "rest of the request" for `USE` to usefully persist ac
 the combination is ambiguous and was previously misleading (the response claimed
 `"Switched to database 'x'"`, but the switch never outlived that one request). If a
 script needs `USE`/`CREATE DATABASE` to control multiple subsequent statements, send it
-to `/execute/batch` instead — there, `USE` persists naturally for the rest of that one
-batch, since nothing restores the active database mid-batch, and is safely undone once
-the whole batch finishes, same as the header restore above.
+to `/execute/batch` instead. There, `USE` persists for the rest of that one batch. In a
+header-bearing batch it never leaves the batch; in a headerless batch it also becomes the
+server's active database, like a headerless `USE` on `/execute`.
+
+### Concurrency and scaling
+
+Each database has its own lock. Requests against different databases run in parallel.
+Requests against the *same* database run one at a time, except read-only statements, which
+share a read lock: `EXPLAIN`, `AUDIT`, `LIST`, `DELIVER`, `SHOW` (except of a lazy tensor) and
+`DESCRIBE PIPELINE`. `SELECT` and `SEARCH` take the database's write lock today. For more
+throughput, split data across databases.
+
+Instances don't communicate with each other. To spread databases over several machines, run one
+instance per group of databases and route by `X-Linal-Database` with a reverse proxy. See
+`ARCHITECTURE.md` → "Scaling & Deployment" for the full model, a proxy example, and what isn't
+supported yet: cross-instance queries and replication.
 
 A scheduled task's `target_db` (`/schedule`, above) is a different, simpler case: the
 switch it makes is **permanent**, not restored — a recurring task is operator-configured,

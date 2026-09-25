@@ -1,4 +1,4 @@
-//! Track C benchmark spike (`SCALING_AND_GPU_PLAN.md`): does the `gpu-wgpu`
+//! Track C benchmark spike (`docs/SCALING_AND_GPU_ROADMAP.md`): does the `gpu-wgpu`
 //! backend pay off at this engine's realistic sizes? Every GPU number
 //! includes the per-call host->device upload and device->host readback,
 //! since `Tensor.data` stays in host memory in this spike.

@@ -189,6 +189,17 @@ linal schedule --url http://localhost:8080 create hourly-report "SHOW ALL DATASE
 linal server --port 8080 stop
 ```
 
+**Scaling:**
+- **Vertically:** more cores speed up large operations and serve different databases in
+  parallel. Queries on the *same* database run one at a time, so split heavy workloads across
+  databases.
+- **Horizontally:** run one instance per group of databases behind a reverse proxy that routes
+  on the `X-Linal-Database` header.
+- **Not yet:** instances don't talk to each other. Cross-instance queries and replication are on
+  the roadmap.
+
+See [Scaling & Deployment](docs/ARCHITECTURE.md#scaling--deployment).
+
 ### 7. Python & R Clients
 
 Two ways to reach LINALDB from Python or R — pick based on whether you
@@ -261,6 +272,7 @@ LINALDB is extensively documented to help you scale from local experiments to pr
 - **[DSL Reference](docs/DSL_REFERENCE.md)**: Complete guide to keywords, operators, and syntax.
 - **[Examples](examples/README.md)**: Runnable `.lnl` scripts covering every major feature area.
 - **[Error Reference](docs/ERROR_REFERENCE.md)**: Troubleshooting guide for engine and DSL errors.
+- **[Scaling & GPU Roadmap](docs/SCALING_AND_GPU_ROADMAP.md)**: What was measured on concurrency, durability and GPU, and the evidence-gated backlog for replication and distributed execution.
 - **[Python Client](clients/python/README.md)** / **[R Client](clients/r/README.md)**: Thin HTTP clients over `/execute` + `/delivery`, plus the shared [wire contract](clients/CONTRACT.md).
 
 ---

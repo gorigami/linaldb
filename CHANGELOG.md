@@ -7,9 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs — scaling & deployment model
+
+- **`docs/ARCHITECTURE.md`** has a new "Scaling & Deployment" section:
+  - deployment modes;
+  - the per-database concurrency model (which statements take a read vs. write lock);
+  - what a bigger machine does and doesn't buy (queries on one database still run one at a time);
+  - durability options;
+  - horizontal scaling today (one instance per group of databases behind a proxy routing on
+    `X-Linal-Database`, with an nginx example and its operational rules);
+  - what isn't supported yet (cross-instance queries, replication, instance-to-instance
+    protocol).
+- **Also in `ARCHITECTURE.md`:** "Configuration" now covers `[wal]` and `[compute]`, and
+  "Future Enhancements" points at the roadmap.
+- **`SCALING_AND_GPU_PLAN.md` becomes `docs/SCALING_AND_GPU_ROADMAP.md`.** All three tracks
+  closed, so it's now a permanent reference: completed work with its measurements, the original
+  analysis, and an evidence-gated backlog. The backlog now includes `SELECT`/`SEARCH` under a read
+  lock, which is the main remaining vertical-scaling limit.
+- **`docs/DSL_REFERENCE.md` §10 and `clients/CONTRACT.md`** describe the header as pinning a
+  request to its database. They used to describe the pre-#127 "restore the previous active
+  database" mechanism; the semantics are unchanged. Both also add the concurrency model, and the
+  contract says why clients should always send the header: it's the routing key in
+  multi-instance deployments.
+- **`README.md`** gets a short scaling summary, and the roadmap is linked from the documentation
+  hub.
+- **`PERFORMANCE_OPTIMIZATION_PLAN.md`:** corrected a stale "not started" status, and Phase 4
+  records that DSL `MATMUL` doesn't reach `faer`.
+
 ### Added — experimental GPU backend spike (`gpu-wgpu` feature, `[compute] backend`, `SHOW BACKEND`)
 
-Track C of `SCALING_AND_GPU_PLAN.md`: a measured spike, not a stable feature.
+Track C of `docs/SCALING_AND_GPU_ROADMAP.md`: a measured spike, not a stable feature.
 
 **What it adds.**
 - Behind the new opt-in `gpu-wgpu` Cargo feature, it isn't in the default build or the release
@@ -109,12 +136,12 @@ Also:
 - A job whose `X-Linal-Database` names a database that doesn't exist now fails with
   `Database 'x' not found`. Before, it silently ran on the current active database.
 
-Flagged, not changed (see `SCALING_AND_GPU_PLAN.md`):
+Flagged, not changed (see `docs/SCALING_AND_GPU_ROADMAP.md`):
 - A headerless `/jobs` `USE` is still undone when the job finishes (the class of bug fixed for
   `/execute` in v0.1.74).
 - `/delivery` still reads `./data` instead of `config.storage.data_dir`.
 
-This is the first step of `SCALING_AND_GPU_PLAN.md` (new): horizontal scaling and GPU options,
+This is the first step of `docs/SCALING_AND_GPU_ROADMAP.md` (new): horizontal scaling and GPU options,
 analyzed against the current engine, with WAL and a `wgpu` spike as the next tracks.
 
 ## [0.1.89] - 2026-09-21
