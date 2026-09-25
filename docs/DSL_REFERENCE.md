@@ -435,7 +435,10 @@ SELECT * FROM (SELECT id, price FROM items WHERE price > 5) AS cheap
 ```
 
 `FROM (<SELECT>) AS <alias>` executes the inner query first and treats its
-result as the outer query's source dataset, referenced by `<alias>`.
+result as the outer query's source, referenced by `<alias>`. The result lives only for that
+query: `<alias>` isn't created as a dataset, so the same query can run any number of times.
+Until the fix, the alias leaked as a permanent dataset and a second run failed with `Dataset
+name already exists`.
 
 ### INSERT / UPDATE / DELETE
 
@@ -494,7 +497,9 @@ SELECT id FROM users_a UNION SELECT id FROM users_b
 SELECT id FROM users_a UNION ALL SELECT id FROM users_b
 ```
 
-- `WITH <name> AS (<SELECT>), ...` materializes each CTE as a temporary dataset (by that name) before the main query runs, then removes it once the statement completes — the name is not available in later statements. Avoid reusing the name of an existing real dataset for a CTE, since the CTE temporarily creates a dataset under that name for the duration of the statement.
+- `WITH <name> AS (<SELECT>), ...` computes each CTE before the main query runs, and keeps its rows in the query's own scope. A CTE is never created as a dataset, and the name isn't available in later statements.
+  - **Visibility:** a CTE is visible to later CTEs in the same `WITH`, to the main query (including its `JOIN`s), to subqueries in `FROM`, and to the right side of a `UNION`.
+  - **Shadowing:** a CTE with the same name as a real dataset shadows it for that query only, as in SQL. The dataset itself is untouched. This used to fail, because the CTE was created as a temporary dataset under that name.
 - `UNION` deduplicates matching rows; `UNION ALL` keeps duplicates. `UNION`/`UNION ALL` clauses can be chained (`A UNION B UNION C`, three-way and beyond) — each right-hand side is itself a full `SELECT`, so chaining just recurses.
 - **A `WITH` clause's trailing `SELECT` must be part of the same statement** — in `.lnl` files and the CLI/REPL, keep the whole `WITH ... SELECT ...` on one line. Splitting it across lines the way this section's examples are formatted above for readability (`WITH recent AS (\n ...\n)\nSELECT ...`) does *not* work when actually pasted into a `.lnl` file: `linal run`'s line joiner only tracks paren balance, and the `WITH` clause's own parens close before the file reaches the trailing `SELECT`, so the joiner treats the `WITH ... AS (...)` part as a complete (and invalid) statement on its own. This is a real gap in the file-runner's statement-joining heuristic, not a DSL limitation — the parser itself accepts the full multi-line form fine when given as one string (e.g. over `/execute`).
 
@@ -961,10 +966,11 @@ server's active database, like a headerless `USE` on `/execute`.
 ### Concurrency and scaling
 
 Each database has its own lock. Requests against different databases run in parallel.
-Requests against the *same* database run one at a time, except read-only statements, which
-share a read lock: `EXPLAIN`, `AUDIT`, `LIST`, `DELIVER`, `SHOW` (except of a lazy tensor) and
-`DESCRIBE PIPELINE`. `SELECT` and `SEARCH` take the database's write lock today. For more
-throughput, split data across databases.
+Within one database, reads share the lock and run in parallel: `SELECT` (with CTEs,
+subqueries, joins and `UNION`), `SEARCH` without `INTO`, `EXPLAIN`, `AUDIT`, `LIST`, `DELIVER`,
+`SHOW` (except of a lazy tensor) and `DESCRIBE PIPELINE`. Everything that writes (`INSERT`,
+`UPDATE`, `DELETE`, `SEARCH ... INTO`, `DATASET ... FROM`, tensor statements, ...) is exclusive.
+For more write throughput, split data across databases.
 
 Instances don't communicate with each other. To spread databases over several machines, run one
 instance per group of databases and route by `X-Linal-Database` with a reverse proxy. See

@@ -6,6 +6,7 @@ use crate::dsl::{DslError, DslOutput};
 use crate::engine::TensorDb;
 use crate::query::logical::{AggregateFunction, Expr as LogicalExpr, JoinType, LogicalPlan};
 use crate::query::planner::Planner;
+use std::sync::Arc;
 
 type RowPredicate = Box<dyn Fn(&Tuple) -> bool>;
 
@@ -109,31 +110,162 @@ pub(super) fn execute_create_dataset_from(
     Ok(DslOutput::None)
 }
 
-pub(super) fn execute_select(
-    db: &mut TensorDb,
+/// Runs a `SEARCH` and returns its result rows, without touching the
+/// database. Shared by the executor (which then either returns the rows or
+/// stores them `INTO` a dataset) and the server's read-lock path, which
+/// only handles the no-`INTO` form (`dsl::can_execute_shared`).
+pub(crate) fn run_search(
+    db: &TensorDb,
+    s: &SearchStmt,
+    line_no: usize,
+) -> Result<(Arc<crate::core::tuple::Schema>, Vec<Tuple>), DslError> {
+    let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+        line: line_no,
+        source: e,
+    })?;
+    let schema = source_ds.schema.clone();
+    let query_tensor = match s.query {
+        SearchQuery::TensorRef(ref name) => db
+            .get(name)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?
+            .clone(),
+        SearchQuery::Inline(ref values) => {
+            use crate::core::tensor::{TensorId, TensorMetadata};
+            let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            let n = vals_f32.len();
+            let id = TensorId::new();
+            let meta = TensorMetadata::new(id, None);
+            crate::core::tensor::Tensor::new(
+                id,
+                crate::core::tensor::Shape::new(vec![n]),
+                vals_f32,
+                meta,
+            )
+            .map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: e,
+            })?
+        }
+    };
+    let mut plan = LogicalPlan::VectorSearch {
+        input: Box::new(LogicalPlan::Scan {
+            dataset_name: s.dataset.clone(),
+            schema: schema.clone(),
+        }),
+        column: s.column.clone(),
+        query: query_tensor,
+        k: s.top_k,
+    };
+    if let Some(filter_expr) = &s.filter {
+        plan = LogicalPlan::Filter {
+            input: Box::new(plan),
+            predicate: dsl_expr_to_logical_expr(
+                filter_expr,
+                &schema,
+                &std::collections::HashSet::new(),
+            ),
+        };
+    }
+    let planner = Planner::new(db);
+    let physical_plan = planner
+        .create_physical_plan(&plan)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+    let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
+        line: line_no,
+        source: e,
+    })?;
+    Ok((physical_plan.schema(), result_rows))
+}
+
+/// A `SEARCH` result returned inline (no `INTO`).
+pub(crate) fn search_result_table(
+    schema: Arc<crate::core::tuple::Schema>,
+    rows: Vec<Tuple>,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    let ds = dataset_legacy::Dataset::with_rows(
+        dataset_legacy::DatasetId(0),
+        schema,
+        rows,
+        Some("Search Result".into()),
+    )
+    .map_err(|e| DslError::Parse {
+        line: line_no,
+        msg: e,
+    })?;
+    Ok(DslOutput::Table(ds))
+}
+
+/// Rows a query has already computed and can refer to by name: its CTEs
+/// (`WITH name AS (...)`). They're scoped to the query -- visible to later
+/// CTEs, nested subqueries and the right side of a `UNION` -- and never
+/// registered in the database, which is what lets `execute_select` take
+/// `&TensorDb`. A CTE shadows a real dataset with the same name for the
+/// duration of the query, as in SQL.
+#[derive(Clone, Default)]
+struct QueryScope {
+    temps: std::collections::HashMap<String, (Arc<crate::core::tuple::Schema>, Arc<Vec<Tuple>>)>,
+}
+
+impl QueryScope {
+    /// A `LogicalPlan` reading `name`: the scoped rows if it's a CTE, else a
+    /// scan of the database's dataset.
+    fn source_plan(
+        &self,
+        db: &TensorDb,
+        name: &str,
+        line_no: usize,
+    ) -> Result<LogicalPlan, DslError> {
+        if let Some((schema, rows)) = self.temps.get(name) {
+            return Ok(LogicalPlan::Values {
+                name: name.to_string(),
+                schema: schema.clone(),
+                rows: rows.clone(),
+            });
+        }
+        let ds = db.get_dataset(name).map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+        Ok(LogicalPlan::Scan {
+            dataset_name: name.to_string(),
+            schema: ds.schema.clone(),
+        })
+    }
+}
+
+/// Executes a `SELECT`. Takes `&TensorDb`: a query reads the database and
+/// never writes to it -- intermediate results (CTEs, `FROM` subqueries) stay
+/// in a per-query `QueryScope` -- so `linal serve` can run it under a read
+/// lock (`dsl::can_execute_shared`), concurrently with other reads of the
+/// same database.
+pub(crate) fn execute_select(
+    db: &TensorDb,
     s: SelectStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    // Materialize CTEs as temp datasets
-    let mut cte_names: Vec<String> = vec![];
+    execute_select_in_scope(db, s, line_no, &QueryScope::default())
+}
+
+fn execute_select_in_scope(
+    db: &TensorDb,
+    s: SelectStmt,
+    line_no: usize,
+    outer: &QueryScope,
+) -> Result<DslOutput, DslError> {
+    let mut scope = outer.clone();
     for (cte_name, cte_query) in s.ctes {
-        let cte_result = execute_select(db, cte_query, line_no)?;
+        let cte_result = execute_select_in_scope(db, cte_query, line_no, &scope)?;
         if let DslOutput::Table(cte_ds) = cte_result {
-            let schema = cte_ds.schema.clone();
-            let rows = cte_ds.rows;
-            db.create_dataset(cte_name.clone(), schema)
-                .map_err(|e| DslError::Engine {
-                    line: line_no,
-                    source: e,
-                })?;
-            let ds = db
-                .get_dataset_mut(&cte_name)
-                .map_err(|e| DslError::Engine {
-                    line: line_no,
-                    source: e,
-                })?;
-            ds.rows = rows;
-            cte_names.push(cte_name);
+            scope
+                .temps
+                .insert(cte_name, (cte_ds.schema.clone(), Arc::new(cte_ds.rows)));
         }
     }
 
@@ -201,35 +333,17 @@ pub(super) fn execute_select(
 
     // Resolve the FROM source — either a named dataset or an executed subquery.
     let mut plan = match source {
-        DatasetSource::Named(ref name) => {
-            let source_ds = db.get_dataset(name).map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?;
-            let schema = source_ds.schema.clone();
-            LogicalPlan::Scan {
-                dataset_name: name.clone(),
-                schema,
-            }
-        }
+        DatasetSource::Named(ref name) => scope.source_plan(db, name, line_no)?,
+        // Previously registered as a real dataset named after the alias and
+        // never removed: it leaked into the catalog, and running the same
+        // query a second time failed with "Dataset name already exists".
         DatasetSource::Subquery { query, alias } => {
-            let inner = execute_select(db, *query, line_no)?;
+            let inner = execute_select_in_scope(db, *query, line_no, &scope)?;
             if let DslOutput::Table(inner_ds) = inner {
-                let schema = inner_ds.schema.clone();
-                let rows = inner_ds.rows;
-                db.create_dataset(alias.clone(), schema.clone())
-                    .map_err(|e| DslError::Engine {
-                        line: line_no,
-                        source: e,
-                    })?;
-                let target = db.get_dataset_mut(&alias).map_err(|e| DslError::Engine {
-                    line: line_no,
-                    source: e,
-                })?;
-                target.rows = rows;
-                LogicalPlan::Scan {
-                    dataset_name: alias,
-                    schema,
+                LogicalPlan::Values {
+                    name: alias,
+                    schema: inner_ds.schema.clone(),
+                    rows: Arc::new(inner_ds.rows),
                 }
             } else {
                 return Err(DslError::Parse {
@@ -242,17 +356,7 @@ pub(super) fn execute_select(
 
     // Build join nodes left-to-right
     for join in &s.joins {
-        let right_ds = db
-            .get_dataset(&join.dataset)
-            .map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?;
-        let right_schema = right_ds.schema.clone();
-        let right_plan = LogicalPlan::Scan {
-            dataset_name: join.dataset.clone(),
-            schema: right_schema,
-        };
+        let right_plan = scope.source_plan(db, &join.dataset, line_no)?;
         let join_type = match join.kind {
             JoinKind::Inner => JoinType::Inner,
             JoinKind::Left => JoinType::Left,
@@ -679,7 +783,7 @@ pub(super) fn execute_select(
 
     // Handle UNION
     let (result_rows, result_schema) = if let Some((kind, right_stmt)) = s.union {
-        let right_result = execute_select(db, *right_stmt, line_no)?;
+        let right_result = execute_select_in_scope(db, *right_stmt, line_no, &scope)?;
         if let DslOutput::Table(right_ds) = right_result {
             let mut combined = result_rows;
             combined.extend(right_ds.rows);
@@ -700,11 +804,6 @@ pub(super) fn execute_select(
     } else {
         (result_rows, result_schema)
     };
-
-    // Clean up CTE temp datasets so they don't shadow real datasets in subsequent queries
-    for cte_name in &cte_names {
-        let _ = db.remove_dataset(cte_name);
-    }
 
     // Normalize all rows to the canonical result_schema Arc so that Dataset::with_rows
     // schema equality check (structural, not pointer) passes even for rows from different
