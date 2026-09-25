@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — per-database locking in `linal serve`
+
+`linal serve` used to share one `Arc<RwLock<TensorDb>>` across every request.
+`Statement::is_read_only()` only covers `EXPLAIN`/`AUDIT`/`LIST`/`DELIVER`, so every `SELECT`,
+`SHOW` and `SEARCH` took the write lock over *all* databases. A heavy query on one tenant's
+database stalled every other tenant.
+
+`server::engine::SharedEngine` now gives each database its own single-database `TensorDb`
+(`TensorDb::from_instance`) behind its own lock, so requests against different databases no
+longer wait on each other.
+- Catalog statements (`CREATE`/`DROP`/`USE DATABASE`, `SHOW DATABASES`) are answered by the
+  router with the same messages as before.
+- `/execute`, `/execute/batch`, `/jobs` and `/schedule` keep their existing `USE` /
+  `X-Linal-Database` semantics, including the documented permanent `target_db` switch of
+  scheduled tasks.
+
+Measured with release builds: a 300k-row CSV in db `a`, two threads looping a `GROUP BY` on
+`a`, and single writes on db `b`. Median latency for the writes on `b` went from 42.8 ms (p95
+83.2 ms) to 0.5 ms (p95 0.5 ms).
+
+Also:
+- `SHOW` and `DESCRIBE PIPELINE` now run under a read lock (`dsl::can_execute_shared`).
+  - The exception is `SHOW <name>` on a lazy tensor, which still materializes it under a write
+    lock.
+  - `SELECT`/`SEARCH` stay on the write path, because `execute_select` creates datasets.
+- `TensorDb.pipelines` is now a shared `PipelineRegistry` (`Arc<RwLock<..>>`), so pipelines stay
+  session-wide across databases on the server.
+  - Use `get(name)` (returns a clone), `contains_key` and `summary`. Indexing
+    (`pipelines["x"]`) is no longer available.
+- `InMemoryTensorStore::get` is O(1) (an id index next to the insertion-ordered `Vec`) instead
+  of a linear scan.
+- A job whose `X-Linal-Database` names a database that doesn't exist now fails with
+  `Database 'x' not found`. Before, it silently ran on the current active database.
+
+Flagged, not changed (see `SCALING_AND_GPU_PLAN.md`):
+- A headerless `/jobs` `USE` is still undone when the job finishes (the class of bug fixed for
+  `/execute` in v0.1.74).
+- `/delivery` still reads `./data` instead of `config.storage.data_dir`.
+
+This is the first step of `SCALING_AND_GPU_PLAN.md` (new): horizontal scaling and GPU options,
+analyzed against the current engine, with WAL and a `wgpu` spike as the next tracks.
+
 ## [0.1.89] - 2026-09-21
 
 ### Fixed — content-hash-collision misattribution in tensor provenance (`EXPLAIN LINEAGE`/`PRUNE LINEAGE`)

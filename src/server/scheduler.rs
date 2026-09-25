@@ -1,7 +1,6 @@
-use crate::dsl::execute_line;
-use crate::engine::TensorDb;
+use super::engine::{Session, SharedEngine};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -17,14 +16,14 @@ pub struct ScheduledTask {
 }
 
 pub struct Scheduler {
-    db: Arc<RwLock<TensorDb>>,
+    engine: Arc<SharedEngine>,
     tasks: Arc<Mutex<Vec<ScheduledTask>>>,
 }
 
 impl Scheduler {
-    pub fn new(db: Arc<RwLock<TensorDb>>) -> Self {
+    pub fn new(engine: Arc<SharedEngine>) -> Self {
         Self {
-            db,
+            engine,
             tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -84,14 +83,22 @@ impl Scheduler {
             }
 
             for task in tasks_to_run {
-                let db_arc = self.db.clone();
+                let engine = self.engine.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut db = db_arc.write().unwrap();
-                    if let Some(db_name) = &task.target_db {
-                        let _ = db.use_database(db_name);
-                    }
+                    // A task's `target_db` switch is permanent by design: it
+                    // becomes the server's active database for later headerless
+                    // requests too (see `docs/ARCHITECTURE.md`, "`/schedule`'s
+                    // `target_db` switch is permanent"). An unknown `target_db`
+                    // is ignored and the task runs on the current active
+                    // database, as before.
+                    let mut session = match &task.target_db {
+                        Some(db_name) if engine.use_database_for_server(db_name).is_ok() => {
+                            Session::Following(db_name.clone())
+                        }
+                        _ => Session::Server,
+                    };
                     println!("Running scheduled task '{}': {}", task.name, task.command);
-                    match execute_line(&mut db, &task.command, 0) {
+                    match engine.execute(&mut session, &task.command, 0) {
                         Ok(out) => println!("Task '{}' result: {:?}", task.name, out),
                         Err(e) => eprintln!("Task '{}' error: {}", task.name, e),
                     }

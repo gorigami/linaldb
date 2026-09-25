@@ -1,8 +1,9 @@
 pub mod dataset_server;
+pub mod engine;
 pub mod jobs;
 pub mod scheduler;
 
-use crate::dsl::{execute_line, execute_line_shared, is_read_only, DslOutput};
+use crate::dsl::DslOutput;
 use crate::engine::TensorDb;
 use axum::{
     extract::{Query, State},
@@ -11,6 +12,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use engine::{Session, SharedEngine};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use toon_format::encode_default;
@@ -18,7 +20,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 struct AppState {
-    db: Arc<RwLock<TensorDb>>,
+    engine: Arc<SharedEngine>,
     scheduler: Arc<scheduler::Scheduler>,
     job_manager: Arc<jobs::JobManager>,
 }
@@ -117,8 +119,16 @@ pub struct ScheduleRequest {
 )]
 struct ApiDoc;
 
+/// Starts the server on `db`'s databases. The server takes ownership of every
+/// database in `db` (each gets its own lock, see `engine::SharedEngine`), so
+/// `db` must not be used for execution after this is called.
 pub async fn start_server(db: Arc<RwLock<TensorDb>>, port: u16) {
-    let scheduler = Arc::new(scheduler::Scheduler::new(db.clone()));
+    let engine = Arc::new(SharedEngine::from_tensor_db(&mut db.write().unwrap()));
+    start_server_with_engine(engine, port).await
+}
+
+pub async fn start_server_with_engine(engine: Arc<SharedEngine>, port: u16) {
+    let scheduler = Arc::new(scheduler::Scheduler::new(engine.clone()));
     let job_manager = Arc::new(jobs::JobManager::new());
     let scheduler_handle = scheduler.clone();
     tokio::spawn(async move {
@@ -126,7 +136,7 @@ pub async fn start_server(db: Arc<RwLock<TensorDb>>, port: u16) {
     });
 
     let state = Arc::new(AppState {
-        db,
+        engine,
         scheduler,
         job_manager,
     });
@@ -317,59 +327,21 @@ async fn execute_command(
             .into_response();
     }
 
-    // Wrap execution in timeout and spawn_blocking to keep server responsive
-    let db_arc = state.db.clone();
+    // Wrap execution in timeout and spawn_blocking to keep server responsive.
+    // A request with X-Linal-Database is pinned to that database for its
+    // whole duration; one without it follows (and, via USE, moves) the
+    // server's active database. Either way it only locks its own database.
+    let engine = state.engine.clone();
     let command_clone = command.clone();
 
     let exec_result = tokio::time::timeout(
         std::time::Duration::from_secs(QUERY_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            let read_only = is_read_only(&command_clone);
-            let prev_db_name;
-
-            // Determine if we need a write lock for DB switching
-            let needs_write_lock_for_db_switch = if let Some(ref db_name) = target_db {
-                let db_read = db_arc.read().unwrap();
-                prev_db_name = db_read.active_db().to_string();
-                db_name != &prev_db_name
-            } else {
-                let db_read = db_arc.read().unwrap();
-                prev_db_name = db_read.active_db().to_string();
-                false
+            let mut session = match target_db {
+                Some(name) => Session::Pinned(name),
+                None => Session::Server,
             };
-
-            if read_only && !needs_write_lock_for_db_switch {
-                let db = db_arc.read().unwrap();
-                execute_line_shared(&db, &command_clone, 1)
-            } else {
-                let mut db = db_arc.write().unwrap();
-                // Only a request that itself asked to *borrow* a different
-                // active database via X-Linal-Database (`target_db.is_some()`)
-                // gets that borrow reverted afterward, so concurrent requests
-                // targeting different databases via the header can't clobber
-                // each other's active-db state. A request with no header
-                // (target_db=None) executes whatever command it was sent
-                // as-is — including a `USE <db>` statement, whose entire
-                // point is to persist a session-level database switch, the
-                // same way it does for the embedded CLI/REPL (which never
-                // goes through this restore logic at all). Previously this
-                // restore ran unconditionally, so `USE <db>` sent to
-                // `/execute` reported success but was silently undone before
-                // the response even went out — every subsequent request,
-                // headerless or not, still saw the old active database.
-                let switched_db = target_db.is_some();
-                if let Some(db_name) = target_db {
-                    db.use_database(&db_name)
-                        .map_err(|e| crate::dsl::DslError::Engine { line: 0, source: e })?;
-                }
-
-                let result = execute_line(&mut db, &command_clone, 1);
-
-                if switched_db {
-                    let _ = db.use_database(&prev_db_name);
-                }
-                result
-            }
+            engine.execute(&mut session, &command_clone, 1)
         }),
     )
     .await;
@@ -540,61 +512,44 @@ async fn execute_batch(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Whole batch shares one lock hold and one restore boundary: a `USE`
-    // statement inside the batch persists naturally for the rest of *this*
-    // batch (nothing restores mid-loop), then gets undone along with
-    // everything else once the loop ends -- same invariant `/execute`
-    // already has for a single statement, just scoped to N statements.
-    let db_arc = state.db.clone();
+    // A USE inside the batch persists for the rest of *this* batch. Without
+    // the header it also persists for later requests (the server's active
+    // database); with the header it never leaves the batch. Consecutive
+    // statements on one database run under a single write-lock hold.
+    let engine = state.engine.clone();
     let exec_result = tokio::time::timeout(
         std::time::Duration::from_secs(QUERY_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            let mut db = db_arc.write().unwrap();
-            let prev_db_name = db.active_db().to_string();
-            let switched_db = target_db.is_some();
-
-            if let Some(ref db_name) = target_db {
-                if let Err(e) = db.use_database(db_name) {
-                    return vec![BatchStatementResult {
-                        statement: String::new(),
+            let mut session = match target_db {
+                Some(name) => Session::Pinned(name),
+                None => Session::Following(engine.server_active()),
+            };
+            engine
+                .execute_batch(
+                    &mut session,
+                    statements
+                        .iter()
+                        .map(|stmt| (stmt.text.as_str(), stmt.start_line)),
+                )
+                .into_iter()
+                .map(|(statement, result)| match result {
+                    Ok(output) => BatchStatementResult {
+                        statement,
+                        status: "ok".to_string(),
+                        result: match output {
+                            DslOutput::None => None,
+                            other => Some(other),
+                        },
+                        error: None,
+                    },
+                    Err(e) => BatchStatementResult {
+                        statement,
                         status: "error".to_string(),
                         result: None,
                         error: Some(format!("{}", e)),
-                    }];
-                }
-            }
-
-            let mut results = Vec::with_capacity(statements.len());
-            for stmt in &statements {
-                match execute_line(&mut db, &stmt.text, stmt.start_line) {
-                    Ok(output) => {
-                        results.push(BatchStatementResult {
-                            statement: stmt.text.clone(),
-                            status: "ok".to_string(),
-                            result: match output {
-                                DslOutput::None => None,
-                                other => Some(other),
-                            },
-                            error: None,
-                        });
-                    }
-                    Err(e) => {
-                        results.push(BatchStatementResult {
-                            statement: stmt.text.clone(),
-                            status: "error".to_string(),
-                            result: None,
-                            error: Some(format!("{}", e)),
-                        });
-                        break;
-                    }
-                }
-            }
-
-            if switched_db {
-                let _ = db.use_database(&prev_db_name);
-            }
-
-            results
+                    },
+                })
+                .collect::<Vec<_>>()
         }),
     )
     .await;
@@ -699,8 +654,7 @@ async fn delete_schedule(
 }
 
 async fn list_databases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let db = state.db.read().unwrap();
-    let databases = db.list_databases();
+    let databases = state.engine.list_databases();
     Json(serde_json::json!({ "status": "ok", "databases": databases }))
 }
 
@@ -708,8 +662,7 @@ async fn create_database(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let mut db = state.db.write().unwrap();
-    match db.create_database(name.clone()) {
+    match state.engine.create_database(name.clone()) {
         Ok(_) => (
             StatusCode::CREATED,
             Json(
@@ -727,8 +680,7 @@ async fn delete_database(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let mut db = state.db.write().unwrap();
-    match db.drop_database(&name) {
+    match state.engine.drop_database(&name) {
         Ok(_) => (
             StatusCode::OK,
             Json(
@@ -780,51 +732,21 @@ async fn submit_job(
         .job_manager
         .create_job(command.clone(), target_db.clone());
 
-    // Spawn background execution
-    let db_arc = state.db.clone();
+    // Spawn background execution. Pinned to the header's database if given,
+    // otherwise to the server's active database at the time the job runs.
+    // Unlike headerless `/execute`, a headerless job's own `USE` does not
+    // outlive the job -- the pre-existing behavior (the job path always
+    // restored the previous active database), kept unchanged here.
+    let engine = state.engine.clone();
     let mgr = state.job_manager.clone();
     let job_id_clone = job_id;
 
     tokio::spawn(async move {
         mgr.update_job_status(job_id_clone, jobs::JobStatus::Running);
 
-        let read_only = is_read_only(&command);
-
         let res = tokio::task::spawn_blocking(move || {
-            if read_only {
-                let db = db_arc.read().unwrap();
-                let prev_db = db.active_db().to_string();
-
-                // Shared execution doesn't support changing DB easily if we want purely parallel.
-                // But for now we just use a read lock.
-                // NOTE: use_database needs a WRITE lock currently.
-                // If the user specified a target_db different from actual, we might need a write lock even if command is SHOW.
-                // To keep it simple, if target_db is set, we use write lock for now.
-                if let Some(db_name) = target_db.as_ref() {
-                    if db_name != &prev_db {
-                        drop(db); // release read lock
-                        let mut db_write = db_arc.write().unwrap();
-                        let _ = db_write.use_database(db_name);
-                        let exec_res = execute_line_shared(&db_write, &command, 1);
-                        let _ = db_write.use_database(&prev_db);
-                        return exec_res;
-                    }
-                }
-
-                execute_line_shared(&db, &command, 1)
-            } else {
-                let mut db = db_arc.write().unwrap();
-                let prev_db = db.active_db().to_string();
-
-                if let Some(db_name) = target_db {
-                    let _ = db.use_database(&db_name);
-                }
-
-                let exec_res = execute_line(&mut db, &command, 1);
-
-                let _ = db.use_database(&prev_db);
-                exec_res
-            }
+            let mut session = Session::Pinned(target_db.unwrap_or_else(|| engine.server_active()));
+            engine.execute(&mut session, &command, 1)
         })
         .await;
 

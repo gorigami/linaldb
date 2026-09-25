@@ -39,8 +39,7 @@ pub(super) fn execute_apply_pipeline(
             line: line_no,
             msg: format!("Pipeline '{}' not found", s.pipeline),
         })?
-        .steps
-        .clone();
+        .steps;
 
     let mut current = s.source.clone();
     let step_count = steps.len();
@@ -96,8 +95,8 @@ pub(super) fn execute_drop_pipeline(
     Ok(DslOutput::Message(format!("Dropped pipeline '{}'.", name)))
 }
 
-pub(super) fn execute_describe_pipeline(
-    db: &mut TensorDb,
+pub(crate) fn execute_describe_pipeline(
+    db: &TensorDb,
     name: String,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
@@ -118,15 +117,9 @@ pub(crate) fn execute_show_pipelines(db: &TensorDb) -> Result<DslOutput, DslErro
     if db.pipelines.is_empty() {
         return Ok(DslOutput::Message("No pipelines defined.".into()));
     }
-    let mut names: Vec<&String> = db.pipelines.keys().collect();
-    names.sort();
     let mut out = String::from("--- PIPELINES ---\n");
-    for name in names {
-        out.push_str(&format!(
-            "  {} ({} step(s))\n",
-            name,
-            db.pipelines[name].steps.len()
-        ));
+    for (name, steps) in db.pipelines.summary() {
+        out.push_str(&format!("  {} ({} step(s))\n", name, steps));
     }
     out.push_str("-----------------");
     Ok(DslOutput::Message(out))

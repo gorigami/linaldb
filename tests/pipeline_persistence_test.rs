@@ -28,9 +28,13 @@ fn test_pipeline_save_load_roundtrip() {
         db.pipelines.contains_key("simple"),
         "pipeline should be restored"
     );
-    assert_eq!(db.pipelines["simple"].steps.len(), 1);
+    assert_eq!(db.pipelines.get("simple").unwrap().steps.len(), 1);
     assert!(
-        db.pipelines["simple"].source.contains("SELECT"),
+        db.pipelines
+            .get("simple")
+            .unwrap()
+            .source
+            .contains("SELECT"),
         "source should include SELECT"
     );
 }
@@ -71,7 +75,7 @@ fn test_pipeline_save_load_explicit_path() {
 
     assert!(db.pipelines.contains_key("ep_pipe"));
     assert_eq!(
-        db.pipelines["ep_pipe"].steps.len(),
+        db.pipelines.get("ep_pipe").unwrap().steps.len(),
         2,
         "WHERE + LIMIT = 2 steps"
     );
@@ -116,13 +120,17 @@ fn test_pipeline_load_overwrites_in_memory() {
     )
     .unwrap();
     assert!(
-        db.pipelines["overwrite_me"].source.contains("LIMIT 999"),
+        db.pipelines
+            .get("overwrite_me")
+            .unwrap()
+            .source
+            .contains("LIMIT 999"),
         "in-memory definition should have LIMIT 999 before load"
     );
 
     execute_line(&mut db, "LOAD PIPELINE overwrite_me", 2).unwrap();
 
-    let source = &db.pipelines["overwrite_me"].source;
+    let source = &db.pipelines.get("overwrite_me").unwrap().source;
     assert!(
         source.contains("SELECT"),
         "loaded pipeline should restore the saved SELECT definition, got: {}",
@@ -168,7 +176,7 @@ fn test_pipeline_load_uses_requested_name_not_source_name() {
         db.pipelines.contains_key("renamed"),
         "pipeline should be stored under the requested name 'renamed'"
     );
-    assert_eq!(db.pipelines["renamed"].steps.len(), 1);
+    assert_eq!(db.pipelines.get("renamed").unwrap().steps.len(), 1);
 }
 
 // ── 7. Pipeline with NORMALIZE step survives roundtrip and runs correctly ─────

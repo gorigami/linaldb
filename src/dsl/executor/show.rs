@@ -7,6 +7,23 @@ pub(super) fn execute_show(
     target: ShowTarget,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
+    // `SHOW <name>` on a lazy tensor materializes it first -- the only SHOW
+    // form that mutates the engine. Everything else is a pure read.
+    if let ShowTarget::Named(ref name) = target {
+        let _ = db.evaluate(name);
+    }
+    execute_show_shared(db, target, line_no)
+}
+
+/// `SHOW` against a shared (`&TensorDb`) reference, for the server's
+/// read-lock path. The caller must not use this for `SHOW <name>` on a lazy
+/// tensor (see `dsl::can_execute_shared`): it would show the tensor without
+/// materializing it, where `execute_show` evaluates it first.
+pub(crate) fn execute_show_shared(
+    db: &TensorDb,
+    target: ShowTarget,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
     match target {
         ShowTarget::All => {
             let mut names = db.list_names();
@@ -290,7 +307,6 @@ pub(super) fn execute_show(
         ShowTarget::StringLiteral(s) => Ok(DslOutput::Message(s)),
 
         ShowTarget::Named(name) => {
-            let _ = db.evaluate(&name);
             if let Ok(t) = db.get(&name) {
                 return Ok(DslOutput::Tensor(t.clone()));
             }
