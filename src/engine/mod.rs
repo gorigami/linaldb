@@ -5,6 +5,6 @@ pub mod executor;
 pub mod kernels;
 pub mod operations;
 
-pub use db::TensorDb;
+pub use db::{PipelineRegistry, TensorDb};
 pub use error::EngineError;
 pub use operations::{BinaryOp, TensorKind, UnaryOp};

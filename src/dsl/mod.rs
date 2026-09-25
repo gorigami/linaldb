@@ -213,9 +213,29 @@ pub fn is_read_only(line: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `line` can run through `execute_line_shared` (a read lock) against
+/// `db` right now. Wider than `is_read_only`, which is static: `SHOW` and
+/// `DESCRIBE PIPELINE` never mutate the engine, except `SHOW <name>` on a
+/// lazy tensor, which materializes it -- so that case depends on `db`'s
+/// current state, and the caller must check and execute under the same lock
+/// guard.
+pub fn can_execute_shared(db: &TensorDb, line: &str) -> bool {
+    use crate::dsl::ast::{ShowTarget, Statement};
+    match crate::dsl::parser::parse(line) {
+        Ok(stmt) if stmt.is_read_only() => true,
+        Ok(Statement::Show(s)) => match &s.target {
+            ShowTarget::Named(name) => !db.is_lazy(name),
+            _ => true,
+        },
+        Ok(Statement::DescribePipeline(_)) => true,
+        _ => false,
+    }
+}
+
 /// Execute a single DSL line with an immutable reference to the DB (shared/read-lock path).
 ///
-/// Only read-only statements (EXPLAIN, AUDIT, LIST, DELIVER, SHOW) are dispatched here.
+/// Dispatches read-only statements (EXPLAIN, AUDIT, LIST, DELIVER) plus SHOW
+/// and DESCRIBE PIPELINE -- see `can_execute_shared` for when SHOW is safe here.
 pub fn execute_line_shared(
     db: &TensorDb,
     line: &str,
@@ -245,6 +265,12 @@ pub fn execute_line_shared(
             }
         }
         Ok(crate::dsl::ast::Statement::List(s)) => persistence::list_typed(db, &s.target, line_no),
+        Ok(crate::dsl::ast::Statement::Show(s)) => {
+            executor::execute_show_shared(db, s.target, line_no)
+        }
+        Ok(crate::dsl::ast::Statement::DescribePipeline(name)) => {
+            executor::execute_describe_pipeline(db, name, line_no)
+        }
         Ok(crate::dsl::ast::Statement::Deliver(s)) => Ok(DslOutput::Message(format!(
             "Delivery Projection for '{}' created. (Phase 1 Read-Only View)",
             s.dataset

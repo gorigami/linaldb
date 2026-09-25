@@ -532,13 +532,65 @@ impl DatabaseInstance {
     }
 }
 
+/// Session-wide named pipeline registry (`DEFINE`/`APPLY`/`DROP PIPELINE`).
+///
+/// Pipelines aren't scoped to a database: one defined while `USE a` is
+/// active can be applied after `USE b`. Cloning the registry shares it
+/// (`Arc`), which is how `linal serve` keeps that session-wide behavior once
+/// each database gets its own `TensorDb` and lock (`server::engine`).
+#[derive(Debug, Clone, Default)]
+pub struct PipelineRegistry {
+    inner: Arc<std::sync::RwLock<HashMap<String, crate::dsl::ast::StoredPipeline>>>,
+}
+
+impl PipelineRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, name: String, pipeline: crate::dsl::ast::StoredPipeline) {
+        self.inner.write().unwrap().insert(name, pipeline);
+    }
+
+    pub fn get(&self, name: &str) -> Option<crate::dsl::ast::StoredPipeline> {
+        self.inner.read().unwrap().get(name).cloned()
+    }
+
+    pub fn remove(&self, name: &str) -> Option<crate::dsl::ast::StoredPipeline> {
+        self.inner.write().unwrap().remove(name)
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.inner.read().unwrap().contains_key(name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().unwrap().is_empty()
+    }
+
+    /// `(name, step count)` for every pipeline, sorted by name.
+    pub fn summary(&self) -> Vec<(String, usize)> {
+        let map = self.inner.read().unwrap();
+        let mut out: Vec<(String, usize)> = map
+            .iter()
+            .map(|(name, p)| (name.clone(), p.steps.len()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    pub fn clear(&self) {
+        self.inner.write().unwrap().clear();
+    }
+}
+
 /// High-level engine that manages multiple DatabaseInstances
 pub struct TensorDb {
     pub config: crate::core::config::EngineConfig,
     databases: HashMap<String, DatabaseInstance>,
     active_db: String,
     /// Session-wide named pipeline registry.
-    pub pipelines: HashMap<String, crate::dsl::ast::StoredPipeline>,
+    pub pipelines: PipelineRegistry,
 }
 
 impl Default for TensorDb {
@@ -566,13 +618,50 @@ impl TensorDb {
             databases: dbs,
             active_db: default_name,
             config,
-            pipelines: HashMap::new(),
+            pipelines: PipelineRegistry::new(),
         };
 
         // Try to recover existing databases
         let _ = db.recover_databases();
 
         db
+    }
+
+    /// A `TensorDb` holding exactly one database, `instance`, which is also
+    /// its active database. Used by `linal serve` (`server::engine`) to give
+    /// every database its own `TensorDb` behind its own lock, so requests
+    /// against different databases never wait on each other. `pipelines` is
+    /// shared across all of them to keep pipelines session-wide.
+    pub fn from_instance(
+        config: crate::core::config::EngineConfig,
+        instance: DatabaseInstance,
+        pipelines: PipelineRegistry,
+    ) -> Self {
+        let name = instance.name.clone();
+        let mut databases = HashMap::new();
+        databases.insert(name.clone(), instance);
+        Self {
+            config,
+            databases,
+            active_db: name,
+            pipelines,
+        }
+    }
+
+    /// Moves every database out of this engine, returning one single-database
+    /// `TensorDb` per database (see `from_instance`, all sharing this engine's
+    /// pipeline registry) plus the name of the database that was active.
+    ///
+    /// This engine is left with no databases and must not be used for
+    /// execution afterwards: `linal serve` takes ownership of all state.
+    pub fn take_single_database_engines(&mut self) -> (Vec<TensorDb>, String) {
+        let engines = std::mem::take(&mut self.databases)
+            .into_values()
+            .map(|instance| {
+                TensorDb::from_instance(self.config.clone(), instance, self.pipelines.clone())
+            })
+            .collect();
+        (engines, self.active_db.clone())
     }
 
     fn recover_databases(&mut self) -> Result<(), EngineError> {
@@ -845,6 +934,12 @@ impl TensorDb {
 
     pub fn evaluate(&mut self, name: &str) -> Result<(), EngineError> {
         self.active_instance_mut().evaluate(name)
+    }
+
+    /// Whether `name` is a lazy (not yet materialized) tensor in the active
+    /// database.
+    pub fn is_lazy(&self, name: &str) -> bool {
+        self.active_instance().is_lazy(name)
     }
 
     pub fn eval_reshape(
@@ -3357,6 +3452,12 @@ impl DatabaseInstance {
         );
         self.lazy_store.insert(id, expr);
         Ok(())
+    }
+
+    pub fn is_lazy(&self, name: &str) -> bool {
+        self.names
+            .get(name)
+            .is_some_and(|entry| entry.kind == TensorKind::Lazy)
     }
 
     pub fn evaluate(&mut self, name: &str) -> Result<(), EngineError> {

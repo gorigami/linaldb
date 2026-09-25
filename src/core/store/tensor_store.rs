@@ -1,6 +1,7 @@
 // src/store.rs
 
 use crate::core::tensor::{Shape, Tensor, TensorId};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -22,9 +23,13 @@ impl std::fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 /// Motor en memoria: guarda tensores en una lista.
+///
+/// `tensors` keeps insertion order; `index` maps each id to its position so
+/// `get` is O(1) instead of a linear scan over every tensor ever inserted.
 #[derive(Debug)]
 pub struct InMemoryTensorStore {
     tensors: Vec<Tensor>,
+    index: HashMap<TensorId, usize>,
 }
 
 impl Default for InMemoryTensorStore {
@@ -37,6 +42,7 @@ impl InMemoryTensorStore {
     pub fn new() -> Self {
         Self {
             tensors: Vec::new(),
+            index: HashMap::new(),
         }
     }
 
@@ -50,7 +56,7 @@ impl InMemoryTensorStore {
         let id = self.gen_id();
         let metadata = crate::core::tensor::TensorMetadata::new(id, None);
         let tensor = Tensor::new(id, shape, data, metadata).map_err(StoreError::InvalidTensor)?;
-        self.tensors.push(tensor);
+        self.push(tensor);
         Ok(id)
     }
 
@@ -65,14 +71,22 @@ impl InMemoryTensorStore {
         }
 
         let id = tensor.id;
-        self.tensors.push(tensor);
+        self.push(tensor);
         Ok(id)
     }
 
+    /// Appends a tensor and indexes it. If the same id is inserted twice,
+    /// the index keeps pointing at the first copy -- the same first-match
+    /// result the previous linear scan in `get` returned.
+    fn push(&mut self, tensor: Tensor) {
+        self.index.entry(tensor.id).or_insert(self.tensors.len());
+        self.tensors.push(tensor);
+    }
+
     pub fn get(&self, id: TensorId) -> Result<&Tensor, StoreError> {
-        self.tensors
-            .iter()
-            .find(|t| t.id == id)
+        self.index
+            .get(&id)
+            .map(|&i| &self.tensors[i])
             .ok_or(StoreError::TensorNotFound(id))
     }
 
@@ -80,11 +94,23 @@ impl InMemoryTensorStore {
     pub fn remove(&mut self, id: TensorId) -> bool {
         let len_before = self.tensors.len();
         self.tensors.retain(|t| t.id != id);
-        self.tensors.len() < len_before
+        let removed = self.tensors.len() < len_before;
+        if removed {
+            self.reindex();
+        }
+        removed
+    }
+
+    fn reindex(&mut self) {
+        self.index.clear();
+        for (i, t) in self.tensors.iter().enumerate() {
+            self.index.entry(t.id).or_insert(i);
+        }
     }
 
     /// Clears the store
     pub fn clear(&mut self) {
         self.tensors.clear();
+        self.index.clear();
     }
 }
