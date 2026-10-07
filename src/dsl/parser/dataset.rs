@@ -1125,6 +1125,7 @@ impl Parser {
                 top_k,
                 filter: None,
                 prefilter: None,
+                approx: false,
                 target: Some(first),
             }))
         } else if self.at(&Token::Where) {
@@ -1142,6 +1143,7 @@ impl Parser {
                 top_k,
                 filter: None,
                 prefilter: None,
+                approx: false,
                 target: None,
             }))
         } else {
@@ -1196,6 +1198,10 @@ impl Parser {
             } else {
                 None
             };
+            let approx = prefilter.is_some() && self.at_ident("APPROX");
+            if approx {
+                self.advance();
+            }
             self.eat(&Token::Limit)?;
             let top_k = self.eat_usize()?;
             // FILTER, not WHERE: WHERE is already claimed by this statement's
@@ -1221,6 +1227,7 @@ impl Parser {
                 top_k,
                 filter,
                 prefilter,
+                approx,
                 target,
             }))
         }

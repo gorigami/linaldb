@@ -233,6 +233,65 @@ fn search_layer(
     })
 }
 
+/// `search_layer` on layer 0 where only nodes passing `accept` can enter the
+/// results; every node can still be traversed, so the search reaches
+/// accepted nodes behind rejected ones. Stops once `ef` accepted nodes are
+/// held and the best unexplored node can't beat the worst of them -- with
+/// few accepted nodes that can mean walking most of the graph.
+fn search_layer_filtered(
+    store: &FlatVectors,
+    graph: &Graph,
+    query: &[f32],
+    query_norm: f32,
+    entry_points: &[u32],
+    ef: usize,
+    accept: &dyn Fn(u32) -> bool,
+) -> Vec<Cand> {
+    with_visited(graph.levels.len(), |first_visit| {
+        let mut candidates: BinaryHeap<Cand> = BinaryHeap::new();
+        let mut results: BinaryHeap<Reverse<Cand>> = BinaryHeap::new();
+        let offer = |c: Cand, results: &mut BinaryHeap<Reverse<Cand>>| {
+            if accept(c.id) {
+                results.push(Reverse(c));
+                if results.len() > ef {
+                    results.pop();
+                }
+            }
+        };
+        for &e in entry_points {
+            if first_visit(e) {
+                let c = Cand {
+                    sim: store.cosine(e as usize, query, query_norm),
+                    id: e,
+                };
+                candidates.push(c);
+                offer(c, &mut results);
+            }
+        }
+        while let Some(c) = candidates.pop() {
+            let worst = results.peek().map_or(f32::MIN, |r| r.0.sim);
+            if results.len() >= ef && c.sim < worst {
+                break;
+            }
+            for nb in graph.links(c.id, 0) {
+                if !first_visit(nb) {
+                    continue;
+                }
+                let sim = store.cosine(nb as usize, query, query_norm);
+                let worst = results.peek().map_or(f32::MIN, |r| r.0.sim);
+                if results.len() < ef || sim > worst {
+                    let n = Cand { sim, id: nb };
+                    candidates.push(n);
+                    offer(n, &mut results);
+                }
+            }
+        }
+        let mut out: Vec<Cand> = results.into_iter().map(|r| r.0).collect();
+        out.sort_by(|a, b| b.cmp(a));
+        out
+    })
+}
+
 /// The neighbor-selection heuristic: walk `candidates` (most similar to the
 /// base node first) and keep one only if it is more similar to the base
 /// node than to every neighbor kept so far; then top up with the skipped
@@ -467,6 +526,65 @@ impl HnswIndex {
 
     fn search_graph(&self, graph: &Graph, query: &[f32], k: usize) -> Vec<(usize, f32)> {
         self.search_graph_ef(graph, query, k, EF_SEARCH.max(k))
+    }
+
+    /// Top-`k` among the rows `allowed` accepts (by row id), of which there
+    /// are `allowed_count`: a filtered graph walk plus a scan of the
+    /// unindexed tail. Exact instead -- a scan of every allowed row -- when
+    /// that set is small (at most `4 * max(k, ef_search)` rows), when there
+    /// is no graph, or when the walk found fewer than `k` while at least `k`
+    /// rows are allowed; so it returns `min(k, allowed_count)` rows, like an
+    /// exact pre-filtered search.
+    pub fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        allowed: &dyn Fn(usize) -> bool,
+        allowed_count: usize,
+    ) -> Result<Vec<(usize, f32)>, String> {
+        self.store.check_query(query)?;
+        let wanted = k.min(allowed_count);
+        let exact = |s: &Self| {
+            s.store.top_k(
+                (0..s.store.len()).filter(|&i| allowed(s.store.row_id(i))),
+                query,
+                k,
+            )
+        };
+        let ef = EF_SEARCH.max(k);
+        let graph = match &self.graph {
+            Some(g) if allowed_count > 4 * ef && g.entry != NONE => g,
+            _ => return Ok(exact(self)),
+        };
+        let query_norm = l2_norm(query);
+        let mut eps = vec![graph.entry];
+        let mut layer = graph.max_level;
+        while layer > 0 {
+            let best = search_layer(&self.store, graph, query, query_norm, &eps, 1, layer);
+            eps = vec![best[0].id];
+            layer -= 1;
+        }
+        let accept = |pos: u32| allowed(self.store.row_id(pos as usize));
+        let mut results: Vec<(usize, f32)> =
+            search_layer_filtered(&self.store, graph, query, query_norm, &eps, ef, &accept)
+                .into_iter()
+                .map(|c| (self.store.row_id(c.id as usize), c.sim))
+                .collect();
+        results.extend(self.store.top_k(
+            (self.indexed_count..self.store.len()).filter(|&i| allowed(self.store.row_id(i))),
+            query,
+            k,
+        ));
+        if results.len() < wanted {
+            return Ok(exact(self));
+        }
+        results.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        results.truncate(k);
+        Ok(results)
     }
 
     fn search_graph_ef(

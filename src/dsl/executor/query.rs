@@ -268,7 +268,7 @@ pub(super) fn search_plan(
     let out_schema = Arc::new(crate::core::tuple::Schema::new(fields));
     let prefilter = match &s.prefilter {
         Some(expr) => Some(Arc::new(
-            build_prefilter(db, expr, &s.dataset, &schema, &batch).map_err(invalid)?,
+            build_prefilter(db, expr, &s.dataset, &schema, &batch, s.approx).map_err(invalid)?,
         )),
         None => None,
     };
@@ -382,6 +382,7 @@ fn build_prefilter(
     dataset: &str,
     schema: &crate::core::tuple::Schema,
     batch: &BatchQueries,
+    approximate: bool,
 ) -> Result<crate::query::logical::Prefilter, String> {
     use crate::query::logical::QUERY_COLUMN_PREFIX;
 
@@ -445,6 +446,7 @@ fn build_prefilter(
         combined_schema,
         query_values,
         sorted_range,
+        approximate,
     })
 }
 

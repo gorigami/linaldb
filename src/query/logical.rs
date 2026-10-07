@@ -436,6 +436,9 @@ pub struct Prefilter {
     /// A conjunct the SORTED index on `column` can answer, with bounds that
     /// depend only on the query: `(column, [(op, bound expression)])`.
     pub sorted_range: Option<(String, Vec<(String, Expr)>)>,
+    /// `APPROX`: rank the passing rows through the HNSW graph
+    /// (`HnswIndex::search_filtered`) instead of an exact scan.
+    pub approximate: bool,
 }
 
 // Leaves out the per-query values and the combined schema, which can be
@@ -445,6 +448,7 @@ impl std::fmt::Debug for Prefilter {
         f.debug_struct("Prefilter")
             .field("predicate", &self.predicate)
             .field("sorted_range", &self.sorted_range)
+            .field("approximate", &self.approximate)
             .finish()
     }
 }

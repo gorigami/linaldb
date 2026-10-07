@@ -294,6 +294,7 @@ pub struct BatchVectorSearchExec {
 impl std::fmt::Debug for BatchVectorSearchExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let prefilter = self.prefilter.as_ref().map(|p| match &p.sorted_range {
+            _ if p.approximate => "HNSW graph over rows passing PREFILTER (APPROX)".to_string(),
             Some((column, _)) => format!(
                 "exact over rows passing PREFILTER, narrowed by SORTED index on {}",
                 column
@@ -380,6 +381,21 @@ impl BatchVectorSearchExec {
             .map(|i| copy_all || referenced.contains(&dataset.schema.fields[i].name))
             .collect();
         let has_lazy = !dataset.lazy_expressions.is_empty();
+        let hnsw = if pf.approximate {
+            Some(
+                dataset
+                    .get_index(&self.column)
+                    .and_then(|i| i.as_any().downcast_ref::<crate::core::index::hnsw::HnswIndex>())
+                    .ok_or_else(|| {
+                        EngineError::InvalidOp(format!(
+                            "PREFILTER ... APPROX needs an HNSW index on '{}': CREATE VECTOR INDEX ON {}({}) USING HNSW",
+                            self.column, self.dataset_name, self.column
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
 
         self.queries
             .0
@@ -411,6 +427,7 @@ impl BatchVectorSearchExec {
 
                 let query_norm = l2_norm(query);
                 let mut scored = Vec::new();
+                let mut passing: Vec<usize> = Vec::new();
                 for id in candidates {
                     let stored = &dataset.rows[id];
                     let evaluated;
@@ -432,6 +449,10 @@ impl BatchVectorSearchExec {
                         return Err(e);
                     }
                     if !passes {
+                        continue;
+                    }
+                    if hnsw.is_some() {
+                        passing.push(id);
                         continue;
                     }
                     match &row.values[col_idx] {
@@ -456,6 +477,14 @@ impl BatchVectorSearchExec {
                             ))
                         }
                     }
+                }
+                if let Some(index) = hnsw {
+                    let mut allowed = vec![false; dataset.rows.len()];
+                    for &id in &passing {
+                        allowed[id] = true;
+                    }
+                    let allowed_fn = |row_id: usize| allowed.get(row_id).copied().unwrap_or(false);
+                    return index.search_filtered(query, self.k, &allowed_fn, passing.len());
                 }
                 scored.sort_by(|a, b| {
                     b.1.partial_cmp(&a.1)

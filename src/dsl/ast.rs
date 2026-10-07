@@ -742,6 +742,9 @@ pub struct SearchStmt {
     /// batch, `<dataset>.<column>` in the predicate is that query's own
     /// value (e.g. a per-query mass window).
     pub prefilter: Option<Expr>,
+    /// `PREFILTER <predicate> APPROX`: rank the passing rows through the
+    /// column's HNSW graph instead of an exact scan.
+    pub approx: bool,
     /// Optional output dataset name (defaults to `"search_results"`).
     pub target: Option<String>,
 }
