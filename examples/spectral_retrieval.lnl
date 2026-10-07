@@ -1,0 +1,43 @@
+-- Spectral retrieval: many query spectra against a reference library, then one answer per molecule.
+-- Mirrors the CASMI 2026 flow (CASMI_WORKLOADS_PLAN.md): batch top-k (SEARCH ... QUERIES),
+-- a join back to each spectrum's molecule, and ARG_MAX / RRF to reduce many spectra to one ranking.
+-- Spectra here are small binned intensity vectors (8 m/z bins), written inline.
+
+DROP DATABASE IF EXISTS spectral_retrieval
+CREATE DATABASE spectral_retrieval
+USE spectral_retrieval
+
+-- Reference library: one binned spectrum per candidate structure.
+DATASET library COLUMNS (cand: String, mass: Float, spectrum: Vector(8))
+INSERT INTO library VALUES ("caffeine", 194.08, [0.0, 0.9, 0.1, 0.0, 0.3, 0.0, 0.0, 0.1])
+INSERT INTO library VALUES ("theobromine", 180.06, [0.0, 0.8, 0.3, 0.0, 0.2, 0.1, 0.0, 0.0])
+INSERT INTO library VALUES ("paraxanthine", 180.06, [0.1, 0.7, 0.2, 0.0, 0.4, 0.0, 0.0, 0.0])
+INSERT INTO library VALUES ("quercetin", 302.04, [0.0, 0.0, 0.0, 0.6, 0.0, 0.8, 0.2, 0.0])
+INSERT INTO library VALUES ("kaempferol", 286.05, [0.0, 0.0, 0.1, 0.7, 0.0, 0.6, 0.3, 0.0])
+INSERT INTO library VALUES ("luteolin", 286.05, [0.0, 0.0, 0.0, 0.5, 0.1, 0.7, 0.4, 0.0])
+INSERT INTO library VALUES ("tryptophan", 204.09, [0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.8])
+INSERT INTO library VALUES ("serotonin", 176.09, [0.7, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6])
+CREATE VECTOR INDEX ON library(spectrum)
+
+-- Query spectra: several spectra (collision energies) per unknown molecule.
+DATASET queries COLUMNS (spec_id: Int, molecule: String, spectrum: Vector(8))
+INSERT INTO queries VALUES (1, "unknown_a", [0.0, 0.85, 0.15, 0.0, 0.3, 0.0, 0.0, 0.1])
+INSERT INTO queries VALUES (2, "unknown_a", [0.0, 0.8, 0.2, 0.0, 0.25, 0.05, 0.0, 0.05])
+INSERT INTO queries VALUES (3, "unknown_b", [0.0, 0.0, 0.05, 0.65, 0.0, 0.7, 0.25, 0.0])
+INSERT INTO queries VALUES (4, "unknown_b", [0.0, 0.0, 0.0, 0.55, 0.05, 0.75, 0.35, 0.0])
+INSERT INTO queries VALUES (5, "unknown_b", [0.0, 0.0, 0.1, 0.6, 0.0, 0.65, 0.3, 0.0])
+
+-- Top-3 library hits for every query spectrum, in one statement.
+SEARCH library ON spectrum QUERIES queries.spectrum KEY spec_id LIMIT 3 INTO hits
+SELECT query_id, rank, cand, score FROM hits ORDER BY query_id, rank
+
+-- One answer per molecule: join each hit to its molecule, then keep the best-scoring candidate across its spectra.
+SELECT molecule, ARG_MAX(cand, score) AS best, MAX(score) AS best_score FROM (SELECT molecule, cand, score, rank FROM hits JOIN queries ON hits.query_id = queries.spec_id) AS hm GROUP BY molecule ORDER BY molecule
+
+-- Rank fusion: candidates ranked consistently high across spectra win.
+SELECT molecule, cand, RRF(rank) AS fused, COUNT(*) AS spectra FROM (SELECT molecule, cand, rank FROM hits JOIN queries ON hits.query_id = queries.spec_id) AS hm GROUP BY molecule, cand ORDER BY molecule, fused DESC
+
+-- What all of this costs in memory.
+SHOW MEMORY
+
+USE default

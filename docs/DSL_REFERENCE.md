@@ -387,6 +387,32 @@ FROM events
 GROUP BY user_id
 ```
 
+### Selection and Rank-Fusion Aggregates
+
+Reduce many scored rows to one answer per group — e.g. many spectra per molecule:
+
+| Function | Description |
+|---|---|
+| `ARG_MAX(col, by)` | The value of `col` on the group's row with the largest `by`. The result has `col`'s type, so `col` can be any column, including a `Vector`. |
+| `ARG_MIN(col, by)` | Same, for the smallest `by`. |
+| `RRF(rank[, k])` | Reciprocal rank fusion: the group's sum of `1 / (k + rank)`, as `Float64`. `k` is a non-negative numeric literal, default `60`. |
+
+- **Ties** keep the first row in input order (the same first-appearance rule `GROUP BY` uses for
+  its group order), so results are deterministic.
+- Rows whose `by` (or `rank`) is `NULL` are skipped; a group with no non-`NULL` `by` gives `NULL`.
+- `by` must be a scalar (`Int`, `Float`, `Float64`, `String`, `Bool`); a `Vector`, `Complex` or
+  `NaN` `by`, a non-numeric `rank`, or `k + rank <= 0` is an error, never a silent skip.
+- Not available as window functions (`OVER`).
+- `ARG_MAX(cand, score)` returns the same rows as the window formulation
+  `ROW_NUMBER() OVER (PARTITION BY g ORDER BY score DESC) = 1`, in one pass.
+
+```sql
+-- Best candidate per molecule, and a fused score over its spectra
+SELECT mol, ARG_MAX(cand, score) AS best, RRF(rnk) AS fused
+FROM hits
+GROUP BY mol
+```
+
 ### SELECT
 
 Query datasets with familiar syntax.
@@ -620,6 +646,20 @@ Load and save data across different formats.
 - `LIST TENSORS [FROM "path"]`: Show available tensors in the current storage path.
 - `LIST DATASET VERSIONS <name>`: Show version history and schema evolution log for a persisted dataset.
 
+### Loading from memory (embedded bindings)
+
+There is no DSL statement for this: the embedded Python binding loads NumPy arrays and Arrow
+tables straight into a dataset, with no file and no DSL parsing — `Db.load_numpy(name, vectors,
+column=..., columns={...})` and `Db.load_arrow(name, table)` (see
+`clients/EMBEDDED_CONTRACT.md`). Both call the engine's `TensorDb::load_record_batch`. Arrow types
+map like the engine's own Parquet packages (`int64`/`int32` → `Int`, `float32` → `Float`,
+`float64` → `Float64`, `string` → `String`, `bool` → `Bool`, `fixed_size_list<float32>` →
+`Vector(d)`, nested → `Matrix(r, c)`); any other type, a `NaN`/infinite value, or an existing
+dataset name is an error naming the column and row. Values load bit-exact. The load appears in
+`EXPLAIN LINEAGE` as `LOAD FROM MEMORY` with its origin and the dataset's content hash. With the
+write-ahead log enabled, a checkpoint is taken right after the load, because the log only
+replays DSL statements.
+
 ### Scientific Data Ingestion
 
 LINAL supports direct ingestion of multi-dimensional data:
@@ -752,6 +792,32 @@ SEARCH docs WHERE embedding ~= [0.9, 0.1, 0.0] LIMIT 10
 SEARCH results FROM docs QUERY [0.9, 0.1, 0.0] ON embedding K=10
 ```
 
+#### Batch queries: `QUERIES`
+
+Many query vectors in one statement — the top-`k` for each:
+
+```sql
+SEARCH library ON embedding QUERIES queries.embedding KEY spectrum_id LIMIT 25
+SEARCH library ON embedding QUERIES query_matrix LIMIT 25 FILTER rank <= 5 INTO hits
+```
+
+- `SEARCH <dataset> ON <column> QUERIES <matrix> | <dataset>.<column> [KEY <column>] LIMIT <k> [FILTER <predicate>] [INTO <target>]`
+- The queries are the rows of a 2-D `Matrix` tensor, or the vectors in a dataset column. Each
+  must have the indexed column's dimension.
+- The result has one row per (query, hit): `query_id`, `rank` (1-based), `score` (cosine
+  similarity, `Float`), `row_id` (0-based row position in `<dataset>`), then every column of
+  `<dataset>`. `query_id` is the `KEY` column's value, or the 0-based query position without
+  `KEY`. Rows are grouped by query in input order, then by rank.
+- Each query runs exactly the search a single-query `SEARCH` would, on the same index, in
+  parallel. With an IVF index above its clustering threshold that search is approximate, the
+  same as single-query `SEARCH`.
+- `FILTER` is a post-filter, as for single-query `SEARCH`, and can use the result columns
+  (`rank`, `score`, `query_id`) as well as the dataset's own.
+- A dataset column named `query_id`, `rank`, `score` or `row_id` collides with the result
+  columns and is an error; rename it first.
+- `EXPLAIN SEARCH ... QUERIES ...` shows `BatchVectorSearchExec` with the query count and the
+  index type it uses.
+
 All three forms **require a `CREATE VECTOR INDEX` on `<column>` first** — `SEARCH` always executes as an index-accelerated lookup and errors if no vector index exists on the target column. For ad hoc similarity scoring without a prebuilt index, use `COSINE_SIM` directly in `SELECT`/`WHERE`/`ORDER BY` (§4) instead — that's the more common pattern for one-off queries; `SEARCH` is specifically for index-accelerated top-k retrieval.
 
 ### TRANSFORM
@@ -837,6 +903,16 @@ automatically:
 - `SHOW BACKEND`: The active database's compute backend: CPU (SIMD/Rayon), or GPU when enabled
   (see below). `BACKEND` is a contextual keyword, so a tensor or dataset literally named `BACKEND`
   can't be shown with `SHOW BACKEND`.
+- `SHOW MEMORY [<dataset>]`: Estimated memory per object in the active database, as a table with
+  columns `kind` (`dataset`, `index`, `tensor`), `name`, `column` (the indexed column, for an
+  index), `detail` (index type, or tensor shape), `rows` and `bytes`. A `dataset` row counts the
+  dataset's rows only; each of its indexes has its own row, so the dataset's total is the sum.
+  With `<dataset>`, only that dataset and its indexes are listed. Estimates count heap
+  allocations by capacity; the HNSW graph is estimated from its layout, since the library
+  doesn't report it; a tensor buffer shared by several names is counted under each name. IVF
+  and HNSW indexes keep their own copies of the indexed vectors, which is why an HNSW index
+  reports more than twice the bytes of the vectors themselves. `SHOW MEMORY` alone shows a
+  tensor or dataset literally named `MEMORY` if one exists.
 
 ### Compute backend (experimental GPU)
 

@@ -798,10 +798,19 @@ impl Parser {
             Some(Token::Ident(s)) if s == "MAX" => Some(AggFuncAst::Max),
             Some(Token::Ident(s)) if s == "AVG_VEC" => Some(AggFuncAst::AvgVec),
             Some(Token::Ident(s)) if s == "SUM_VEC" => Some(AggFuncAst::SumVec),
+            // Placeholder payloads, replaced by the real second argument
+            // once the first one has been parsed below.
+            Some(Token::Ident(s)) if s == "ARG_MAX" => {
+                Some(AggFuncAst::ArgMax(Box::new(Expr::Ref(String::new()))))
+            }
+            Some(Token::Ident(s)) if s == "ARG_MIN" => {
+                Some(AggFuncAst::ArgMin(Box::new(Expr::Ref(String::new()))))
+            }
+            Some(Token::Ident(s)) if s == "RRF" => Some(AggFuncAst::Rrf(60.0)),
             _ => None,
         };
 
-        if let Some(func) = agg_func {
+        if let Some(mut func) = agg_func {
             self.advance();
             self.eat(&Token::LParen)?;
             let inner_expr = if self.at(&Token::Star) {
@@ -810,6 +819,33 @@ impl Parser {
             } else {
                 self.parse_expr()?
             };
+            match &mut func {
+                AggFuncAst::ArgMax(by) | AggFuncAst::ArgMin(by) => {
+                    if !self.at(&Token::Comma) {
+                        return Err(self.error(
+                            "ARG_MAX/ARG_MIN take two arguments: ARG_MAX(value_column, by_column)",
+                        ));
+                    }
+                    self.advance();
+                    **by = self.parse_expr()?;
+                }
+                AggFuncAst::Rrf(k) if self.at(&Token::Comma) => {
+                    self.advance();
+                    *k = match self.advance() {
+                        Some(Token::Int(n)) => n as f64,
+                        Some(Token::Float(f)) => f,
+                        _ => {
+                            return Err(self.error(
+                                "RRF's second argument (k) must be a numeric literal, e.g. RRF(rank, 60)",
+                            ))
+                        }
+                    };
+                    if !k.is_finite() || *k < 0.0 {
+                        return Err(self.error("RRF's k must be a finite, non-negative number"));
+                    }
+                }
+                _ => {}
+            }
             self.eat(&Token::RParen)?;
             // Check for OVER clause (window function)
             if self.at(&Token::Over) {
@@ -830,6 +866,11 @@ impl Parser {
                     AggFuncAst::Variance | AggFuncAst::Median => {
                         return Err(self.error(
                             "VARIANCE/MEDIAN cannot be used as a window function (OVER) -- only as a regular or GROUP BY aggregate",
+                        ));
+                    }
+                    AggFuncAst::ArgMax(_) | AggFuncAst::ArgMin(_) | AggFuncAst::Rrf(_) => {
+                        return Err(self.error(
+                            "ARG_MAX/ARG_MIN/RRF cannot be used as a window function (OVER) -- only as a regular or GROUP BY aggregate",
                         ));
                     }
                 };
@@ -1109,14 +1150,42 @@ impl Parser {
             }
             self.advance();
             let column = self.eat_ident()?;
-            if !self.at_ident("QUERY") {
-                return Err(self.error("Expected QUERY after column name in SEARCH"));
-            }
-            self.advance();
-            let query = if self.at(&Token::LBracket) {
-                SearchQuery::Inline(self.parse_f64_list()?)
+            let query = if self.at_ident("QUERIES") {
+                // Batch: SEARCH ds ON col QUERIES <matrix> | <dataset>.<column> [KEY <column>]
+                self.advance();
+                let source = self.eat_ident()?;
+                let query_column = if self.at(&Token::Dot) {
+                    self.advance();
+                    Some(self.eat_ident()?)
+                } else {
+                    None
+                };
+                let key = if self.at_ident("KEY") {
+                    self.advance();
+                    if query_column.is_none() {
+                        return Err(self.error(
+                            "KEY needs a dataset of queries: SEARCH ... QUERIES <dataset>.<column> KEY <column>",
+                        ));
+                    }
+                    Some(self.eat_ident()?)
+                } else {
+                    None
+                };
+                SearchQuery::Batch {
+                    source,
+                    column: query_column,
+                    key,
+                }
             } else {
-                SearchQuery::TensorRef(self.eat_ident()?)
+                if !self.at_ident("QUERY") {
+                    return Err(self.error("Expected QUERY or QUERIES after column name in SEARCH"));
+                }
+                self.advance();
+                if self.at(&Token::LBracket) {
+                    SearchQuery::Inline(self.parse_f64_list()?)
+                } else {
+                    SearchQuery::TensorRef(self.eat_ident()?)
+                }
             };
             self.eat(&Token::Limit)?;
             let top_k = self.eat_usize()?;

@@ -4,7 +4,7 @@ use crate::engine::TensorDb;
 use std::sync::Arc;
 
 /// Helper function to evaluate lazy columns in a row
-fn evaluate_lazy_columns_in_row(
+pub(crate) fn evaluate_lazy_columns_in_row(
     dataset: &crate::core::dataset_legacy::Dataset,
     row: &Tuple,
 ) -> Result<Tuple, EngineError> {
@@ -227,6 +227,98 @@ impl PhysicalPlan for VectorSearchExec {
     }
 }
 
+/// Top-k vector search for many queries at once (`SEARCH ... QUERIES`).
+/// Every query runs the same `Index::search` a single-query `SEARCH` would,
+/// in parallel; rows come out grouped by query in input order, then by rank.
+pub struct BatchVectorSearchExec {
+    pub dataset_name: String,
+    pub column: String,
+    pub queries: Arc<Vec<(crate::core::value::Value, Vec<f32>)>>,
+    pub k: usize,
+    pub schema: Arc<Schema>,
+    /// Same role as `VectorSearchExec::resolved_index_type`: for `EXPLAIN`.
+    pub resolved_index_type: Option<String>,
+}
+
+// Hand-written so `EXPLAIN` prints the query count, not every query vector.
+impl std::fmt::Debug for BatchVectorSearchExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchVectorSearchExec")
+            .field("dataset_name", &self.dataset_name)
+            .field("column", &self.column)
+            .field("queries", &self.queries.len())
+            .field("k", &self.k)
+            .field("resolved_index_type", &self.resolved_index_type)
+            .finish()
+    }
+}
+
+impl PhysicalPlan for BatchVectorSearchExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        use rayon::prelude::*;
+
+        let dataset = db.get_dataset(&self.dataset_name)?;
+        let index = dataset.get_index(&self.column).ok_or_else(|| {
+            EngineError::InvalidOp(format!(
+                "Vector index not found on column '{}'",
+                self.column
+            ))
+        })?;
+        if !matches!(
+            index.index_type(),
+            crate::core::index::IndexType::Vector | crate::core::index::IndexType::Hnsw
+        ) {
+            return Err(EngineError::InvalidOp(format!(
+                "Index on '{}' is not a VECTOR index",
+                self.column
+            )));
+        }
+
+        let results: Vec<Vec<(usize, f32)>> = self
+            .queries
+            .par_iter()
+            .map(|(_, v)| {
+                let id = crate::core::tensor::TensorId::new();
+                let query = crate::core::tensor::Tensor::new(
+                    id,
+                    crate::core::tensor::Shape::new(vec![v.len()]),
+                    v.clone(),
+                    crate::core::tensor::TensorMetadata::new(id, None),
+                )?;
+                index.search(&query, self.k)
+            })
+            .collect::<Result<_, String>>()
+            .map_err(EngineError::InvalidOp)?;
+
+        let mut out = Vec::new();
+        for ((query_id, _), hits) in self.queries.iter().zip(results) {
+            for (rank, (row_id, score)) in hits.into_iter().enumerate() {
+                let row = dataset.rows.get(row_id).ok_or_else(|| {
+                    EngineError::InvalidOp(format!(
+                        "SEARCH QUERIES: index returned row {} but '{}' has {} rows",
+                        row_id,
+                        self.dataset_name,
+                        dataset.rows.len()
+                    ))
+                })?;
+                let row = evaluate_lazy_columns_in_row(dataset, row)?;
+                let mut values = Vec::with_capacity(4 + row.values.len());
+                values.push(query_id.clone());
+                values.push(crate::core::value::Value::Int(rank as i64 + 1));
+                values.push(crate::core::value::Value::Float(score));
+                values.push(crate::core::value::Value::Int(row_id as i64));
+                values.extend(row.values);
+                out.push(Tuple::new(self.schema.clone(), values).map_err(EngineError::InvalidOp)?);
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Projection Executor
 #[derive(Debug)]
 pub struct ProjectionExec {
@@ -410,6 +502,11 @@ impl PhysicalPlan for AggregateExec {
         // position, sorted at finalization time.
         type MedianAccumulators = Vec<Vec<f64>>;
 
+        // ARG_MAX/ARG_MIN: the best `by` key seen so far per aggregate
+        // position (Null until a non-NULL key arrives); the value selected
+        // alongside it lives in the regular `Accumulators` slot.
+        type ArgKeyAccumulators = Vec<Value>;
+
         let mut groups: HashMap<
             GroupKey,
             (
@@ -417,6 +514,7 @@ impl PhysicalPlan for AggregateExec {
                 AvgAccumulators,
                 VarianceAccumulators,
                 MedianAccumulators,
+                ArgKeyAccumulators,
             ),
         > = HashMap::new();
         // Group keys in first-appearance order. `groups` is a HashMap, whose
@@ -452,114 +550,130 @@ impl PhysicalPlan for AggregateExec {
             if !groups.contains_key(&key) {
                 group_order.push(key.clone());
             }
-            let (accs, avg_accs, var_accs, median_accs) = groups.entry(key).or_insert_with(|| {
-                // Init accumulators
-                let mut regular_accs = Vec::new();
-                let mut avg_accumulators = Vec::new();
-                let mut var_accumulators: VarianceAccumulators = Vec::new();
-                let mut median_accumulators: MedianAccumulators = Vec::new();
+            let (accs, avg_accs, var_accs, median_accs, arg_keys) =
+                groups.entry(key).or_insert_with(|| {
+                    // Init accumulators
+                    let mut regular_accs = Vec::new();
+                    let mut avg_accumulators = Vec::new();
+                    let mut var_accumulators: VarianceAccumulators = Vec::new();
+                    let mut median_accumulators: MedianAccumulators = Vec::new();
+                    // Every aggregate position gets a (normally unused) Null key,
+                    // keeping all accumulator vectors index-aligned.
+                    let arg_key_accumulators: ArgKeyAccumulators =
+                        vec![Value::Null; self.aggr_expr.len()];
 
-                for expr in &self.aggr_expr {
-                    match expr {
-                        crate::query::logical::Expr::AggregateExpr {
-                            func, expr: inner, ..
-                        } => match func {
-                            crate::query::logical::AggregateFunction::Count => {
-                                regular_accs.push(Value::Int(0));
-                                avg_accumulators.push((Value::Null, 0));
-                                var_accumulators.push((0.0, 0.0, 0));
-                                median_accumulators.push(Vec::new());
-                            }
-                            crate::query::logical::AggregateFunction::Sum
-                            | crate::query::logical::AggregateFunction::SumVec => {
-                                let val = evaluate_expression(inner, &row);
-                                if let Value::Vector(v) = val {
-                                    regular_accs.push(Value::Vector(vec![0.0; v.len()]));
-                                } else if let Value::Matrix(m) = val {
-                                    if m.is_empty() {
-                                        regular_accs.push(Value::Matrix(vec![]));
-                                    } else {
-                                        let r = m.len();
-                                        let c = m[0].len();
-                                        regular_accs.push(Value::Matrix(vec![vec![0.0; c]; r]));
-                                    }
-                                } else if let Value::Complex(_) = val {
-                                    regular_accs.push(Value::Complex(
-                                        crate::core::value::Complex64::new(0.0, 0.0),
-                                    ));
-                                } else {
+                    for expr in &self.aggr_expr {
+                        match expr {
+                            crate::query::logical::Expr::AggregateExpr {
+                                func,
+                                expr: inner,
+                                ..
+                            } => match func {
+                                crate::query::logical::AggregateFunction::Count => {
                                     regular_accs.push(Value::Int(0));
+                                    avg_accumulators.push((Value::Null, 0));
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
                                 }
-                                avg_accumulators.push((Value::Null, 0));
-                                var_accumulators.push((0.0, 0.0, 0));
-                                median_accumulators.push(Vec::new());
-                            }
-                            crate::query::logical::AggregateFunction::Min => {
-                                regular_accs.push(Value::Null);
-                                avg_accumulators.push((Value::Null, 0));
-                                var_accumulators.push((0.0, 0.0, 0));
-                                median_accumulators.push(Vec::new());
-                            }
-                            crate::query::logical::AggregateFunction::Max => {
-                                regular_accs.push(Value::Null);
-                                avg_accumulators.push((Value::Null, 0));
-                                var_accumulators.push((0.0, 0.0, 0));
-                                median_accumulators.push(Vec::new());
-                            }
-                            crate::query::logical::AggregateFunction::Avg
-                            | crate::query::logical::AggregateFunction::AvgVec => {
-                                let val = evaluate_expression(inner, &row);
-                                let initial_sum = if let Value::Vector(v) = val {
-                                    Value::Vector(vec![0.0; v.len()])
-                                } else if let Value::Matrix(m) = val {
-                                    if m.is_empty() {
-                                        Value::Matrix(vec![])
+                                crate::query::logical::AggregateFunction::Sum
+                                | crate::query::logical::AggregateFunction::SumVec => {
+                                    let val = evaluate_expression(inner, &row);
+                                    if let Value::Vector(v) = val {
+                                        regular_accs.push(Value::Vector(vec![0.0; v.len()]));
+                                    } else if let Value::Matrix(m) = val {
+                                        if m.is_empty() {
+                                            regular_accs.push(Value::Matrix(vec![]));
+                                        } else {
+                                            let r = m.len();
+                                            let c = m[0].len();
+                                            regular_accs.push(Value::Matrix(vec![vec![0.0; c]; r]));
+                                        }
+                                    } else if let Value::Complex(_) = val {
+                                        regular_accs.push(Value::Complex(
+                                            crate::core::value::Complex64::new(0.0, 0.0),
+                                        ));
                                     } else {
-                                        let r = m.len();
-                                        let c = m[0].len();
-                                        Value::Matrix(vec![vec![0.0; c]; r])
+                                        regular_accs.push(Value::Int(0));
                                     }
-                                } else if let Value::Float64(_) = val {
-                                    Value::Float64(0.0)
-                                } else if let Value::Complex(_) = val {
-                                    Value::Complex(crate::core::value::Complex64::new(0.0, 0.0))
-                                } else {
-                                    Value::Float(0.0)
-                                };
-                                avg_accumulators.push((initial_sum, 0));
-                                regular_accs.push(Value::Null);
-                                var_accumulators.push((0.0, 0.0, 0));
-                                median_accumulators.push(Vec::new());
-                            }
-                            crate::query::logical::AggregateFunction::Variance => {
+                                    avg_accumulators.push((Value::Null, 0));
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
+                                }
+                                crate::query::logical::AggregateFunction::Min => {
+                                    regular_accs.push(Value::Null);
+                                    avg_accumulators.push((Value::Null, 0));
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
+                                }
+                                crate::query::logical::AggregateFunction::Max => {
+                                    regular_accs.push(Value::Null);
+                                    avg_accumulators.push((Value::Null, 0));
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
+                                }
+                                crate::query::logical::AggregateFunction::Avg
+                                | crate::query::logical::AggregateFunction::AvgVec => {
+                                    let val = evaluate_expression(inner, &row);
+                                    let initial_sum = if let Value::Vector(v) = val {
+                                        Value::Vector(vec![0.0; v.len()])
+                                    } else if let Value::Matrix(m) = val {
+                                        if m.is_empty() {
+                                            Value::Matrix(vec![])
+                                        } else {
+                                            let r = m.len();
+                                            let c = m[0].len();
+                                            Value::Matrix(vec![vec![0.0; c]; r])
+                                        }
+                                    } else if let Value::Float64(_) = val {
+                                        Value::Float64(0.0)
+                                    } else if let Value::Complex(_) = val {
+                                        Value::Complex(crate::core::value::Complex64::new(0.0, 0.0))
+                                    } else {
+                                        Value::Float(0.0)
+                                    };
+                                    avg_accumulators.push((initial_sum, 0));
+                                    regular_accs.push(Value::Null);
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
+                                }
+                                crate::query::logical::AggregateFunction::Variance => {
+                                    regular_accs.push(Value::Null);
+                                    avg_accumulators.push((Value::Null, 0));
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
+                                }
+                                crate::query::logical::AggregateFunction::Median
+                                | crate::query::logical::AggregateFunction::ArgMax(_)
+                                | crate::query::logical::AggregateFunction::ArgMin(_) => {
+                                    regular_accs.push(Value::Null);
+                                    avg_accumulators.push((Value::Null, 0));
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
+                                }
+                                crate::query::logical::AggregateFunction::Rrf(_) => {
+                                    regular_accs.push(Value::Float64(0.0));
+                                    avg_accumulators.push((Value::Null, 0));
+                                    var_accumulators.push((0.0, 0.0, 0));
+                                    median_accumulators.push(Vec::new());
+                                }
+                            },
+                            _ => {
                                 regular_accs.push(Value::Null);
                                 avg_accumulators.push((Value::Null, 0));
                                 var_accumulators.push((0.0, 0.0, 0));
                                 median_accumulators.push(Vec::new());
                             }
-                            crate::query::logical::AggregateFunction::Median => {
-                                regular_accs.push(Value::Null);
-                                avg_accumulators.push((Value::Null, 0));
-                                var_accumulators.push((0.0, 0.0, 0));
-                                median_accumulators.push(Vec::new());
-                            }
-                        },
-                        _ => {
-                            regular_accs.push(Value::Null);
-                            avg_accumulators.push((Value::Null, 0));
-                            var_accumulators.push((0.0, 0.0, 0));
-                            median_accumulators.push(Vec::new());
                         }
                     }
-                }
 
-                (
-                    regular_accs,
-                    avg_accumulators,
-                    var_accumulators,
-                    median_accumulators,
-                )
-            });
+                    (
+                        regular_accs,
+                        avg_accumulators,
+                        var_accumulators,
+                        median_accumulators,
+                        arg_key_accumulators,
+                    )
+                });
 
             // Update accumulators
             for (i, expr) in self.aggr_expr.iter().enumerate() {
@@ -866,6 +980,90 @@ impl PhysicalPlan for AggregateExec {
                             })?;
                             median_accs[i].push(x);
                         }
+                        crate::query::logical::AggregateFunction::ArgMax(by)
+                        | crate::query::logical::AggregateFunction::ArgMin(by) => {
+                            let is_max =
+                                matches!(func, crate::query::logical::AggregateFunction::ArgMax(_));
+                            let name = if is_max { "ARG_MAX" } else { "ARG_MIN" };
+                            let key = evaluate_expression(by, &row);
+                            if key.is_null() {
+                                continue;
+                            }
+                            if !matches!(
+                                key,
+                                Value::Int(_)
+                                    | Value::Float(_)
+                                    | Value::Float64(_)
+                                    | Value::String(_)
+                                    | Value::Bool(_)
+                            ) {
+                                return Err(EngineError::InvalidOp(format!(
+                                    "{}: the `by` argument must be a scalar (Int/Float/Float64/String/Bool), got {:?}",
+                                    name,
+                                    key.value_type()
+                                )));
+                            }
+                            if let Value::Float(f) = key {
+                                if f.is_nan() {
+                                    return Err(EngineError::InvalidOp(format!(
+                                        "{}: the `by` argument is NaN, which has no ordering",
+                                        name
+                                    )));
+                                }
+                            }
+                            if let Value::Float64(f) = key {
+                                if f.is_nan() {
+                                    return Err(EngineError::InvalidOp(format!(
+                                        "{}: the `by` argument is NaN, which has no ordering",
+                                        name
+                                    )));
+                                }
+                            }
+                            let replace = if arg_keys[i].is_null() {
+                                true
+                            } else {
+                                // Strict comparison: an equal key never
+                                // replaces, so the first row wins ties.
+                                match key.compare(&arg_keys[i]) {
+                                    Some(std::cmp::Ordering::Greater) => is_max,
+                                    Some(std::cmp::Ordering::Less) => !is_max,
+                                    Some(std::cmp::Ordering::Equal) => false,
+                                    None => {
+                                        return Err(EngineError::InvalidOp(format!(
+                                            "{}: cannot compare `by` values of types {:?} and {:?}",
+                                            name,
+                                            key.value_type(),
+                                            arg_keys[i].value_type()
+                                        )))
+                                    }
+                                }
+                            };
+                            if replace {
+                                arg_keys[i] = key;
+                                accs[i] = val;
+                            }
+                        }
+                        crate::query::logical::AggregateFunction::Rrf(k) => {
+                            if val.is_null() {
+                                continue;
+                            }
+                            let rank = scalar_as_f64(&val).ok_or_else(|| {
+                                EngineError::InvalidOp(format!(
+                                    "RRF: expected a numeric rank (Int/Float/Float64), got {:?}",
+                                    val.value_type()
+                                ))
+                            })?;
+                            let denom = k + rank;
+                            if !denom.is_finite() || denom <= 0.0 {
+                                return Err(EngineError::InvalidOp(format!(
+                                    "RRF: k + rank must be positive and finite, got k={} rank={}",
+                                    k, rank
+                                )));
+                            }
+                            if let Value::Float64(sum) = &mut accs[i] {
+                                *sum += 1.0 / denom;
+                            }
+                        }
                     }
                 }
             }
@@ -875,7 +1073,7 @@ impl PhysicalPlan for AggregateExec {
         // before outputting
         let mut output_rows = Vec::new();
         for key in group_order {
-            let (accs, avg_accs, var_accs, median_accs) = groups
+            let (accs, avg_accs, var_accs, median_accs, _arg_keys) = groups
                 .remove(&key)
                 .expect("every key in group_order was inserted into groups");
             let mut values = key; // Group keys first

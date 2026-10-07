@@ -261,6 +261,31 @@ HTTP: [`clients/python/README.md`](clients/python/README.md) /
 (includes a runnable Jupyter notebook) /
 [`clients/r-embedded/README.md`](clients/r-embedded/README.md).
 
+### 8. Many-Query Retrieval
+
+Load vectors straight from NumPy, rank every query against a library in one statement, then
+reduce many scored rows to one answer per group:
+
+```python
+import numpy as np, linaldb
+
+db = linaldb.Db()
+db.load_numpy("library", library_vectors.astype(np.float32), column="e",
+              columns={"id": ids, "mass": masses})          # no file, no parser, bit-exact
+db.load_numpy("queries", query_vectors.astype(np.float32), column="e",
+              columns={"spectrum": spectrum_ids, "molecule": molecule_ids})
+db.execute("CREATE VECTOR INDEX ON library(e) USING HNSW")
+db.execute("SEARCH library ON e QUERIES queries.e KEY spectrum LIMIT 25 INTO hits")
+db.execute("SHOW MEMORY")                                    # bytes per dataset, index, tensor
+```
+
+```sql
+-- hits: query_id, rank, score, row_id, then the library's columns
+SELECT query_id, ARG_MAX(id, score) AS best, RRF(rank) AS fused FROM hits GROUP BY query_id
+```
+
+See [DSL Reference §4 and §7](docs/DSL_REFERENCE.md).
+
 ---
 
 ## 📖 Documentation Hub

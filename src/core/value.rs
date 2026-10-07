@@ -154,6 +154,23 @@ impl Value {
 
     // ... existing impls ...
 
+    /// Approximate bytes this value occupies: its inline `Value` slot plus
+    /// any heap allocation it owns (by capacity). Used by `SHOW MEMORY`.
+    pub fn estimated_bytes(&self) -> usize {
+        let heap = match self {
+            Value::String(s) => s.capacity(),
+            Value::Vector(v) => v.capacity() * std::mem::size_of::<f32>(),
+            Value::Matrix(m) => {
+                m.capacity() * std::mem::size_of::<Vec<f32>>()
+                    + m.iter()
+                        .map(|r| r.capacity() * std::mem::size_of::<f32>())
+                        .sum::<usize>()
+            }
+            _ => 0,
+        };
+        std::mem::size_of::<Value>() + heap
+    }
+
     /// Check if this value is null
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)

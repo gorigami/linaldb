@@ -127,10 +127,16 @@ pub fn aggregate_default_name(func: &AggregateFunction, inner: &Expr) -> String 
         Expr::Column(n) => n.clone(),
         _ => "val".to_string(),
     };
-    format!("{}({})", format!("{:?}", func).to_uppercase(), col_name)
+    let func_name = match func {
+        AggregateFunction::ArgMax(_) => "ARG_MAX".to_string(),
+        AggregateFunction::ArgMin(_) => "ARG_MIN".to_string(),
+        AggregateFunction::Rrf(_) => "RRF".to_string(),
+        other => format!("{:?}", other).to_uppercase(),
+    };
+    format!("{}({})", func_name, col_name)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum AggregateFunction {
     Sum,
     Avg,
@@ -145,6 +151,13 @@ pub enum AggregateFunction {
     Variance,
     /// Median of a scalar (Int/Float/Float64) column
     Median,
+    /// The aggregated expression's value on the group row with the largest
+    /// `by` (the boxed expression). First row wins ties; NULL `by` is skipped.
+    ArgMax(Box<Expr>),
+    /// Same as `ArgMax`, for the smallest `by`.
+    ArgMin(Box<Expr>),
+    /// Reciprocal rank fusion: sum of `1 / (k + rank)` over the group.
+    Rrf(f64),
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +194,16 @@ pub enum LogicalPlan {
         column: String,
         query: Tensor,
         k: usize,
+    },
+    /// Top-k for many query vectors at once (`SEARCH ... QUERIES`). Each
+    /// query is `(query_id, vector)`; `schema` is the output schema:
+    /// `query_id`, `rank`, `score`, `row_id`, then the dataset's columns.
+    BatchVectorSearch {
+        dataset_name: String,
+        column: String,
+        queries: Arc<Vec<(crate::core::value::Value, Vec<f32>)>>,
+        k: usize,
+        schema: Arc<Schema>,
     },
     /// Sort rows by one or more columns
     Sort {
@@ -240,6 +263,7 @@ impl LogicalPlan {
                 Arc::new(Schema::new(fields))
             }
             LogicalPlan::VectorSearch { input, .. } => input.schema(),
+            LogicalPlan::BatchVectorSearch { schema, .. } => schema.clone(),
             LogicalPlan::Sort { input, .. } => input.schema(),
             LogicalPlan::Limit { input, .. } => input.schema(),
             LogicalPlan::Join { left, right, .. } => {
@@ -339,6 +363,16 @@ impl LogicalPlan {
                                     _ => crate::core::value::ValueType::Vector(0),
                                 };
                             }
+                            super::logical::AggregateFunction::ArgMax(_)
+                            | super::logical::AggregateFunction::ArgMin(_) => {
+                                // The selected value keeps the aggregated
+                                // expression's own type.
+                                let input_schema = input.schema();
+                                typ = infer_expr_type_full(inner.as_ref(), &input_schema);
+                            }
+                            super::logical::AggregateFunction::Rrf(_) => {
+                                typ = crate::core::value::ValueType::Float64;
+                            }
                             super::logical::AggregateFunction::Variance
                             | super::logical::AggregateFunction::Median => {
                                 // Always Float64 -- both are computed in f64
@@ -408,7 +442,12 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
                     _ => ValueType::Vector(0),
                 }
             }
-            AggregateFunction::Variance | AggregateFunction::Median => ValueType::Float64,
+            AggregateFunction::Variance | AggregateFunction::Median | AggregateFunction::Rrf(_) => {
+                ValueType::Float64
+            }
+            AggregateFunction::ArgMax(_) | AggregateFunction::ArgMin(_) => {
+                infer_expr_type_full(inner, schema)
+            }
             _ => ValueType::Int,
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),

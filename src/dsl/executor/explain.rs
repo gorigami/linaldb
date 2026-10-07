@@ -89,7 +89,7 @@ pub fn execute_explain(
                             .filter_map(|e| match e {
                                 SelectExpr::Aggregate { func, expr, alias } => {
                                     Some(LogicalExpr::AggregateExpr {
-                                        func: agg_func_to_logical(func),
+                                        func: agg_func_to_logical(func, explain_expr),
                                         expr: Box::new(explain_expr(expr)),
                                         alias: alias.clone(),
                                     })
@@ -146,41 +146,7 @@ pub fn execute_explain(
         }
 
         ExplainTarget::Search(s) => {
-            let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?;
-            let schema = source_ds.schema.clone();
-            let query_tensor = match s.query {
-                SearchQuery::TensorRef(ref name) => db
-                    .get(name)
-                    .map_err(|e| DslError::Engine {
-                        line: line_no,
-                        source: e,
-                    })?
-                    .clone(),
-                SearchQuery::Inline(ref values) => {
-                    use crate::core::tensor::{Shape, TensorId, TensorMetadata};
-                    let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-                    let n = vals_f32.len();
-                    let id = TensorId::new();
-                    let meta = TensorMetadata::new(id, None);
-                    crate::core::tensor::Tensor::new(id, Shape::new(vec![n]), vals_f32, meta)
-                        .map_err(|e| DslError::Parse {
-                            line: line_no,
-                            msg: e,
-                        })?
-                }
-            };
-            let mut plan = LogicalPlan::VectorSearch {
-                input: Box::new(LogicalPlan::Scan {
-                    dataset_name: s.dataset.clone(),
-                    schema: schema.clone(),
-                }),
-                column: s.column.clone(),
-                query: query_tensor,
-                k: s.top_k,
-            };
+            let (mut plan, _) = super::query::search_plan(db, &s, line_no)?;
             if let Some(filter_expr) = &s.filter {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
@@ -239,7 +205,7 @@ pub fn execute_explain(
                         .filter_map(|e| match e {
                             SelectExpr::Aggregate { func, expr, alias } => {
                                 Some(LogicalExpr::AggregateExpr {
-                                    func: agg_func_to_logical(func),
+                                    func: agg_func_to_logical(func, explain_expr),
                                     expr: Box::new(explain_expr(expr)),
                                     alias: alias.clone(),
                                 })

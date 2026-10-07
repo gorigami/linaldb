@@ -48,6 +48,19 @@ dataset = db.dataset("t")
 df = dataset.to_pandas()             # reads data.parquet directly off disk
 ```
 
+Load data straight from memory — no file, no DSL parsing, bit-exact:
+
+```python
+import numpy as np
+
+vectors = np.random.default_rng(0).standard_normal((1000, 64)).astype(np.float32)
+db.load_numpy("library", vectors, column="e", columns={"id": np.arange(1000)})
+db.load_arrow("other", pyarrow_table)   # or any pyarrow Table / RecordBatch
+```
+
+`float64` vectors, NaN/infinite values and unsupported Arrow types raise `LinalError` instead of
+being converted. See [`../EMBEDDED_CONTRACT.md`](../EMBEDDED_CONTRACT.md) §1b.
+
 See
 [`examples/digit_classification_embedded.py`](examples/digit_classification_embedded.py)
 and the Jupyter notebook

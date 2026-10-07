@@ -142,6 +142,26 @@ impl Db {
         }
     }
 
+    /// Create dataset `name` from an Arrow IPC stream (`bytes`), without
+    /// a file or the DSL parser -- `Db.load_arrow()`/`Db.load_numpy()` in
+    /// the Python layer serialize to this. All batches in the stream are
+    /// concatenated into one dataset. Returns the number of rows loaded.
+    #[pyo3(signature = (name, ipc_stream, origin))]
+    fn load_arrow_ipc(&mut self, name: &str, ipc_stream: &[u8], origin: &str) -> PyResult<usize> {
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc_stream), None)
+                .map_err(|e| LinalError::new_err(format!("invalid Arrow IPC stream: {e}")))?;
+        let schema = reader.schema();
+        let batches = reader
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| LinalError::new_err(format!("invalid Arrow IPC stream: {e}")))?;
+        let batch = arrow::compute::concat_batches(&schema, &batches)
+            .map_err(|e| LinalError::new_err(e.to_string()))?;
+        self.inner
+            .load_record_batch(name, &batch, origin)
+            .map_err(|e| LinalError::new_err(e.to_string()))
+    }
+
     /// The database currently active on this instance (`USE <db>` changes
     /// it) — needed to compute `dataset_dir()` correctly.
     fn active_db(&self) -> String {

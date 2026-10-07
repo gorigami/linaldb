@@ -309,6 +309,13 @@ pub(crate) fn execute_show_shared(
             db.active_instance().backend.name()
         ))),
 
+        ShowTarget::Memory(filter) => {
+            if filter.is_none() && (db.get("MEMORY").is_ok() || db.get_dataset("MEMORY").is_ok()) {
+                return execute_show_shared(db, ShowTarget::Named("MEMORY".into()), line_no);
+            }
+            show_memory(db, filter, line_no)
+        }
+
         ShowTarget::StringLiteral(s) => Ok(DslOutput::Message(s)),
 
         ShowTarget::Named(name) => {
@@ -362,4 +369,111 @@ pub(super) fn format_lineage_tree(
         out.push_str(&format_lineage_tree(input, indent + 1));
     }
     out
+}
+
+/// `SHOW MEMORY [<dataset>]`: one row per dataset (its rows), per index and
+/// per tensor, with an estimated byte count. Estimates count heap
+/// allocations by capacity; a tensor buffer shared between names is counted
+/// once per name.
+fn show_memory(
+    db: &TensorDb,
+    filter: Option<String>,
+    line_no: usize,
+) -> Result<DslOutput, DslError> {
+    use crate::core::tuple::{Field, Schema, Tuple};
+    use crate::core::value::{Value, ValueType};
+    use std::sync::Arc;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("kind", ValueType::String),
+        Field::new("name", ValueType::String),
+        Field::new("column", ValueType::String),
+        Field::new("detail", ValueType::String),
+        Field::new("rows", ValueType::Int),
+        Field::new("bytes", ValueType::Int),
+    ]));
+    let mut rows = Vec::new();
+    let mut push =
+        |kind: &str, name: &str, column: &str, detail: String, n: usize, bytes: usize| {
+            Tuple::new(
+                schema.clone(),
+                vec![
+                    Value::String(kind.into()),
+                    Value::String(name.into()),
+                    Value::String(column.into()),
+                    Value::String(detail),
+                    Value::Int(n as i64),
+                    Value::Int(bytes as i64),
+                ],
+            )
+            .map(|t| rows.push(t))
+        };
+    let to_err = |msg: String| DslError::Parse { line: line_no, msg };
+
+    let mut names = match &filter {
+        Some(name) => {
+            db.get_dataset(name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            vec![name.clone()]
+        }
+        None => db.list_dataset_names(),
+    };
+    names.sort();
+    for name in &names {
+        let Ok(ds) = db.get_dataset(name) else {
+            continue;
+        };
+        push(
+            "dataset",
+            name,
+            "",
+            String::new(),
+            ds.rows.len(),
+            ds.estimated_rows_bytes(),
+        )
+        .map_err(to_err)?;
+        let mut cols: Vec<&String> = ds.indices.keys().collect();
+        cols.sort();
+        for col in cols {
+            let idx = &ds.indices[col];
+            push(
+                "index",
+                name,
+                col,
+                format!("{:?}", idx.index_type()),
+                ds.rows.len(),
+                idx.memory_bytes(),
+            )
+            .map_err(to_err)?;
+        }
+    }
+    if filter.is_none() {
+        let mut tensors = db.list_names();
+        tensors.sort();
+        for name in tensors {
+            if let Ok(t) = db.get(&name) {
+                let bytes =
+                    std::mem::size_of_val(t) + t.data.capacity() * std::mem::size_of::<f32>();
+                push(
+                    "tensor",
+                    &name,
+                    "",
+                    format!("{:?}", t.shape.dims),
+                    t.data.len(),
+                    bytes,
+                )
+                .map_err(to_err)?;
+            }
+        }
+    }
+    let ds = crate::core::dataset_legacy::Dataset::with_rows(
+        crate::core::dataset_legacy::DatasetId(0),
+        schema,
+        rows,
+        Some("Memory".into()),
+    )
+    .map_err(to_err)?;
+    Ok(DslOutput::Table(ds))
 }

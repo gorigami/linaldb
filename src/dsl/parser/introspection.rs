@@ -75,6 +75,22 @@ impl Parser {
                 self.advance();
                 ShowTarget::Backend
             }
+            // `SHOW MEMORY [<dataset>]` -- contextual like BACKEND: a bare
+            // `SHOW MEMORY` still shows an object literally named MEMORY if
+            // one exists (resolved at execution time, see show.rs).
+            Some(Token::Ident(_))
+                if self.at_ident("MEMORY")
+                    && (self.peek_at(1).is_none()
+                        || matches!(self.peek_at(1), Some(Token::Ident(_)))) =>
+            {
+                self.advance();
+                let ds = if self.at_any_ident() {
+                    Some(self.eat_ident()?)
+                } else {
+                    None
+                };
+                ShowTarget::Memory(ds)
+            }
             Some(Token::Str(_)) => ShowTarget::StringLiteral(self.eat_str()?),
             Some(Token::Ident(_)) => ShowTarget::Named(self.eat_ident()?),
             _ => return Err(self.unexpected("a SHOW target")),

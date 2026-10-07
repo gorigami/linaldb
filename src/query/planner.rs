@@ -2,8 +2,8 @@ use crate::core::tuple::Schema;
 use crate::engine::{EngineError, TensorDb};
 use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
-    AggregateExec, CosineFilterExec, DistinctExec, FilterExec, HashJoinExec, IndexScanExec,
-    LimitExec, PartitionPrunedScanExec, PhysicalPlan, ProjectionExec, SeqScanExec,
+    AggregateExec, BatchVectorSearchExec, CosineFilterExec, DistinctExec, FilterExec, HashJoinExec,
+    IndexScanExec, LimitExec, PartitionPrunedScanExec, PhysicalPlan, ProjectionExec, SeqScanExec,
     SimilarityJoinExec, SortExec, UnionExec, ValuesExec, VectorSearchExec,
 };
 use std::sync::Arc;
@@ -161,6 +161,28 @@ impl<'a> Planner<'a> {
                     }
                     _ => unreachable!(),
                 }
+            }
+            LogicalPlan::BatchVectorSearch {
+                dataset_name,
+                column,
+                queries,
+                k,
+                schema,
+            } => {
+                let resolved_index_type = self
+                    .db
+                    .get_dataset(dataset_name)
+                    .ok()
+                    .and_then(|ds| ds.get_index(column))
+                    .map(|idx| format!("{:?}", idx.index_type()));
+                Ok(Box::new(BatchVectorSearchExec {
+                    dataset_name: dataset_name.clone(),
+                    column: column.clone(),
+                    queries: queries.clone(),
+                    k: *k,
+                    schema: schema.clone(),
+                    resolved_index_type,
+                }))
             }
             LogicalPlan::Limit { input, n, offset } => {
                 let input_plan = self.create_physical_plan(input)?;

@@ -298,6 +298,26 @@ impl Index for VectorIndex {
         Err("VectorIndex does not support exact value lookup".to_string())
     }
 
+    fn memory_bytes(&self) -> usize {
+        // Each entry is a full copy of the row's vector, wrapped in a Tensor.
+        let vectors = self.vectors.capacity() * std::mem::size_of::<(usize, Tensor)>()
+            + self
+                .vectors
+                .iter()
+                .map(|(_, t)| t.data.capacity() * std::mem::size_of::<f32>())
+                .sum::<usize>();
+        let clusters = self
+            .clusters
+            .iter()
+            .map(|c| {
+                std::mem::size_of::<Cluster>()
+                    + c.centroid.data.capacity() * std::mem::size_of::<f32>()
+                    + c.members.capacity() * std::mem::size_of::<usize>()
+            })
+            .sum::<usize>();
+        vectors + clusters
+    }
+
     fn search(&self, query: &Tensor, k: usize) -> Result<Vec<(usize, f32)>, String> {
         // Unclustered tail is always a candidate: it holds every vector
         // added since the last build(), which we have no cluster info for.

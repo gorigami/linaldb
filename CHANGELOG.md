@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — scientific retrieval, low-impact tier (CASMI 2026 proposal)
+
+First of three tiers implementing the proposal for spectral retrieval workloads (many queries
+against millions of library spectra, then one answer per molecule). Tracked in
+`CASMI_WORKLOADS_PLAN.md`.
+
+- **Load from memory (P1).** `TensorDb::load_record_batch(name, batch, origin)` creates a dataset
+  straight from an Arrow `RecordBatch`, and the Python binding exposes it as
+  `Db.load_numpy(name, vectors, column=..., columns={...})` and `Db.load_arrow(name, table)`. No
+  file, no DSL parser. Values are bit-exact; NaN/infinite values, unsupported Arrow types
+  (including `float64` vectors, which are never silently rounded) and an existing name are errors
+  naming the column and row. The load shows up in `EXPLAIN LINEAGE` as `LOAD FROM MEMORY` with its
+  origin and content hash, and with the WAL enabled it's followed by a checkpoint so it survives a
+  restart. The result is identical to `IMPORT DATASET FROM` + `LOAD DATASET` of the same data as
+  Parquet (tested), which also confirms an external Parquet `FixedSizeList<Float32>` column
+  ingests as `Vector(d)`.
+- **`ARG_MAX(col, by)`, `ARG_MIN(col, by)`, `RRF(rank[, k])` (P6).** Group aggregates for "best
+  candidate per molecule" and reciprocal rank fusion. Ties keep the first row, like `GROUP BY`'s
+  own order; NULL keys are skipped; a vector, complex or NaN key, a non-numeric rank or
+  `k + rank <= 0` is an error. `ARG_MAX` matches the `ROW_NUMBER() OVER (...) = 1` formulation.
+- **Batch `SEARCH` (P3a).** `SEARCH ds ON col QUERIES <matrix> | <dataset>.<col> [KEY <col>] LIMIT
+  k` runs the top-k for every query in parallel and returns `query_id`, `rank`, `score`, `row_id`
+  and the dataset's columns. Each query runs exactly the single-query search. `FILTER` can use
+  the result columns (e.g. `FILTER rank <= 5`). This is also the first `SEARCH` form that returns
+  the similarity score. `EXPLAIN` shows `BatchVectorSearchExec` with the query count and index
+  type. `run_search` and `EXPLAIN SEARCH` now share one plan builder (`search_plan`).
+- **`SHOW MEMORY [<dataset>]` (P7 report).** A table of estimated bytes per dataset (rows), index
+  and tensor. Every index type now implements `Index::memory_bytes`. It shows what the proposal
+  suspected: IVF and HNSW keep their own copies of every indexed vector, so an HNSW index costs
+  more than twice its vectors. That's the medium tier's next target.
+
+**Tests:** new `tests/arg_rrf_aggregate_test.rs` (7), `tests/batch_search_test.rs` (5, including
+an independent brute-force cosine ranking and IVF/HNSW parity with single-query `SEARCH`),
+`tests/show_memory_test.rs` (3), `tests/memory_load_test.rs` (6, including WAL restart and
+`IMPORT` parity), and 5 new cases in `clients/python-embedded/tests/test_embedded.py`.
+
 ## [0.1.91] - 2026-09-25
 
 ### Fixed — `GROUP BY` row order is deterministic; WAL replay no longer loses lineage

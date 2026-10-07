@@ -445,6 +445,16 @@ language packages, not workspace members):
   in-process counterpart to `CONTRACT.md`. `clients/python-embedded` is
   published on PyPI (`linaldb`); `clients/r-embedded` is not yet published
   to CRAN (see `clients/CRAN_PUBLISHING_PLAN.md`).
+  - **Loading from memory** (`clients/python-embedded`'s `Db.load_numpy`/
+    `Db.load_arrow`): the Python layer serializes the data to an Arrow IPC
+    stream, the native `load_arrow_ipc` decodes it into one `RecordBatch`,
+    and `TensorDb::load_record_batch` (`src/engine/db/memory_load.rs`)
+    checks column types and NaN/Inf, converts it to rows with the same
+    `storage::record_batch_to_rows` `LOAD DATASET` uses, registers the
+    dataset, records a `LOAD FROM MEMORY` provenance record (origin + content
+    hash), and checkpoints if the WAL is on. The IPC hop is one extra copy;
+    it avoids a version coupling between this crate's `arrow` and the
+    binding's `pyo3` that `arrow`'s own `pyarrow` feature would add.
 
 ### 7. Utils Module (`src/utils/`)
 
@@ -750,7 +760,37 @@ both the baked-in and deferred paths.
 2. **Aggregation**: Apply aggregation functions per group
    - Element-wise for vectors/matrices
    - Scalar for numeric types
+   - `ARG_MAX`/`ARG_MIN` carry their second (`by`) expression inside the
+     function value itself (`AggregateFunction::ArgMax(Box<Expr>)`), so the
+     one-expression `AggregateExpr` shape is unchanged. `AggregateExec`
+     keeps the best `by` key per aggregate in a separate accumulator and the
+     selected value in the regular one, replacing only on a strictly better
+     key (first row wins ties). `RRF(rank, k)` (`AggregateFunction::Rrf(k)`)
+     sums `1/(k + rank)` in an `f64` accumulator.
 3. **HAVING**: Filter groups after aggregation
+
+### Batch Vector Search
+
+`SEARCH ... QUERIES` plans to `LogicalPlan::BatchVectorSearch` /
+`BatchVectorSearchExec` (`query/physical.rs`). The executor
+(`dsl/executor/query.rs::search_plan`, shared with `EXPLAIN`) resolves the
+queries up front, from a 2-D tensor's rows or a dataset column, into
+`(query_id, Vec<f32>)` pairs, checks each query's dimension against the
+indexed column, and builds the output schema (`query_id`, `rank`, `score`,
+`row_id`, then the dataset's columns). Execution runs each query's
+`Index::search` in parallel (Rayon) and emits rows grouped by query in input
+order. A `FILTER` is a `FilterExec` over that output, so it sees the result
+columns too.
+
+### Memory Accounting
+
+`SHOW MEMORY` (`dsl/executor/show.rs`) adds up estimates from three places:
+`Dataset::estimated_rows_bytes` (each row's `Value`s by capacity, via
+`Value::estimated_bytes`), `Index::memory_bytes` (required on every index
+type, so a new one has to account for itself), and each tensor's buffer. The
+HNSW estimate is derived from `instant-distance` 0.6's layout (a second copy
+of each point, 2·M layer-0 neighbor ids, upper layers with ~1/(M−1) of the
+points), since the library doesn't report its size.
 
 ---
 
