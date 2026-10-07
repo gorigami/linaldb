@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — scientific retrieval, medium-impact tier (CASMI 2026 proposal)
+
+Second of three tiers (`CASMI_WORKLOADS_PLAN.md`).
+
+- **`CREATE SORTED INDEX` and `SEARCH ... PREFILTER` (P3b/c).** A sorted index answers ranges
+  (`<`, `<=`, `>`, `>=`, `=`, `BETWEEN`, alone or in an `AND` chain) by binary search
+  (`SortedRangeScanExec` + the full predicate, so results equal a scan). `PREFILTER <predicate>`
+  restricts candidates before ranking and ranks them exactly, so `k` rows come back whenever `k`
+  pass. In a `QUERIES` batch, `<query dataset>.<col>` is each query's own value: per-query mass
+  windows, absolute or ppm, narrowed by a sorted index when there is one. No vector index needed.
+- **`BitVector(N)` and `TANIMOTO`/`JACCARD`/`HAMMING`/`BIT_COUNT` (P4).** Fingerprints stored as
+  bits (32x smaller than floats). Insert bit strings or 0/1 vectors; `CAST(... AS BITVECTOR(n))`.
+  Length or type mismatches are errors before any row runs. Matches RDKit's
+  `TanimotoSimilarity` exactly (2048- and 1000-bit Morgan fingerprints). Parquet:
+  `FixedSizeBinary` (`numpy.packbits` layout) with the exact length in metadata; HTTP JSON:
+  `{"BitVector": "0101..."}`.
+- **`Matrix(r, *)` peak lists and `SPEC_COSINE`/`SPEC_COSINE_MOD`/`SPEC_MATCHES` (P5).** Spectra
+  of any length per row, stored natively as `FixedSizeList<List<Float32>>`. The functions follow
+  matchms' `CosineGreedy`/`ModifiedCosineGreedy` step by step (including tie order) and agree with
+  it to 1e-12 on 900 pairs; optional `mz_power`/`intensity_power` (e.g. square-root intensities).
+  Unsorted m/z, non-finite values or a bad tolerance fail the statement.
+- **Indexes hold one copy of the vectors; HNSW rewritten; binary snapshots (P7).** IVF and HNSW
+  share a contiguous vector store with cached norms (scores bit-identical to `COSINE_SIM`). HNSW
+  is now implemented in-tree, replacing `instant-distance`: deterministic parallel build, exact
+  scores, no second copy of the points. At 200,000 × 128: build 419 s → 64 s, recall@10 0.905 →
+  0.955, query 8.3 ms → 3.6 ms. Index snapshots are binary (`vector_index_clusters.bin`,
+  `hnsw_index_graphs.bin`); old IVF `.json` snapshots still restore, old HNSW `.json` graphs are
+  rebuilt.
+- **Loud errors in row expressions.** `query::typecheck` checks expressions before execution;
+  `query::row_error` turns data errors found during evaluation into statement errors instead of
+  `NULL`.
+- **Python:** `load_numpy(..., bit_columns=...)`, `linaldb.bitvector_array()`,
+  `linaldb.peaks_array()`; BitVector values come back as bit strings.
+
+### Fixed — found while building the medium tier
+
+- **`UPDATE`/`DELETE` left indexes, range-pruning stats and metadata stale.** They edited rows in
+  place: a `SEARCH` after a `DELETE` returned wrong or no rows, a range query after an `UPDATE`
+  could miss matching rows (partition pruning used the old min/max), a hash lookup missed updated
+  values. Both now rebuild what's derived from the rows. `UPDATE` also evaluates assignments with
+  the full expression evaluator -- a vector literal used to be written as `NULL` into a
+  non-nullable column, breaking the next `SELECT` -- and type-checks every new value first,
+  changing nothing on error. Covered by new `tests/update_delete_index_test.rs`; `UPDATE`/`DELETE`
+  had no integration tests before.
+- **Arithmetic in a `WHERE` comparison matched nothing.** `WHERE price * qty > 100` (also in
+  `FILTER`, `UPDATE ... WHERE`, `DELETE ... WHERE`) treated the arithmetic side as unknown and
+  returned no rows. New `tests/where_arithmetic_test.rs`.
+- **Decimal literals were 32-bit even next to `DOUBLE`.** `WHERE double_col >= 0.30434782608695654`
+  compared against an f32-rounded constant and could drop the boundary row; mass windows on
+  `DOUBLE` columns used f32 bounds. A decimal literal beside a `DOUBLE` operand (comparison,
+  arithmetic, `BETWEEN`, `IN`) now keeps its f64 value; `FLOAT` comparisons are unchanged.
+- **`schema.json` reported `Complex` columns as `String`** (the `/delivery` and Python
+  `Dataset.schema()` view); it now reports the logical type, including `BitVector`.
+
 ### Added — scientific retrieval, low-impact tier (CASMI 2026 proposal)
 
 First of three tiers implementing the proposal for spectral retrieval workloads (many queries

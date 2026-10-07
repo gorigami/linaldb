@@ -267,3 +267,35 @@ fn http_json_shape_is_the_bit_string() {
         r#"{"BitVector":"1010"}"#
     );
 }
+
+/// `schema.json` (what `/delivery` and the Python `Dataset.schema()` read)
+/// reports the logical types, not the physical Parquet ones. It used to
+/// say `String` for a Complex column, and would have for a BitVector one.
+#[test]
+fn schema_json_reports_bitvector_and_complex() {
+    let (dir, mut db) = db();
+    run(
+        &mut db,
+        "DATASET s COLUMNS (id: Int, fp: BitVector(70), z: Complex?)",
+    );
+    run(
+        &mut db,
+        &format!("INSERT INTO s VALUES (1, \"{}\", null)", "1".repeat(70)),
+    );
+    run(&mut db, "UPDATE s SET z = COMPLEX(1.0, 2.0)");
+    run(&mut db, "SAVE DATASET s");
+    let raw = std::fs::read_to_string(dir.path().join("default/datasets/s/schema.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let types: Vec<String> = json["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["value_type"].to_string())
+        .collect();
+    assert_eq!(
+        types,
+        vec![r#""Int""#, r#"{"BitVector":70}"#, r#""Complex""#],
+        "{}",
+        raw
+    );
+}

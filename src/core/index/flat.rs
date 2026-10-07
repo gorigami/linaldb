@@ -24,12 +24,15 @@ pub(crate) fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
+/// Cloning is O(1): the buffers are shared (`Arc`) and copied only when a
+/// clone is then written to, so cloning a dataset (`SAVE DATASET`, `SHOW`)
+/// doesn't copy every indexed vector.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FlatVectors {
     dim: usize,
-    data: Vec<f32>,
-    row_ids: Vec<usize>,
-    norms: Vec<f32>,
+    data: std::sync::Arc<Vec<f32>>,
+    row_ids: std::sync::Arc<Vec<usize>>,
+    norms: std::sync::Arc<Vec<f32>>,
 }
 
 impl FlatVectors {
@@ -65,9 +68,9 @@ impl FlatVectors {
                 v.len()
             ));
         }
-        self.data.extend_from_slice(v);
-        self.row_ids.push(row_id);
-        self.norms.push(l2_norm(v));
+        std::sync::Arc::make_mut(&mut self.data).extend_from_slice(v);
+        std::sync::Arc::make_mut(&mut self.row_ids).push(row_id);
+        std::sync::Arc::make_mut(&mut self.norms).push(l2_norm(v));
         Ok(())
     }
 

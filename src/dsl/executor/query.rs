@@ -2606,7 +2606,7 @@ pub(super) fn execute_delete(
         Some(pred) => {
             // Decide every row first, so a data error deletes nothing.
             crate::query::row_error::clear();
-            let doomed: Vec<bool> = ds.rows.iter().map(|row| pred(row)).collect();
+            let doomed: Vec<bool> = ds.rows.iter().map(&pred).collect();
             if let Some(e) = crate::query::row_error::take() {
                 return Err(DslError::Engine {
                     line: line_no,

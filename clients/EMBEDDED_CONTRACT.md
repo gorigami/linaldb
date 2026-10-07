@@ -47,6 +47,7 @@ directly, no JSON round-trip):
 | `Bool` | `bool` | `logical` |
 | `Vector(Vec<f32>)` | `list[float]` | numeric vector |
 | `Matrix(Vec<Vec<f32>>)` | `list[list[float]]` | list of numeric vectors (row-major) |
+| `BitVector(BitVec)` | `str` bit string, e.g. `"0110..."` (bit `i` = character `i`; RDKit's `DataStructs.CreateFromBitString` takes it) | `character` bit string |
 | `Complex(Complex64)` | native Python `complex` (`pyo3::types::PyComplex::from_doubles`) | native R `complex` (`extendr_api::scalar::Rcplx` — its `c64` is `num_complex::Complex<f64>` itself, the exact same type `Value::Complex` uses, so this is a lossless zero-conversion wrap) |
 | `Null` | `None` | `NA_real_` (satisfies `is.na()`, same rule `CONTRACT.md` §3 documents for the HTTP client's `Value::Null`) |
 
@@ -79,6 +80,11 @@ any problem.
   that already exists.
 - Values are bit-exact (`-0.0` and subnormals included). The load is recorded for `EXPLAIN
   LINEAGE` as `LOAD FROM MEMORY` with `origin` and the new dataset's content hash.
+- More types (v0.1.92): `fixed_size_binary(w)` -> `BitVector` (`8 * w` bits, or exactly `N` with
+  field metadata `linal.logical_value_type = "BitVector:N"`); `fixed_size_list<list<float32>, r>`
+  -> `Matrix(r, *)`. Helpers: `linaldb.bitvector_array(bool_2d)` (packs with `numpy.packbits`)
+  and `linaldb.peaks_array([(mz, intensities), ...])` (a peak-list column). `load_numpy` also
+  takes `bit_columns={name: bool_2d}`, adding `BitVector` columns with the exact length.
 - Raw layer: `Db._native.load_arrow_ipc(name, ipc_stream: bytes, origin: str) -> int` takes an
   Arrow IPC stream; the two methods above serialize to it. Engine entry point:
   `TensorDb::load_record_batch(name, &RecordBatch, origin)`.

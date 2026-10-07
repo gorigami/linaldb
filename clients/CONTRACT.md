@@ -217,7 +217,9 @@ Mounted per-dataset at `/delivery/datasets/:name/`:
   trust**, not something to infer from the Parquet file's physical type.
   Each column: `{"name": ..., "value_type": "Int"|"Float"|"Float64"|
   "String"|"Bool"|"Complex" | {"Vector": <dim>} | {"Matrix": [<rows>,
-  <cols>]}, "shape": {"dims": [...]}, "nullable": bool}`.
+  <cols>]} | {"BitVector": <bits>}, "shape": {"dims": [...]}, "nullable":
+  bool}`. A `Matrix(r, *)` peak-list column has `<cols>` = 0. (Before
+  v0.1.92 a `Complex` column was wrongly reported as `"String"` here.)
 - `stats.json` — per-column min/max/mean/null_count/sparsity, row count.
 - `data.parquet` — the actual data.
 
@@ -253,6 +255,16 @@ be of size=N but index M had size=0`) — a cross-library Parquet encoding
 disagreement, not a bug in either reader in isolation. See the v0.1.72
 `CHANGELOG.md` entry for the full root-cause.
 
+### `Matrix(r, *)` and `BitVector` column encoding in `data.parquet` (v0.1.92)
+
+- `Matrix(r, *)` (rows of varying length, e.g. spectra): a native
+  `FixedSizeList<List<Float32>, r>` column; each cell is r lists. A column
+  with a NULL falls back to the JSON-string encoding like Vector/Matrix.
+- `BitVector(N)`: a native `FixedSizeBinary(ceil(N/8))` column, MSB-first
+  per byte (`numpy.unpackbits(bytes)[:N]` recovers the bits), with Arrow
+  field metadata `linal.logical_value_type = "BitVector:N"`. NULLs are
+  native Arrow nulls.
+
 ### `Complex` column encoding in `data.parquet` (Phase 3)
 
 A `schema.json` column with `value_type: "Complex"` has **no native Arrow
@@ -273,6 +285,7 @@ of:
 |---|---|
 | `{"Float": 1.5}` | float (32-bit) |
 | `{"Float64": 1.5}` | float (64-bit / double) |
+| `{"BitVector": "0110..."}` | the bit string (bit `i` = character `i`), v0.1.92+ |
 | `{"Int": 5}` | int |
 | `{"String": "x"}` | string |
 | `{"Bool": true}` | bool |

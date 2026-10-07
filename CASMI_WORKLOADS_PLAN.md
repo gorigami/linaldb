@@ -15,7 +15,7 @@ matchms), fail loudly on bad input, keep new behavior opt-in, and update `DSL_RE
 One PR per tier, each from `main` after the previous one is merged; one release at the end
 (engine + `linaldb` on PyPI), then a check in `linal-hub` with public spectra.
 
-### Low impact — done in this tier's PR
+### Low impact — merged (#136)
 
 | Item | What | Where |
 |---|---|---|
@@ -24,7 +24,7 @@ One PR per tier, each from `main` after the previous one is merged; one release 
 | P3a | Batch top-k: `SEARCH ... QUERIES <matrix> \| <dataset>.<col> [KEY <col>]` → `(query_id, rank, score, row_id, ...)` | `BatchVectorSearchExec`, `dsl/executor/query.rs::search_plan` |
 | P7 (report) | `SHOW MEMORY [<dataset>]`: estimated bytes per dataset, index, tensor | `Index::memory_bytes`, `dsl/executor/show.rs` |
 
-### Medium impact
+### Medium impact — done in this tier's PR
 
 | Item | What |
 |---|---|
@@ -41,6 +41,15 @@ One PR per tier, each from `main` after the previous one is merged; one release 
 | P7 (quantization) | Opt-in `Vector(d, F16)` / `I8` with per-vector scale; schema format stays backward compatible |
 | P7 (mmap) | Memory-mapped snapshot loading |
 | Filtered HNSW | Top-k over HNSW restricted to a pre-filter |
+
+Measured (P7 copies): HNSW at 200,000 × 128 now builds in 64 s (was 419 s) with recall@10 0.955
+(was 0.905) and 3.6 ms per query (was 8.3 ms), holding one copy of the vectors (was two plus
+per-vector metadata). Validation: `TANIMOTO` equals RDKit exactly; `SPEC_COSINE(_MOD)` equals
+matchms to 1e-12 on 900 pairs; `PREFILTER` equals a brute-force window + exact ranking.
+
+Bugs found along the way and fixed in the medium tier: UPDATE/DELETE index and zone-map
+staleness; arithmetic in WHERE comparisons matching nothing; f32 literals next to DOUBLE;
+`schema.json` reporting Complex as String.
 
 ## Findings from checking the proposal against the code
 

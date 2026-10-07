@@ -13,6 +13,13 @@ engine's own changelog.
   Arrow types and existing names raise `LinalError`. Recorded in `EXPLAIN LINEAGE`.
 - Engine additions reachable through `execute()`: `ARG_MAX`/`ARG_MIN`/`RRF` aggregates, batch
   `SEARCH ... QUERIES`, and `SHOW MEMORY`. See the root `CHANGELOG.md`.
+- **`BitVector` fingerprints:** `load_numpy(..., bit_columns={"fp": bool_array})`,
+  `linaldb.bitvector_array()`; values come back as bit strings. `TANIMOTO` etc. match RDKit.
+- **Spectra:** `linaldb.peaks_array([(mz, intensities), ...])` builds a `Matrix(2, *)` column for
+  `load_arrow()`; `SPEC_COSINE`/`SPEC_COSINE_MOD` match matchms.
+- Engine: `CREATE SORTED INDEX`, `SEARCH ... PREFILTER` with per-query mass windows, a faster
+  and more accurate HNSW index, and four bug fixes (UPDATE/DELETE index staleness, arithmetic in
+  WHERE, f32 literals beside DOUBLE, `schema.json` Complex type). See the root `CHANGELOG.md`.
 
 ## [0.1.16] - 2026-09-25
 

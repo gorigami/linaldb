@@ -550,11 +550,19 @@ impl From<Arc<ArrowSchema>> for DatasetSchema {
                 let (vt, shape_dims) = match logical_vector_or_matrix_type(f) {
                     Some(ValueType::Vector(dim)) => (ValueType::Vector(dim), vec![dim]),
                     Some(ValueType::Matrix(r, c)) => (ValueType::Matrix(r, c), vec![r, c]),
-                    _ => match f.data_type() {
-                        DataType::Int64 => (ValueType::Int, vec![]),
+                    Some(ValueType::BitVector(n)) => (ValueType::BitVector(n), vec![n]),
+                    // Any other annotated logical type (`Complex`, stored as
+                    // JSON text) -- this arm used to fall through to the
+                    // physical type and report such a column as `String`.
+                    Some(other) => (other, vec![]),
+                    None => match f.data_type() {
+                        DataType::Int64 | DataType::Int32 => (ValueType::Int, vec![]),
                         DataType::Float32 => (ValueType::Float, vec![]),
                         DataType::Float64 => (ValueType::Float64, vec![]),
                         DataType::Boolean => (ValueType::Bool, vec![]),
+                        DataType::FixedSizeBinary(w) => {
+                            (ValueType::BitVector(*w as usize * 8), vec![*w as usize * 8])
+                        }
                         _ => (ValueType::String, vec![]),
                     },
                 };

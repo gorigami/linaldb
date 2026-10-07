@@ -59,7 +59,17 @@ db.load_arrow("other", pyarrow_table)   # or any pyarrow Table / RecordBatch
 ```
 
 `float64` vectors, NaN/infinite values and unsupported Arrow types raise `LinalError` instead of
-being converted. See [`../EMBEDDED_CONTRACT.md`](../EMBEDDED_CONTRACT.md) §1b.
+being converted.
+
+Fingerprints and spectra:
+
+```python
+db.load_numpy("cands", np.zeros((n, 1), np.float32), column="unused",
+              bit_columns={"fp": fingerprint_bits})          # (n, 2048) bool -> BitVector(2048)
+db.load_arrow("library", pa.table({"id": ids, "pm": precursor_mz,
+                                   "spec": linaldb.peaks_array(spectra)}))  # [(mz, int), ...]
+db.query('SELECT id, SPEC_COSINE(spec, spec, 0.01) AS s FROM library')
+``` See [`../EMBEDDED_CONTRACT.md`](../EMBEDDED_CONTRACT.md) §1b.
 
 See
 [`examples/digit_classification_embedded.py`](examples/digit_classification_embedded.py)

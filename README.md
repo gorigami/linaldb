@@ -277,6 +277,19 @@ db.load_numpy("queries", query_vectors.astype(np.float32), column="e",
 db.execute("CREATE VECTOR INDEX ON library(e) USING HNSW")
 db.execute("SEARCH library ON e QUERIES queries.e KEY spectrum LIMIT 25 INTO hits")
 db.execute("SHOW MEMORY")                                    # bytes per dataset, index, tensor
+
+# Exact top-k inside each query's precursor-mass window (10 ppm), via a sorted index
+db.execute("CREATE SORTED INDEX ON library(mass)")
+db.execute("SEARCH library ON e QUERIES queries.e KEY spectrum "
+           "PREFILTER mass >= queries.pmass * (1 - 0.00001) AND mass <= queries.pmass * (1 + 0.00001) "
+           "LIMIT 25 INTO windowed")
+```
+
+```sql
+-- Fingerprints as bits, spectra as peak lists (both checked against RDKit / matchms)
+DATASET cands COLUMNS (id: Int, fp: BitVector(2048), spec: Matrix(2, *))
+SELECT id, TANIMOTO(fp, CAST("0110...1" AS BITVECTOR(2048))) AS t FROM cands ORDER BY t DESC LIMIT 25
+SELECT id, SPEC_COSINE(spec, [[101.05, 150.2], [1.0, 0.4]], 0.01, 0, 0.5) AS s FROM cands
 ```
 
 ```sql
