@@ -44,6 +44,8 @@ nalgebra = "0.33"
 num-complex = { version = "0.4", features = ["serde"] }
 # IEEE half precision for `Vector(d, F16)` columns (core::quant); already in the tree via arrow.
 half = "2"
+# Memory-mapped HNSW snapshot loading (`[storage] mmap_index_snapshots`, core::index::hnsw).
+memmap2 = "0.9"
 comfy-table = "7.2.2"
 indicatif = "0.17"
 # Dense-matmul backend (src/engine/kernels.rs, reached from

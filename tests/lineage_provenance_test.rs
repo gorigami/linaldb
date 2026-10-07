@@ -287,6 +287,7 @@ fn prune_lineage_succeeds_on_a_database_with_no_data_dir_yet() {
         storage: StorageConfig {
             data_dir: data_dir.clone(),
             default_db: "default".to_string(),
+            mmap_index_snapshots: false,
         },
         wal: Default::default(),
         compute: Default::default(),
@@ -325,6 +326,7 @@ fn prune_lineage_does_not_misattribute_a_live_tensor_on_a_real_content_hash_coll
         storage: StorageConfig {
             data_dir: data_dir.clone(),
             default_db: "default".to_string(),
+            mmap_index_snapshots: false,
         },
         wal: Default::default(),
         compute: Default::default(),
@@ -410,6 +412,7 @@ fn prune_lineage_does_not_misattribute_a_multi_output_binding_on_a_real_content_
         storage: StorageConfig {
             data_dir: data_dir.clone(),
             default_db: "default".to_string(),
+            mmap_index_snapshots: false,
         },
         wal: Default::default(),
         compute: Default::default(),

@@ -59,6 +59,76 @@ impl Ord for Cand {
     }
 }
 
+/// A `u32` array that is either owned or a view into a memory-mapped
+/// snapshot file (`[storage] mmap_index_snapshots`). A mapped array is
+/// never written in place: the first write copies it (`to_mut`).
+#[derive(Clone)]
+enum U32Buf {
+    Owned(Vec<u32>),
+    Mapped {
+        map: Arc<memmap2::Mmap>,
+        offset: usize,
+        len: usize,
+    },
+}
+
+impl std::ops::Deref for U32Buf {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        match self {
+            U32Buf::Owned(v) => v,
+            // SAFETY: `decode_snapshots_mapped` only builds this for a
+            // little-endian host, a 4-byte-aligned `offset` into a
+            // page-aligned map, and `offset + 4 * len` within the map; the
+            // map stays alive (`Arc`) as long as the slice can be borrowed,
+            // and LINAL never modifies a snapshot file in place (it
+            // replaces it by rename), so the bytes don't change under us.
+            U32Buf::Mapped { map, offset, len } => unsafe {
+                std::slice::from_raw_parts(map.as_ptr().add(*offset) as *const u32, *len)
+            },
+        }
+    }
+}
+
+impl U32Buf {
+    fn to_mut(&mut self) -> &mut Vec<u32> {
+        if let U32Buf::Mapped { .. } = self {
+            *self = U32Buf::Owned(self.to_vec());
+        }
+        match self {
+            U32Buf::Owned(v) => v,
+            U32Buf::Mapped { .. } => unreachable!(),
+        }
+    }
+    fn heap_bytes(&self) -> usize {
+        match self {
+            U32Buf::Owned(v) => v.capacity() * 4,
+            U32Buf::Mapped { .. } => 0,
+        }
+    }
+    fn mapped_bytes(&self) -> usize {
+        match self {
+            U32Buf::Owned(_) => 0,
+            U32Buf::Mapped { len, .. } => len * 4,
+        }
+    }
+}
+
+impl PartialEq for U32Buf {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl std::fmt::Debug for U32Buf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            U32Buf::Owned(v) => write!(f, "Owned({} u32)", v.len()),
+            U32Buf::Mapped { len, .. } => write!(f, "Mapped({} u32)", len),
+        }
+    }
+}
+
 /// The graph over `store[..n]` (`n = levels.len()`).
 #[derive(Debug, Clone)]
 struct Graph {
@@ -66,12 +136,12 @@ struct Graph {
     max_level: u8,
     levels: Vec<u8>,
     /// `M0` slots per node.
-    layer0: Vec<u32>,
+    layer0: U32Buf,
     /// Start of each node's upper-layer slots in `upper_links` (`NONE` for
     /// a level-0 node). A level-`L` node has `L * M` slots: layer `l` at
     /// `offset + (l - 1) * M`.
-    upper_offset: Vec<u32>,
-    upper_links: Vec<u32>,
+    upper_offset: U32Buf,
+    upper_links: U32Buf,
 }
 
 impl Graph {
@@ -89,9 +159,9 @@ impl Graph {
             entry: NONE,
             max_level: 0,
             levels,
-            layer0: vec![NONE; n * M0],
-            upper_offset,
-            upper_links: vec![NONE; total],
+            layer0: U32Buf::Owned(vec![NONE; n * M0]),
+            upper_offset: U32Buf::Owned(upper_offset),
+            upper_links: U32Buf::Owned(vec![NONE; total]),
         }
     }
 
@@ -118,9 +188,9 @@ impl Graph {
     fn set_links(&mut self, node: u32, layer: u8, links: &[u32]) {
         let range = self.slot_range(node, layer);
         let slots = if layer == 0 {
-            &mut self.layer0[range]
+            &mut self.layer0.to_mut()[range]
         } else {
-            &mut self.upper_links[range]
+            &mut self.upper_links.to_mut()[range]
         };
         slots.fill(NONE);
         slots[..links.len()].copy_from_slice(links);
@@ -128,9 +198,16 @@ impl Graph {
 
     fn memory_bytes(&self) -> usize {
         self.levels.capacity()
-            + 4 * (self.layer0.capacity()
-                + self.upper_offset.capacity()
-                + self.upper_links.capacity())
+            + self.layer0.heap_bytes()
+            + self.upper_offset.heap_bytes()
+            + self.upper_links.heap_bytes()
+    }
+
+    /// Bytes read straight from a memory-mapped snapshot (not on the heap).
+    fn mapped_bytes(&self) -> usize {
+        self.layer0.mapped_bytes()
+            + self.upper_offset.mapped_bytes()
+            + self.upper_links.mapped_bytes()
     }
 }
 
@@ -658,15 +735,19 @@ pub struct PersistedHnswIndex {
     pub snapshot: HnswIndexSnapshot,
 }
 
-const HNSW_MAGIC: &[u8; 8] = b"LNLHNS1\0";
+const HNSW_MAGIC_V1: &[u8; 8] = b"LNLHNS1\0";
+const HNSW_MAGIC: &[u8; 8] = b"LNLHNS2\0";
 
 /// Binary layout of `hnsw_index_graphs.bin` (little-endian): magic
-/// `LNLHNS1\0`, u32 column count, then per column (sorted by name): column
+/// `LNLHNS2\0`, u32 column count, then per column (sorted by name): column
 /// name and content hash (u32 length + UTF-8 each), u64 indexed count, u32
-/// entry node, u32 max level, then four u64-length-prefixed arrays: node
-/// levels (u32 each), layer-0 links (`2M` = 32 u32 slots per node), upper
-/// offsets (u32 per node), upper links (u32). Empty slots are `u32::MAX`.
-/// Vectors are not stored: they are the dataset's own column.
+/// entry node, u32 max level, then four arrays, each a u64 count, zero
+/// padding to a 4-byte file offset, and the u32 values: node levels,
+/// layer-0 links (`2M` = 64 slots per node), upper offsets (one per node),
+/// upper links. Empty slots are `u32::MAX`. The padding lets a
+/// memory-mapped file be used in place. Vectors are not stored: they are
+/// the dataset's own column. (`LNLHNS1\0` files, without the padding, are
+/// still read.)
 pub fn encode_snapshots(
     snapshots: &std::collections::HashMap<String, PersistedHnswIndex>,
 ) -> Vec<u8> {
@@ -683,18 +764,40 @@ pub fn encode_snapshots(
         w.u32(g.entry);
         w.u32(g.max_level as u32);
         let levels: Vec<u32> = g.levels.iter().map(|&l| l as u32).collect();
-        w.u32s(&levels);
-        w.u32s(&g.layer0);
-        w.u32s(&g.upper_offset);
-        w.u32s(&g.upper_links);
+        w.u32s_aligned(&levels);
+        w.u32s_aligned(&g.layer0);
+        w.u32s_aligned(&g.upper_offset);
+        w.u32s_aligned(&g.upper_links);
     }
     w.into_bytes()
 }
 
+/// Reads snapshots into owned arrays (either format version).
 pub fn decode_snapshots(
     bytes: &[u8],
 ) -> Result<std::collections::HashMap<String, PersistedHnswIndex>, String> {
-    let mut r = super::binio::Reader::new(bytes, HNSW_MAGIC)?;
+    decode(bytes, None)
+}
+
+/// Reads snapshots with the link arrays left in the memory-mapped file
+/// (`U32Buf::Mapped`); falls back to copying them out for an `LNLHNS1`
+/// file or a big-endian host. Every array is still validated.
+pub fn decode_snapshots_mapped(
+    map: Arc<memmap2::Mmap>,
+) -> Result<std::collections::HashMap<String, PersistedHnswIndex>, String> {
+    let mapped = cfg!(target_endian = "little") && map.len() >= 8 && &map[..8] == HNSW_MAGIC;
+    if !mapped {
+        return decode(&map, None);
+    }
+    decode(&map.clone(), Some(map))
+}
+
+fn decode(
+    bytes: &[u8],
+    map: Option<Arc<memmap2::Mmap>>,
+) -> Result<std::collections::HashMap<String, PersistedHnswIndex>, String> {
+    let v1 = bytes.len() >= 8 && &bytes[..8] == HNSW_MAGIC_V1;
+    let mut r = super::binio::Reader::new(bytes, if v1 { HNSW_MAGIC_V1 } else { HNSW_MAGIC })?;
     let mut out = std::collections::HashMap::new();
     for _ in 0..r.u32()? {
         let column = r.str()?;
@@ -702,17 +805,33 @@ pub fn decode_snapshots(
         let indexed_count = r.u64()? as usize;
         let entry = r.u32()?;
         let max_level = r.u32()?;
-        let levels = r.u32s()?;
+        let array = |r: &mut super::binio::Reader| -> Result<U32Buf, String> {
+            if v1 {
+                return r.u32s().map(U32Buf::Owned);
+            }
+            match &map {
+                Some(map) => {
+                    let (offset, len) = r.u32s_aligned_range()?;
+                    Ok(U32Buf::Mapped {
+                        map: map.clone(),
+                        offset,
+                        len,
+                    })
+                }
+                None => r.u32s_aligned().map(U32Buf::Owned),
+            }
+        };
+        let levels = array(&mut r)?;
         let graph = Graph {
             entry,
             max_level: u8::try_from(max_level).map_err(|e| e.to_string())?,
             levels: levels
-                .into_iter()
-                .map(|l| u8::try_from(l).map_err(|e| e.to_string()))
+                .iter()
+                .map(|&l| u8::try_from(l).map_err(|e| e.to_string()))
                 .collect::<Result<_, _>>()?,
-            layer0: r.u32s()?,
-            upper_offset: r.u32s()?,
-            upper_links: r.u32s()?,
+            layer0: array(&mut r)?,
+            upper_offset: array(&mut r)?,
+            upper_links: array(&mut r)?,
         };
         validate(&graph, indexed_count)?;
         out.insert(
@@ -741,6 +860,11 @@ impl Index for HnswIndex {
 
     fn memory_bytes(&self) -> usize {
         self.store.memory_bytes() + self.graph.as_ref().map_or(0, |g| g.memory_bytes())
+    }
+
+    fn memory_detail(&self) -> Option<String> {
+        let mapped = self.graph.as_ref().map_or(0, |g| g.mapped_bytes());
+        (mapped > 0).then(|| format!("graph memory-mapped: {} bytes", mapped))
     }
 
     fn search(&self, query: &Tensor, k: usize) -> Result<Vec<(usize, f32)>, String> {
@@ -1215,5 +1339,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mapped_snapshot_matches_owned_and_v1_still_reads() {
+        let (index, _) = random_index(600, 8);
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "e".to_string(),
+            PersistedHnswIndex {
+                content_hash: "h".into(),
+                snapshot: index.snapshot().unwrap(),
+            },
+        );
+        let bytes = encode_snapshots(&map);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mmap = Arc::new(unsafe { memmap2::Mmap::map(&file).unwrap() });
+        let mapped = decode_snapshots_mapped(mmap).unwrap();
+        let g = &mapped["e"].snapshot.graph;
+        assert!(g.mapped_bytes() > 0, "arrays should stay in the map");
+        assert_eq!(g.layer0, map["e"].snapshot.graph.layer0);
+        assert_eq!(g.upper_links, map["e"].snapshot.graph.upper_links);
+
+        // An LNLHNS1 file (no alignment padding) still decodes.
+        let src = &map["e"].snapshot.graph;
+        let mut w = super::super::binio::Writer::new(HNSW_MAGIC_V1);
+        w.u32(1);
+        w.str("e");
+        w.str("h");
+        w.u64(600);
+        w.u32(src.entry);
+        w.u32(src.max_level as u32);
+        w.u32s(&src.levels.iter().map(|&l| l as u32).collect::<Vec<_>>());
+        w.u32s(&src.layer0);
+        w.u32s(&src.upper_offset);
+        w.u32s(&src.upper_links);
+        let v1 = decode_snapshots(&w.into_bytes()).unwrap();
+        assert_eq!(v1["e"].snapshot.graph.layer0, src.layer0);
     }
 }

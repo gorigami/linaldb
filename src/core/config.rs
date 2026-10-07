@@ -80,6 +80,15 @@ pub enum WalSync {
 pub struct StorageConfig {
     pub data_dir: PathBuf,
     pub default_db: String,
+    /// `LOAD DATASET` memory-maps a saved HNSW graph
+    /// (`hnsw_index_graphs.bin`) instead of reading it into the heap: the
+    /// OS pages it in on use and can share and evict it. Off by default.
+    /// While a graph is mapped, its file must not be modified by anything
+    /// but LINAL (which replaces it atomically); on Windows a mapped file
+    /// can't be replaced, so `SAVE DATASET` of that dataset fails until it
+    /// is unloaded.
+    #[serde(default)]
+    pub mmap_index_snapshots: bool,
 }
 
 impl Default for EngineConfig {
@@ -88,6 +97,7 @@ impl Default for EngineConfig {
             storage: StorageConfig {
                 data_dir: PathBuf::from("./data"),
                 default_db: "default".to_string(),
+                mmap_index_snapshots: false,
             },
             wal: WalConfig::default(),
             compute: ComputeConfig::default(),

@@ -182,7 +182,7 @@ impl ParquetStorage {
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
         let bytes = crate::core::index::vector::encode_snapshots(snapshots);
-        fs::write(self.vector_index_clusters_path(name), bytes)?;
+        write_replacing(&self.vector_index_clusters_path(name), &bytes)?;
         let legacy = self.legacy_vector_index_clusters_path(name);
         if Path::new(&legacy).exists() {
             fs::remove_file(legacy)?;
@@ -230,7 +230,7 @@ impl ParquetStorage {
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
         let bytes = crate::core::index::hnsw::encode_snapshots(snapshots);
-        fs::write(self.hnsw_index_graphs_path(name), bytes)?;
+        write_replacing(&self.hnsw_index_graphs_path(name), &bytes)?;
         let legacy = self.legacy_hnsw_index_graphs_path(name);
         if Path::new(&legacy).exists() {
             fs::remove_file(legacy)?;
@@ -241,9 +241,14 @@ impl ParquetStorage {
     /// Loads previously persisted HNSW graphs. Returns an empty map (not an
     /// error) if none were saved -- including when only a pre-binary
     /// `.json` graph exists: `LOAD DATASET` then rebuilds the index.
+    ///
+    /// With `mmap`, the graph arrays stay in a memory-mapped view of the
+    /// file instead of being copied to the heap (`[storage]
+    /// mmap_index_snapshots`).
     pub fn load_hnsw_index_snapshots(
         &self,
         name: &str,
+        mmap: bool,
     ) -> Result<
         std::collections::HashMap<String, crate::core::index::hnsw::PersistedHnswIndex>,
         StorageError,
@@ -252,10 +257,20 @@ impl ParquetStorage {
         if !Path::new(&path).exists() {
             return Ok(std::collections::HashMap::new());
         }
-        let bytes = fs::read(path)?;
-        crate::core::index::hnsw::decode_snapshots(&bytes).map_err(|e| {
+        let failed = |e: String| {
             StorageError::Serialization(format!("Failed to read HNSW index snapshots: {}", e))
-        })
+        };
+        if mmap {
+            let file = fs::File::open(&path)?;
+            // SAFETY: LINAL never modifies a snapshot file in place
+            // (`write_replacing` swaps in a new file), and the user is told
+            // not to edit it while it's mapped (`mmap_index_snapshots`).
+            let map = unsafe { memmap2::Mmap::map(&file)? };
+            return crate::core::index::hnsw::decode_snapshots_mapped(Arc::new(map))
+                .map_err(failed);
+        }
+        let bytes = fs::read(path)?;
+        crate::core::index::hnsw::decode_snapshots(&bytes).map_err(failed)
     }
 
     /// Persist which columns have indices (and of what type) so `LOAD
@@ -1337,6 +1352,16 @@ fn build_vector_column(column_data: &[&Value], declared_dim: usize) -> (DataType
 /// `FixedSizeList<FixedSizeList<Float32>>` column, rows-then-cols nested,
 /// with the same declared-dims-first / infer-from-data / fall-back-to-JSON
 /// strategy.
+/// Writes `bytes` to `path` by writing a sibling temporary file and renaming
+/// it over `path`, so a reader -- in particular a memory-mapped view of the
+/// old file -- never sees a half-written or truncated file.
+fn write_replacing(path: &str, bytes: &[u8]) -> Result<(), StorageError> {
+    let tmp = format!("{}.tmp", path);
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// `Vector(d, F16|I8)` as `Struct{scale: Float32, values:
 /// FixedSizeList<Float16|Int8, d>}` (scale 1 for F16); NULL cells are
 /// struct-level nulls, with zeros underneath.

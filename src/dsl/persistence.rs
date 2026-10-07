@@ -405,7 +405,7 @@ fn load_dataset_core(
         .load_vector_index_snapshots(&disk_name)
         .unwrap_or_default();
     let hnsw_snapshots = storage
-        .load_hnsw_index_snapshots(&disk_name)
+        .load_hnsw_index_snapshots(&disk_name, db.config.storage.mmap_index_snapshots)
         .unwrap_or_default();
     let mut restored_indexes = Vec::new();
     let mut restored_from_snapshot = Vec::new();
