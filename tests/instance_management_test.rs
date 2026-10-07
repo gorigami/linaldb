@@ -12,6 +12,7 @@ fn setup_test_db(temp_dir: &str) -> TensorDb {
         storage: StorageConfig {
             data_dir: PathBuf::from(temp_dir),
             default_db: "default".to_string(),
+            mmap_index_snapshots: false,
         },
         wal: Default::default(),
         compute: Default::default(),
@@ -128,6 +129,7 @@ fn test_database_recovery() {
         storage: StorageConfig {
             data_dir: PathBuf::from(temp_dir),
             default_db: "default".to_string(),
+            mmap_index_snapshots: false,
         },
         wal: Default::default(),
         compute: Default::default(),

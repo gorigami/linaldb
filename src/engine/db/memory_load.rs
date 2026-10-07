@@ -46,6 +46,11 @@ fn first_non_finite(array: &ArrayRef) -> Option<(usize, f64)> {
                 .slice(list.offset() * *size as usize, list.len() * *size as usize);
             first_non_finite(&child).map(|(i, v)| (i / *size as usize, v))
         }
+        DataType::Struct(_) => {
+            let st = array.as_any().downcast_ref::<arrow::array::StructArray>()?;
+            let values = st.column_by_name("values")?;
+            first_non_finite(values)
+        }
         DataType::List(_) => {
             let list = array.as_any().downcast_ref::<arrow::array::ListArray>()?;
             (0..list.len())
@@ -58,6 +63,15 @@ fn first_non_finite(array: &ArrayRef) -> Option<(usize, f64)> {
 
 fn check_supported(name: &str, data_type: &DataType) -> Result<(), EngineError> {
     let ok = match data_type {
+        // SparseVector: needs its dimension in the field metadata, checked
+        // in `load_record_batch`.
+        // SparseVector (indices + values) or a quantized vector (scale +
+        // values); either needs its type in the field metadata, checked in
+        // `load_record_batch`.
+        DataType::Struct(fields) => {
+            fields.find("values").is_some()
+                && (fields.find("indices").is_some() || fields.find("scale").is_some())
+        }
         DataType::Int64
         | DataType::Int32
         | DataType::Float32
@@ -129,6 +143,17 @@ impl TensorDb {
         let mut fields = Vec::with_capacity(batch.num_columns());
         for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
             check_supported(field.name(), field.data_type())?;
+            if matches!(field.data_type(), DataType::Struct(_))
+                && !field
+                    .metadata()
+                    .get("linal.logical_value_type")
+                    .is_some_and(|t| t.starts_with("SparseVector:") || t.starts_with("QVector:"))
+            {
+                return Err(EngineError::InvalidOp(format!(
+                    "column '{}' is a struct: a SparseVector or quantized vector column needs field metadata linal.logical_value_type = \"SparseVector:<dim>\" or \"QVector:<dim>,<F16|I8>\" (linaldb.sparse_array / load_numpy(quantize=...) set it)",
+                    field.name()
+                )));
+            }
             if let Some((row, value)) = first_non_finite(column) {
                 return Err(EngineError::InvalidOp(format!(
                     "column '{}' row {} is {} -- NaN and infinite values are rejected",

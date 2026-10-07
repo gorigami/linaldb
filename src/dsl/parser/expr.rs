@@ -519,8 +519,18 @@ impl Parser {
                                 self.advance();
                                 self.eat(&Token::LParen)?;
                                 let n = self.eat_usize()?;
+                                let target = if self.at(&Token::Comma) {
+                                    self.advance();
+                                    let enc = self.eat_ident()?;
+                                    CastTarget::QVector(
+                                        n,
+                                        enc.parse().map_err(|e: String| self.error(e))?,
+                                    )
+                                } else {
+                                    CastTarget::Vector(n)
+                                };
                                 self.eat(&Token::RParen)?;
-                                CastTarget::Vector(n)
+                                target
                             }
                             Some(Token::Matrix) => {
                                 self.advance();
@@ -539,6 +549,12 @@ impl Parser {
                                     "DOUBLE" | "FLOAT64" => CastTarget::Double,
                                     "TEXT" | "STRING" | "VARCHAR" => CastTarget::Text,
                                     "BOOL" | "BOOLEAN" => CastTarget::Bool,
+                                    "SPARSEVECTOR" => {
+                                        self.eat(&Token::LParen)?;
+                                        let n = self.eat_usize()?;
+                                        self.eat(&Token::RParen)?;
+                                        CastTarget::SparseVector(n)
+                                    }
                                     "BITVECTOR" => {
                                         if self.at(&Token::LParen) {
                                             self.advance();
@@ -585,7 +601,7 @@ impl Parser {
                     "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE" | "MAT_SHAPE"
                     | "REAL" | "IMAG" | "ABS" | "PHASE" | "CONJ" | "COMPLEX" | "TANIMOTO"
                     | "JACCARD" | "HAMMING" | "BIT_COUNT" | "SPEC_COSINE" | "SPEC_COSINE_MOD"
-                    | "SPEC_MATCHES"
+                    | "SPEC_MATCHES" | "SPARSE"
                         if self.at(&Token::LParen) =>
                     {
                         let func = match upper.as_str() {
@@ -608,6 +624,7 @@ impl Parser {
                             "SPEC_COSINE" => VectorFnKind::SpecCosine,
                             "SPEC_COSINE_MOD" => VectorFnKind::SpecCosineMod,
                             "SPEC_MATCHES" => VectorFnKind::SpecMatches,
+                            "SPARSE" => VectorFnKind::SparseNew,
                             _ => unreachable!(),
                         };
                         self.advance(); // consume '('

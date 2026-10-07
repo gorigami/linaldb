@@ -772,7 +772,7 @@ fn hnsw_graph_survives_save_and_load_in_binary_form() {
 
     let dir = "./data/default/datasets/hnsw_bin";
     let raw = std::fs::read(format!("{dir}/hnsw_index_graphs.bin")).unwrap();
-    assert_eq!(&raw[..8], b"LNLHNS1\0");
+    assert_eq!(&raw[..8], b"LNLHNS2\0");
     assert!(!std::path::Path::new(&format!("{dir}/hnsw_index_graphs.json")).exists());
 
     let mut db2 = TensorDb::new();
@@ -785,4 +785,77 @@ fn hnsw_graph_survives_save_and_load_in_binary_form() {
         .to_string();
     assert_eq!(before, after);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `[storage] mmap_index_snapshots = true`: LOAD DATASET maps the saved
+/// HNSW graph instead of reading it into the heap; answers are identical,
+/// SHOW MEMORY says so, and saving again while mapped is safe.
+#[test]
+fn hnsw_graph_can_be_memory_mapped_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = |mmap: bool| {
+        let mut config = linal::core::config::EngineConfig::default();
+        config.storage.data_dir = dir.path().to_path_buf();
+        config.storage.mmap_index_snapshots = mmap;
+        TensorDb::with_config(config)
+    };
+    let mut db = open(false);
+    let mut script = String::from("DATASET mm COLUMNS (id: Int, embedding: Vector(4))\n");
+    for i in 0..300 {
+        let a = i as f32 * 0.29;
+        script.push_str(&format!(
+            "INSERT INTO mm VALUES ({}, [{}, {}, {}, {}])\n",
+            i,
+            a.sin(),
+            a.cos(),
+            (a * 0.5).sin(),
+            (a * 0.3).cos()
+        ));
+    }
+    script.push_str("CREATE VECTOR INDEX ON mm(embedding) USING HNSW\n");
+    script.push_str("SAVE DATASET mm\n");
+    linal::dsl::execute_script(&mut db, &script).unwrap();
+    let query = "SEARCH mm ON embedding QUERY [0.2, 0.9, 0.4, 0.1] LIMIT 7";
+
+    let mut heap = open(false);
+    linal::dsl::execute_line(&mut heap, "LOAD DATASET mm", 1).unwrap();
+    let expected = linal::dsl::execute_line(&mut heap, query, 1)
+        .unwrap()
+        .to_string();
+
+    let mut mapped = open(true);
+    let msg = linal::dsl::execute_line(&mut mapped, "LOAD DATASET mm", 1)
+        .unwrap()
+        .to_string();
+    assert!(msg.contains("from snapshot: embedding"), "{msg}");
+    assert_eq!(
+        linal::dsl::execute_line(&mut mapped, query, 1)
+            .unwrap()
+            .to_string(),
+        expected
+    );
+    let memory = linal::dsl::execute_line(&mut mapped, "SHOW MEMORY mm", 1)
+        .unwrap()
+        .to_string();
+    assert!(memory.contains("graph memory-mapped"), "{memory}");
+
+    // Re-save while the old graph is mapped: the file is replaced, not
+    // rewritten in place, so the mapped engine keeps answering.
+    linal::dsl::execute_line(
+        &mut mapped,
+        "INSERT INTO mm VALUES (999, [1.0, 0.0, 0.0, 0.0])",
+        1,
+    )
+    .unwrap();
+    #[cfg(not(windows))]
+    {
+        linal::dsl::execute_line(&mut mapped, "SAVE DATASET mm", 1).unwrap();
+        assert!(linal::dsl::execute_line(&mut mapped, query, 1).is_ok());
+        let mut again = open(true);
+        linal::dsl::execute_line(&mut again, "LOAD DATASET mm", 1).unwrap();
+        let rows = linal::dsl::execute_line(&mut again, "SELECT id FROM mm WHERE id = 999", 1)
+            .unwrap()
+            .to_string();
+        assert!(rows.contains("999"), "{rows}");
+    }
 }

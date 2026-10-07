@@ -286,6 +286,13 @@ db.execute("SEARCH library ON e QUERIES queries.e KEY spectrum "
 ```
 
 ```sql
+-- Large libraries: half-size (F16) or quarter-size (I8) vectors, sparse binned spectra,
+-- and a filtered graph search when a broad pre-filter keeps most of the library
+DATASET lib COLUMNS (id: Int, mass: DOUBLE, e: Vector(256, F16), binned: SparseVector(100000))
+SEARCH lib ON e QUERIES q.e PREFILTER mass < 500.0 APPROX LIMIT 25
+```
+
+```sql
 -- Fingerprints as bits, spectra as peak lists (both checked against RDKit / matchms)
 DATASET cands COLUMNS (id: Int, fp: BitVector(2048), spec: Matrix(2, *))
 SELECT id, TANIMOTO(fp, CAST("0110...1" AS BITVECTOR(2048))) AS t FROM cands ORDER BY t DESC LIMIT 25

@@ -182,7 +182,7 @@ impl ParquetStorage {
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
         let bytes = crate::core::index::vector::encode_snapshots(snapshots);
-        fs::write(self.vector_index_clusters_path(name), bytes)?;
+        write_replacing(&self.vector_index_clusters_path(name), &bytes)?;
         let legacy = self.legacy_vector_index_clusters_path(name);
         if Path::new(&legacy).exists() {
             fs::remove_file(legacy)?;
@@ -230,7 +230,7 @@ impl ParquetStorage {
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
         let bytes = crate::core::index::hnsw::encode_snapshots(snapshots);
-        fs::write(self.hnsw_index_graphs_path(name), bytes)?;
+        write_replacing(&self.hnsw_index_graphs_path(name), &bytes)?;
         let legacy = self.legacy_hnsw_index_graphs_path(name);
         if Path::new(&legacy).exists() {
             fs::remove_file(legacy)?;
@@ -241,9 +241,14 @@ impl ParquetStorage {
     /// Loads previously persisted HNSW graphs. Returns an empty map (not an
     /// error) if none were saved -- including when only a pre-binary
     /// `.json` graph exists: `LOAD DATASET` then rebuilds the index.
+    ///
+    /// With `mmap`, the graph arrays stay in a memory-mapped view of the
+    /// file instead of being copied to the heap (`[storage]
+    /// mmap_index_snapshots`).
     pub fn load_hnsw_index_snapshots(
         &self,
         name: &str,
+        mmap: bool,
     ) -> Result<
         std::collections::HashMap<String, crate::core::index::hnsw::PersistedHnswIndex>,
         StorageError,
@@ -252,10 +257,20 @@ impl ParquetStorage {
         if !Path::new(&path).exists() {
             return Ok(std::collections::HashMap::new());
         }
-        let bytes = fs::read(path)?;
-        crate::core::index::hnsw::decode_snapshots(&bytes).map_err(|e| {
+        let failed = |e: String| {
             StorageError::Serialization(format!("Failed to read HNSW index snapshots: {}", e))
-        })
+        };
+        if mmap {
+            let file = fs::File::open(&path)?;
+            // SAFETY: LINAL never modifies a snapshot file in place
+            // (`write_replacing` swaps in a new file), and the user is told
+            // not to edit it while it's mapped (`mmap_index_snapshots`).
+            let map = unsafe { memmap2::Mmap::map(&file)? };
+            return crate::core::index::hnsw::decode_snapshots_mapped(Arc::new(map))
+                .map_err(failed);
+        }
+        let bytes = fs::read(path)?;
+        crate::core::index::hnsw::decode_snapshots(&bytes).map_err(failed)
     }
 
     /// Persist which columns have indices (and of what type) so `LOAD
@@ -629,6 +644,8 @@ fn encode_logical_value_type(vt: &ValueType) -> Option<String> {
         ValueType::Complex => Some("Complex".to_string()),
         // FixedSizeBinary holds whole bytes; the exact bit count rides along.
         ValueType::BitVector(n) => Some(format!("BitVector:{}", n)),
+        ValueType::SparseVector(n) => Some(format!("SparseVector:{}", n)),
+        ValueType::QVector(d, e) => Some(format!("QVector:{},{}", d, e)),
         _ => None,
     }
 }
@@ -641,6 +658,11 @@ fn decode_logical_value_type(raw: &str) -> Option<ValueType> {
     match kind {
         "Vector" => rest.parse::<usize>().ok().map(ValueType::Vector),
         "BitVector" => rest.parse::<usize>().ok().map(ValueType::BitVector),
+        "SparseVector" => rest.parse::<usize>().ok().map(ValueType::SparseVector),
+        "QVector" => {
+            let (d, e) = rest.split_once(',')?;
+            Some(ValueType::QVector(d.parse().ok()?, e.parse().ok()?))
+        }
         "Matrix" => {
             let (rows, cols) = rest.split_once(',')?;
             Some(ValueType::Matrix(rows.parse().ok()?, cols.parse().ok()?))
@@ -861,6 +883,8 @@ fn arrow_array_to_values(
         // No native Arrow encoding for Complex (unlike Vector/Matrix's
         // FixedSizeList) -- always the legacy JSON-string fallback.
         ValueType::Complex => legacy_json_column_to_values(array, num_rows, "Complex"),
+        ValueType::SparseVector(dim) => sparse_array_to_values(array, *dim, num_rows),
+        ValueType::QVector(d, e) => qvector_array_to_values(array, *d, *e, num_rows),
         ValueType::BitVector(n) => {
             let bytes = array
                 .as_any()
@@ -1238,6 +1262,8 @@ fn dataset_to_record_batch_with_options(
                     Arc::new(array) as ArrayRef,
                 )
             }
+            ValueType::SparseVector(_) => build_sparse_column(&column_data)?,
+            ValueType::QVector(d, e) => build_qvector_column(&column_data, *d, *e)?,
             ValueType::Null => build_legacy_json_column(&column_data),
         };
 
@@ -1248,7 +1274,10 @@ fn dataset_to_record_batch_with_options(
         // stash the real logical type as field metadata so schema.json /
         // the legacy .meta.json sidecar don't report a fallback-encoded
         // Vector/Matrix column as plain "String" (v0.1.73).
-        if matches!(data_type, DataType::Utf8 | DataType::FixedSizeBinary(_)) {
+        if matches!(
+            data_type,
+            DataType::Utf8 | DataType::FixedSizeBinary(_) | DataType::Struct(_)
+        ) {
             if let Some(encoded) = encode_logical_value_type(&field.value_type) {
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert(LOGICAL_VALUE_TYPE_METADATA_KEY.to_string(), encoded);
@@ -1323,6 +1352,242 @@ fn build_vector_column(column_data: &[&Value], declared_dim: usize) -> (DataType
 /// `FixedSizeList<FixedSizeList<Float32>>` column, rows-then-cols nested,
 /// with the same declared-dims-first / infer-from-data / fall-back-to-JSON
 /// strategy.
+/// Writes `bytes` to `path` by writing a sibling temporary file and renaming
+/// it over `path`, so a reader -- in particular a memory-mapped view of the
+/// old file -- never sees a half-written or truncated file.
+fn write_replacing(path: &str, bytes: &[u8]) -> Result<(), StorageError> {
+    let tmp = format!("{}.tmp", path);
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// `Vector(d, F16|I8)` as `Struct{scale: Float32, values:
+/// FixedSizeList<Float16|Int8, d>}` (scale 1 for F16); NULL cells are
+/// struct-level nulls, with zeros underneath.
+fn build_qvector_column(
+    column_data: &[&Value],
+    dim: usize,
+    encoding: crate::core::quant::Quantization,
+) -> Result<(DataType, ArrayRef), StorageError> {
+    use crate::core::quant::{QuantVec, Quantization};
+    let (mut scales, mut valid) = (Vec::new(), Vec::new());
+    let mut f16s: Vec<half::f16> = Vec::new();
+    let mut i8s: Vec<i8> = Vec::new();
+    for v in column_data {
+        match v {
+            Value::QVector(q) if q.len() == dim && q.encoding() == encoding => {
+                match q {
+                    QuantVec::F16(d) => {
+                        f16s.extend(d.iter().map(|b| half::f16::from_bits(*b)));
+                        scales.push(1.0);
+                    }
+                    QuantVec::I8 { scale, data } => {
+                        i8s.extend_from_slice(data);
+                        scales.push(*scale);
+                    }
+                }
+                valid.push(true);
+            }
+            _ => {
+                match encoding {
+                    Quantization::F16 => f16s.extend(std::iter::repeat_n(half::f16::ZERO, dim)),
+                    Quantization::I8 => i8s.extend(std::iter::repeat_n(0i8, dim)),
+                }
+                scales.push(1.0);
+                valid.push(false);
+            }
+        }
+    }
+    let (item_type, values): (DataType, ArrayRef) = match encoding {
+        Quantization::F16 => (
+            DataType::Float16,
+            Arc::new(arrow::array::Float16Array::from(f16s)),
+        ),
+        Quantization::I8 => (DataType::Int8, Arc::new(arrow::array::Int8Array::from(i8s))),
+    };
+    let list = FixedSizeListArray::try_new(
+        Arc::new(ArrowField::new("item", item_type, false)),
+        dim as i32,
+        values,
+        None,
+    )
+    .map_err(StorageError::Arrow)?;
+    let fields = arrow::datatypes::Fields::from(vec![
+        ArrowField::new("scale", DataType::Float32, false),
+        ArrowField::new("values", list.data_type().clone(), false),
+    ]);
+    let array = arrow::array::StructArray::try_new(
+        fields.clone(),
+        vec![Arc::new(Float32Array::from(scales)), Arc::new(list)],
+        Some(arrow::buffer::NullBuffer::from(valid)),
+    )
+    .map_err(StorageError::Arrow)?;
+    Ok((DataType::Struct(fields), Arc::new(array)))
+}
+
+/// Decodes a `Vector(d, F16|I8)` column: the struct `build_qvector_column`
+/// writes, or a plain `FixedSizeList<Float32, d>` (quantized on the way in,
+/// e.g. `load_numpy(..., quantize=...)`).
+fn qvector_array_to_values(
+    array: &ArrayRef,
+    dim: usize,
+    encoding: crate::core::quant::Quantization,
+    num_rows: usize,
+) -> Result<Vec<Value>, StorageError> {
+    use crate::core::quant::{QuantVec, Quantization};
+    let bad = |m: String| {
+        StorageError::Serialization(format!("Vector({}, {}) column: {}", dim, encoding, m))
+    };
+    if let DataType::FixedSizeList(_, _) = array.data_type() {
+        return vector_array_to_values(array, dim, num_rows)?
+            .into_iter()
+            .enumerate()
+            .map(|(r, v)| match v {
+                Value::Vector(x) => QuantVec::quantize(&x, encoding)
+                    .map(Value::QVector)
+                    .map_err(|e| bad(format!("row {}: {}", r, e))),
+                other => Ok(other),
+            })
+            .collect();
+    }
+    let st = array
+        .as_any()
+        .downcast_ref::<arrow::array::StructArray>()
+        .ok_or_else(|| bad("expected a struct of scale and values".into()))?;
+    let scales = st
+        .column_by_name("scale")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+        .ok_or_else(|| bad("missing float32 field 'scale'".into()))?;
+    let list = st
+        .column_by_name("values")
+        .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
+        .ok_or_else(|| bad("missing fixed-size list field 'values'".into()))?;
+    (0..num_rows)
+        .map(|r| {
+            if st.is_null(r) {
+                return Ok(Value::Null);
+            }
+            let cell = list.value(r);
+            if cell.len() != dim {
+                return Err(bad(format!("row {} has {} elements", r, cell.len())));
+            }
+            let q = match encoding {
+                Quantization::F16 => {
+                    let a = cell
+                        .as_any()
+                        .downcast_ref::<arrow::array::Float16Array>()
+                        .ok_or_else(|| bad("values must be float16".into()))?;
+                    QuantVec::F16(a.values().iter().map(|h| h.to_bits()).collect())
+                }
+                Quantization::I8 => {
+                    let a = cell
+                        .as_any()
+                        .downcast_ref::<arrow::array::Int8Array>()
+                        .ok_or_else(|| bad("values must be int8".into()))?;
+                    QuantVec::I8 {
+                        scale: scales.value(r),
+                        data: a.values().to_vec(),
+                    }
+                }
+            };
+            Ok(Value::QVector(q))
+        })
+        .collect()
+}
+
+/// `SparseVector(dim)` as `Struct{indices: List<UInt32>, values:
+/// List<Float32>}` (the dimension travels in the field metadata); NULL
+/// cells are struct-level nulls.
+fn build_sparse_column(column_data: &[&Value]) -> Result<(DataType, ArrayRef), StorageError> {
+    let mut offsets: Vec<i32> = vec![0];
+    let (mut indices, mut values, mut valid) = (Vec::new(), Vec::new(), Vec::new());
+    for v in column_data {
+        match v {
+            Value::SparseVector(s) => {
+                indices.extend_from_slice(s.indices());
+                values.extend_from_slice(s.values());
+                valid.push(true);
+            }
+            _ => valid.push(false),
+        }
+        offsets.push(
+            i32::try_from(indices.len())
+                .map_err(|_| StorageError::Serialization("sparse column too large".into()))?,
+        );
+    }
+    let offsets = arrow::buffer::OffsetBuffer::new(offsets.into());
+    let index_list = arrow::array::ListArray::try_new(
+        Arc::new(ArrowField::new("item", DataType::UInt32, false)),
+        offsets.clone(),
+        Arc::new(arrow::array::UInt32Array::from(indices)),
+        None,
+    )
+    .map_err(StorageError::Arrow)?;
+    let value_list = arrow::array::ListArray::try_new(
+        Arc::new(ArrowField::new("item", DataType::Float32, false)),
+        offsets,
+        Arc::new(Float32Array::from(values)),
+        None,
+    )
+    .map_err(StorageError::Arrow)?;
+    let fields = arrow::datatypes::Fields::from(vec![
+        ArrowField::new("indices", index_list.data_type().clone(), false),
+        ArrowField::new("values", value_list.data_type().clone(), false),
+    ]);
+    let array = arrow::array::StructArray::try_new(
+        fields.clone(),
+        vec![Arc::new(index_list), Arc::new(value_list)],
+        Some(arrow::buffer::NullBuffer::from(valid)),
+    )
+    .map_err(StorageError::Arrow)?;
+    Ok((DataType::Struct(fields), Arc::new(array)))
+}
+
+/// Decodes a `SparseVector(dim)` column: a struct of `indices` (a list of
+/// unsigned or signed integers) and `values` (a list of float32), validated
+/// by `SparseVec::new`.
+fn sparse_array_to_values(
+    array: &ArrayRef,
+    dim: usize,
+    num_rows: usize,
+) -> Result<Vec<Value>, StorageError> {
+    let bad = |m: &str| StorageError::Serialization(format!("SparseVector({}) column: {}", dim, m));
+    let st = array
+        .as_any()
+        .downcast_ref::<arrow::array::StructArray>()
+        .ok_or_else(|| bad("expected a struct of indices and values"))?;
+    let lists = |name: &str| {
+        st.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::ListArray>())
+            .ok_or_else(|| bad(&format!("missing list field '{}'", name)))
+    };
+    let (index_list, value_list) = (lists("indices")?, lists("values")?);
+    (0..num_rows)
+        .map(|r| {
+            if st.is_null(r) {
+                return Ok(Value::Null);
+            }
+            let idx = arrow::compute::cast(&index_list.value(r), &DataType::Int64)
+                .map_err(StorageError::Arrow)?;
+            let idx = idx.as_any().downcast_ref::<Int64Array>().unwrap();
+            let indices = idx
+                .values()
+                .iter()
+                .map(|&i| u32::try_from(i).map_err(|_| bad(&format!("index {} out of range", i))))
+                .collect::<Result<Vec<u32>, _>>()?;
+            let vals = value_list.value(r);
+            let vals = vals
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| bad("values must be float32"))?;
+            crate::core::sparse::SparseVec::new(dim, indices, vals.values().to_vec())
+                .map(Value::SparseVector)
+                .map_err(|e| bad(&format!("row {}: {}", r, e)))
+        })
+        .collect()
+}
+
 /// `Matrix(r, *)` as a native `FixedSizeList<List<Float32>, r>`: r rows of
 /// varying length per cell (e.g. a spectrum's m/z and intensity rows).
 /// `None` when the column has a NULL or a cell with a different row count

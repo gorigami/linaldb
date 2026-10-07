@@ -75,7 +75,7 @@ impl VectorIndex {
         // results are reproducible (matters for LOAD DATASET rebuilding an
         // equivalent clustering from the same rows) without needing an RNG.
         let mut centroids: Vec<Vec<f32>> = (0..num_clusters)
-            .map(|i| store.vector(i * n / num_clusters).to_vec())
+            .map(|i| store.values(i * n / num_clusters).into_owned())
             .collect();
         let mut centroid_norms: Vec<f32> = centroids.iter().map(|c| l2_norm(c)).collect();
 
@@ -90,12 +90,7 @@ impl VectorIndex {
                     let mut best = 0usize;
                     let mut best_sim = f32::MIN;
                     for (c_idx, c) in centroids.iter().enumerate() {
-                        let sim = cosine_with_norms(
-                            store.vector(i),
-                            store.norm(i),
-                            c,
-                            centroid_norms[c_idx],
-                        );
+                        let sim = store.cosine(i, c, centroid_norms[c_idx]);
                         if sim > best_sim {
                             best_sim = sim;
                             best = c_idx;
@@ -111,9 +106,7 @@ impl VectorIndex {
             let mut counts = vec![0usize; num_clusters];
             for (i, &c) in assignment.iter().enumerate() {
                 counts[c] += 1;
-                for (d, val) in store.vector(i).iter().enumerate() {
-                    sums[c][d] += val;
-                }
+                store.add_to(i, &mut sums[c]);
             }
             for c_idx in 0..num_clusters {
                 if counts[c_idx] == 0 {
@@ -144,14 +137,7 @@ impl VectorIndex {
             .map(|((centroid, centroid_norm), members)| {
                 let min_sim = members
                     .iter()
-                    .map(|&idx| {
-                        cosine_with_norms(
-                            store.vector(idx),
-                            store.norm(idx),
-                            &centroid,
-                            centroid_norm,
-                        )
-                    })
+                    .map(|&idx| store.cosine(idx, &centroid, centroid_norm))
                     .fold(f32::MAX, f32::min);
                 Cluster {
                     centroid,

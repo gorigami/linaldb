@@ -80,6 +80,12 @@ pub trait Index: Send + Sync + Debug {
     /// of the indexed vectors it keeps. Used by `SHOW MEMORY`.
     fn memory_bytes(&self) -> usize;
 
+    /// Anything `SHOW MEMORY` should add about where the bytes live (e.g. a
+    /// memory-mapped HNSW graph, which isn't on the heap). None by default.
+    fn memory_detail(&self) -> Option<String> {
+        None
+    }
+
     /// Clone the index box
     fn box_clone(&self) -> Box<dyn Index>;
 

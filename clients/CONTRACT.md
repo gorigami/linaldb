@@ -217,8 +217,8 @@ Mounted per-dataset at `/delivery/datasets/:name/`:
   trust**, not something to infer from the Parquet file's physical type.
   Each column: `{"name": ..., "value_type": "Int"|"Float"|"Float64"|
   "String"|"Bool"|"Complex" | {"Vector": <dim>} | {"Matrix": [<rows>,
-  <cols>]} | {"BitVector": <bits>}, "shape": {"dims": [...]}, "nullable":
-  bool}`. A `Matrix(r, *)` peak-list column has `<cols>` = 0. (Before
+  <cols>]} | {"BitVector": <bits>} | {"SparseVector": <dim>} | {"QVector":
+  [<dim>, "F16"|"I8"]}, "shape": {"dims": [...]}, "nullable": bool}`. A `Matrix(r, *)` peak-list column has `<cols>` = 0. (Before
   v0.1.92 a `Complex` column was wrongly reported as `"String"` here.)
 - `stats.json` — per-column min/max/mean/null_count/sparsity, row count.
 - `data.parquet` — the actual data.
@@ -265,6 +265,14 @@ disagreement, not a bug in either reader in isolation. See the v0.1.72
   field metadata `linal.logical_value_type = "BitVector:N"`. NULLs are
   native Arrow nulls.
 
+### `SparseVector` and quantized vector encoding in `data.parquet` (v0.1.92)
+
+- `SparseVector(dim)`: `Struct{indices: List<UInt32>, values: List<Float32>}`, field metadata
+  `linal.logical_value_type = "SparseVector:<dim>"`. Indices are strictly increasing.
+- `Vector(d, F16)` / `Vector(d, I8)`: `Struct{scale: Float32, values: FixedSizeList<Float16 |
+  Int8, d>}`, metadata `"QVector:<d>,F16"` / `"QVector:<d>,I8"`. A value is `values[i] * scale`
+  for I8; `scale` is 1 for F16.
+
 ### `Complex` column encoding in `data.parquet` (Phase 3)
 
 A `schema.json` column with `value_type: "Complex"` has **no native Arrow
@@ -286,6 +294,8 @@ of:
 | `{"Float": 1.5}` | float (32-bit) |
 | `{"Float64": 1.5}` | float (64-bit / double) |
 | `{"BitVector": "0110..."}` | the bit string (bit `i` = character `i`), v0.1.92+ |
+| `{"SparseVector": {"dim": 5, "indices": [1, 3], "values": [2.0, -1.0]}}` | sparse vector, v0.1.92+ |
+| `{"QVector": {"encoding": "I8", "scale": 0.0236, "values": [...]}}` | quantized vector: `values` are the stored (dequantized) values; `scale` is 1 for F16. v0.1.92+ |
 | `{"Int": 5}` | int |
 | `{"String": "x"}` | string |
 | `{"Bool": true}` | bool |

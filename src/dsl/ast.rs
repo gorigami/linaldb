@@ -742,6 +742,9 @@ pub struct SearchStmt {
     /// batch, `<dataset>.<column>` in the predicate is that query's own
     /// value (e.g. a per-query mass window).
     pub prefilter: Option<Expr>,
+    /// `PREFILTER <predicate> APPROX`: rank the passing rows through the
+    /// column's HNSW graph instead of an exact scan.
+    pub approx: bool,
     /// Optional output dataset name (defaults to `"search_results"`).
     pub target: Option<String>,
 }
@@ -777,6 +780,10 @@ pub enum ColType {
     Complex,
     /// `BitVector(n)` — n bits, e.g. a molecular fingerprint.
     BitVector(usize),
+    /// `SparseVector(dim)` — nonzero entries only.
+    SparseVector(usize),
+    /// `Vector(n, F16)` / `Vector(n, I8)` — quantized storage.
+    QVector(usize, crate::core::quant::Quantization),
 }
 
 /// Tensor kind as expressed in the DSL. Decoupled from `engine::TensorKind`.
@@ -916,6 +923,8 @@ pub enum VectorFnKind {
     /// `SPEC_MATCHES(a, b, tolerance [, shift])` — number of peaks the
     /// greedy (modified, with `shift`) cosine matched. Result: `Int`.
     SpecMatches,
+    /// `SPARSE(dim, [indices], [values])` — builds a `SparseVector`.
+    SparseNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -938,11 +947,16 @@ pub enum CastTarget {
     Bool,
     /// `CAST(expr AS VECTOR(n))` — reshape/flatten to a Vector of length `n`.
     Vector(usize),
+    /// `CAST(expr AS VECTOR(n, F16|I8))` — quantize a length-`n` vector.
+    QVector(usize, crate::core::quant::Quantization),
     /// `CAST(expr AS MATRIX(r, c))` — reshape/flatten to a Matrix of shape `r x c`.
     Matrix(usize, usize),
     /// `CAST(expr AS BITVECTOR[(n)])` — from a `'0'`/`'1'` string or a 0/1
     /// Vector; with `(n)`, only a value of exactly `n` bits converts.
     BitVector(Option<usize>),
+    /// `CAST(expr AS SPARSEVECTOR(n))` — from a Vector of length `n` (its
+    /// nonzero entries) or a SparseVector of dimension `n`.
+    SparseVector(usize),
 }
 
 /// Infix arithmetic operators (symbols: `+`, `-`, `*`, `/`).

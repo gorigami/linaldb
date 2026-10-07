@@ -312,3 +312,61 @@ def test_unsorted_spectrum_is_an_error(db):
     db.load_arrow("s", pa.table({"id": np.array([0, 1]), "spec": peaks}))
     with pytest.raises(LinalError, match="sorted ascending"):
         db.execute("SELECT id, SPEC_COSINE(spec, spec, 0.1) AS c FROM s")
+
+
+# --- SparseVector (CASMI P2) ----------------------------------------------
+
+
+def test_sparse_vectors_load_and_match_dense(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+
+    rng = np.random.default_rng(5)
+    dim = 5000
+    dense = np.zeros((20, dim), dtype=np.float32)
+    rows = []
+    for i in range(20):
+        idx = np.sort(rng.choice(dim, 30, replace=False))
+        vals = rng.standard_normal(30).astype(np.float32)
+        dense[i, idx] = vals
+        rows.append((idx, vals))
+    rows.append(None)
+    arr, meta = linaldb.sparse_array(rows, dim)
+    table = pa.Table.from_arrays(
+        [pa.array(range(21)), arr],
+        schema=pa.schema([pa.field("id", pa.int64()), pa.field("s", arr.type, metadata=meta)]),
+    )
+    db.load_arrow("spectra", table)
+    q = dense[3]
+    qlit = "[" + ", ".join(repr(float(x)) for x in q) + "]"
+    result = db.execute(f"SELECT id, COSINE_SIM(s, {qlit}) AS c, s FROM spectra ORDER BY id")
+    for row_id, c, s in result.rows[:20]:
+        expected = float(dense[row_id] @ q / (np.linalg.norm(dense[row_id]) * np.linalg.norm(q)))
+        assert c == pytest.approx(expected, rel=1e-5)
+        assert s["dim"] == dim and s["indices"] == rows[row_id][0].tolist()
+    assert result.rows[20][2] is None
+
+    with pytest.raises(LinalError, match="increasing"):
+        bad, meta = linaldb.sparse_array([([5, 2], [1.0, 1.0])], 10)
+        db.load_arrow(
+            "bad", pa.Table.from_arrays([bad], schema=pa.schema([pa.field("s", bad.type, metadata=meta)]))
+        )
+    with pytest.raises(LinalError, match="SparseVector:<dim>"):
+        db.load_arrow("nometa", pa.table({"s": linaldb.sparse_array([([1], [1.0])], 10)[0]}))
+
+
+# --- Quantized vectors (CASMI large tier) -----------------------------------
+
+
+@pytest.mark.parametrize("enc,tol", [("F16", 1e-3), ("I8", 1e-2)])
+def test_load_numpy_quantized(db, enc, tol):
+    np = pytest.importorskip("numpy")
+
+    vecs = np.random.default_rng(2).standard_normal((50, 32)).astype(np.float32)
+    db.load_numpy("q", vecs, column="e", columns={"id": np.arange(50)}, quantize=enc)
+    assert db.execute("SELECT * FROM q WHERE id = 0").rows[0][1] is not None
+    got = np.array([r[1] for r in db.execute("SELECT id, e FROM q ORDER BY id").rows], dtype=np.float32)
+    scale = np.abs(vecs).max(axis=1, keepdims=True)
+    assert np.all(np.abs(got - vecs) <= tol * scale + 1e-6)
+    with pytest.raises(LinalError, match="quantize must be"):
+        db.load_numpy("bad", vecs, quantize="F8")

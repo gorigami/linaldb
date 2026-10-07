@@ -679,6 +679,9 @@ fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
         Expr::Column(name) => {
             matches!(row.get(name), Some(crate::core::value::Value::Bool(true)))
         }
+        // `WHERE true` / `PREFILTER true`. Fell through to "never matches"
+        // before, so a literal `true` predicate selected nothing.
+        Expr::Literal(crate::core::value::Value::Bool(b)) => *b,
         Expr::And(left, right) => evaluate_expr(left, row) && evaluate_expr(right, row),
         Expr::Or(left, right) => evaluate_expr(left, row) || evaluate_expr(right, row),
         Expr::Not(inner) => !evaluate_expr(inner, row),

@@ -43,6 +43,18 @@ impl Writer {
             self.u32(*x);
         }
     }
+    /// Like `u32s`, but the values start at a 4-byte-aligned file offset
+    /// (zero padding after the length), so a memory-mapped file can be read
+    /// in place as `&[u32]`.
+    pub fn u32s_aligned(&mut self, v: &[u32]) {
+        self.u64(v.len() as u64);
+        while !self.buf.len().is_multiple_of(4) {
+            self.buf.push(0);
+        }
+        for x in v {
+            self.u32(*x);
+        }
+    }
     pub fn into_bytes(self) -> Vec<u8> {
         self.buf
     }
@@ -102,6 +114,27 @@ impl<'a> Reader<'a> {
     pub fn u32s(&mut self) -> Result<Vec<u32>, String> {
         let n = self.len(4)?;
         (0..n).map(|_| self.u32()).collect()
+    }
+    /// The `(byte offset, count)` of a `Writer::u32s_aligned` array, skipping
+    /// over it.
+    pub fn u32s_aligned_range(&mut self) -> Result<(usize, usize), String> {
+        let n = self.u64()? as usize;
+        while !self.pos.is_multiple_of(4) {
+            self.take(1)?;
+        }
+        let start = self.pos;
+        self.take(n.checked_mul(4).ok_or("truncated index snapshot")?)?;
+        Ok((start, n))
+    }
+    /// A `Writer::u32s_aligned` array, copied out.
+    pub fn u32s_aligned(&mut self) -> Result<Vec<u32>, String> {
+        let (start, n) = self.u32s_aligned_range()?;
+        Ok(self.buf[start..start + 4 * n]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect())
     }
     pub fn finish(&self) -> Result<(), String> {
         if self.pos != self.buf.len() {

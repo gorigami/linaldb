@@ -438,11 +438,15 @@ fn show_memory(
         cols.sort();
         for col in cols {
             let idx = &ds.indices[col];
+            let detail = match idx.memory_detail() {
+                Some(extra) => format!("{:?} ({})", idx.index_type(), extra),
+                None => format!("{:?}", idx.index_type()),
+            };
             push(
                 "index",
                 name,
                 col,
-                format!("{:?}", idx.index_type()),
+                detail,
                 ds.rows.len(),
                 idx.memory_bytes(),
             )

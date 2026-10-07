@@ -69,6 +69,14 @@ db.load_numpy("cands", np.zeros((n, 1), np.float32), column="unused",
 db.load_arrow("library", pa.table({"id": ids, "pm": precursor_mz,
                                    "spec": linaldb.peaks_array(spectra)}))  # [(mz, int), ...]
 db.query('SELECT id, SPEC_COSINE(spec, spec, 0.01) AS s FROM library')
+```
+
+Large libraries:
+
+```python
+db.load_numpy("lib", vectors, column="e", quantize="F16")      # Vector(d, F16): half the memory
+arr, meta = linaldb.sparse_array([(idx, vals), ...], 100_000)    # SparseVector(100000)
+db.load_arrow("binned", pa.Table.from_arrays([arr], schema=pa.schema([pa.field("s", arr.type, metadata=meta)])))
 ``` See [`../EMBEDDED_CONTRACT.md`](../EMBEDDED_CONTRACT.md) §1b.
 
 See

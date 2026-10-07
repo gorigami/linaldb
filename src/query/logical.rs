@@ -92,6 +92,7 @@ pub enum VectorFnKind {
     SpecCosine,
     SpecCosineMod,
     SpecMatches,
+    SparseNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,8 +113,10 @@ pub enum CastTarget {
     Text,
     Bool,
     Vector(usize),
+    QVector(usize, crate::core::quant::Quantization),
     Matrix(usize, usize),
     BitVector(Option<usize>),
+    SparseVector(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,6 +439,9 @@ pub struct Prefilter {
     /// A conjunct the SORTED index on `column` can answer, with bounds that
     /// depend only on the query: `(column, [(op, bound expression)])`.
     pub sorted_range: Option<(String, Vec<(String, Expr)>)>,
+    /// `APPROX`: rank the passing rows through the HNSW graph
+    /// (`HnswIndex::search_filtered`) instead of an exact scan.
+    pub approximate: bool,
 }
 
 // Leaves out the per-query values and the combined schema, which can be
@@ -445,6 +451,7 @@ impl std::fmt::Debug for Prefilter {
         f.debug_struct("Prefilter")
             .field("predicate", &self.predicate)
             .field("sorted_range", &self.sorted_range)
+            .field("approximate", &self.approximate)
             .finish()
     }
 }
@@ -453,10 +460,13 @@ impl std::fmt::Debug for Prefilter {
 pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::ValueType {
     use crate::core::value::ValueType;
     match expr {
-        Expr::Column(name) => schema
-            .get_field(name)
-            .map(|f| f.value_type.clone())
-            .unwrap_or(ValueType::Null),
+        // A quantized column reads as a plain vector in expressions (see
+        // `physical::evaluate_expression`'s Column arm).
+        Expr::Column(name) => match schema.get_field(name).map(|f| f.value_type.clone()) {
+            Some(ValueType::QVector(d, _)) => ValueType::Vector(d),
+            Some(t) => t,
+            None => ValueType::Null,
+        },
         Expr::Literal(val) => val.value_type(),
         Expr::BinaryExpr { left, right, .. } => {
             let l = infer_expr_type_full(left, schema);
@@ -512,7 +522,17 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             let c = rows.first().map_or(0, |row| row.len());
             ValueType::Matrix(r, c)
         }
-        Expr::VectorFn { func, .. } => match func {
+        Expr::VectorFn { func, args } => match func {
+            VectorFnKind::Normalize | VectorFnKind::VecScale
+                if matches!(
+                    args.first().map(|a| infer_expr_type_full(a, schema)),
+                    Some(ValueType::SparseVector(_))
+                ) =>
+            {
+                args.first()
+                    .map(|a| infer_expr_type_full(a, schema))
+                    .unwrap()
+            }
             VectorFnKind::Normalize
             | VectorFnKind::VecAdd
             | VectorFnKind::VecScale
@@ -532,6 +552,12 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
             VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
             VectorFnKind::SpecMatches => ValueType::Int,
+            VectorFnKind::SparseNew => match args.first() {
+                Some(Expr::Literal(Value::Int(d))) if *d > 0 => {
+                    ValueType::SparseVector(*d as usize)
+                }
+                _ => ValueType::SparseVector(0),
+            },
         },
         Expr::Case {
             else_expr,
@@ -561,8 +587,10 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             CastTarget::Double => ValueType::Float64,
             CastTarget::Text | CastTarget::Bool => ValueType::String,
             CastTarget::Vector(n) => ValueType::Vector(*n),
+            CastTarget::QVector(n, e) => ValueType::QVector(*n, *e),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
             CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
+            CastTarget::SparseVector(n) => ValueType::SparseVector(*n),
         },
     }
 }

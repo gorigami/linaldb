@@ -97,3 +97,34 @@ fn arithmetic_operands_in_where() {
     execute_line(&mut db, "DELETE FROM t WHERE mass - 100.0 < 1", 1).unwrap();
     assert_eq!(ids(&mut db, "SELECT id FROM t ORDER BY id"), vec![2, 3]);
 }
+
+/// A literal boolean predicate. `WHERE true` (and `PREFILTER true`) used to
+/// match no rows: the predicate evaluator had no case for a literal.
+#[test]
+fn literal_boolean_predicates() {
+    let (_dir, mut db) = db();
+    execute_line(&mut db, "DATASET t COLUMNS (id: Int)", 1).unwrap();
+    execute_line(&mut db, "INSERT INTO t VALUES (1)", 1).unwrap();
+    execute_line(&mut db, "INSERT INTO t VALUES (2)", 1).unwrap();
+    assert_eq!(
+        ids(&mut db, "SELECT id FROM t WHERE true ORDER BY id"),
+        vec![1, 2]
+    );
+    assert_eq!(
+        ids(&mut db, "SELECT id FROM t WHERE false"),
+        Vec::<i64>::new()
+    );
+    assert_eq!(
+        ids(&mut db, "SELECT id FROM t WHERE true AND id > 1"),
+        vec![2]
+    );
+    execute_line(&mut db, "DATASET v COLUMNS (id: Int, e: Vector(2))", 1).unwrap();
+    execute_line(&mut db, "INSERT INTO v VALUES (7, [1.0, 0.0])", 1).unwrap();
+    assert_eq!(
+        ids(
+            &mut db,
+            "SEARCH v ON e QUERY [1.0, 0.0] PREFILTER true LIMIT 1"
+        ),
+        vec![7]
+    );
+}

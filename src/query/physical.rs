@@ -294,6 +294,7 @@ pub struct BatchVectorSearchExec {
 impl std::fmt::Debug for BatchVectorSearchExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let prefilter = self.prefilter.as_ref().map(|p| match &p.sorted_range {
+            _ if p.approximate => "HNSW graph over rows passing PREFILTER (APPROX)".to_string(),
             Some((column, _)) => format!(
                 "exact over rows passing PREFILTER, narrowed by SORTED index on {}",
                 column
@@ -380,6 +381,21 @@ impl BatchVectorSearchExec {
             .map(|i| copy_all || referenced.contains(&dataset.schema.fields[i].name))
             .collect();
         let has_lazy = !dataset.lazy_expressions.is_empty();
+        let hnsw = if pf.approximate {
+            Some(
+                dataset
+                    .get_index(&self.column)
+                    .and_then(|i| i.as_any().downcast_ref::<crate::core::index::hnsw::HnswIndex>())
+                    .ok_or_else(|| {
+                        EngineError::InvalidOp(format!(
+                            "PREFILTER ... APPROX needs an HNSW index on '{}': CREATE VECTOR INDEX ON {}({}) USING HNSW",
+                            self.column, self.dataset_name, self.column
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
 
         self.queries
             .0
@@ -411,6 +427,7 @@ impl BatchVectorSearchExec {
 
                 let query_norm = l2_norm(query);
                 let mut scored = Vec::new();
+                let mut passing: Vec<usize> = Vec::new();
                 for id in candidates {
                     let stored = &dataset.rows[id];
                     let evaluated;
@@ -434,6 +451,10 @@ impl BatchVectorSearchExec {
                     if !passes {
                         continue;
                     }
+                    if hnsw.is_some() {
+                        passing.push(id);
+                        continue;
+                    }
                     match &row.values[col_idx] {
                         Value::Vector(v) => {
                             if v.len() != query.len() {
@@ -446,6 +467,36 @@ impl BatchVectorSearchExec {
                             }
                             scored.push((id, cosine_with_norms(query, query_norm, v, l2_norm(v))));
                         }
+                        Value::QVector(qv) => {
+                            let v = qv.dequantize();
+                            if v.len() != query.len() {
+                                return Err(format!(
+                                    "SEARCH: row {} has a {}-dimensional vector, the query has {}",
+                                    id,
+                                    v.len(),
+                                    query.len()
+                                ));
+                            }
+                            scored.push((id, cosine_with_norms(query, query_norm, &v, l2_norm(&v))));
+                        }
+                        Value::SparseVector(sv) => {
+                            if sv.dim() != query.len() {
+                                return Err(format!(
+                                    "SEARCH: row {} has a {}-dimensional sparse vector, the query has {}",
+                                    id,
+                                    sv.dim(),
+                                    query.len()
+                                ));
+                            }
+                            let dot = sv.dot_dense(query);
+                            let norm = sv.l2_norm();
+                            let score = if norm == 0.0 || query_norm == 0.0 {
+                                0.0
+                            } else {
+                                dot / (query_norm * norm)
+                            };
+                            scored.push((id, score));
+                        }
                         Value::Null => {}
                         other => {
                             return Err(format!(
@@ -456,6 +507,14 @@ impl BatchVectorSearchExec {
                             ))
                         }
                     }
+                }
+                if let Some(index) = hnsw {
+                    let mut allowed = vec![false; dataset.rows.len()];
+                    for &id in &passing {
+                        allowed[id] = true;
+                    }
+                    let allowed_fn = |row_id: usize| allowed.get(row_id).copied().unwrap_or(false);
+                    return index.search_filtered(query, self.k, &allowed_fn, passing.len());
                 }
                 scored.sort_by(|a, b| {
                     b.1.partial_cmp(&a.1)
@@ -468,6 +527,72 @@ impl BatchVectorSearchExec {
             .collect::<Result<_, String>>()
             .map_err(EngineError::InvalidOp)
     }
+}
+
+/// `(dot, ‖a‖, ‖b‖)` when at least one of `a`, `b` is a `SparseVector`
+/// and the other a `SparseVector` or `Vector` of the same dimension; `None`
+/// otherwise. A dimension mismatch is recorded in `row_error` (the plan-time
+/// check catches it first whenever both dimensions are declared).
+fn sparse_dot(
+    a: &crate::core::value::Value,
+    b: &crate::core::value::Value,
+    name: &str,
+) -> Option<(f32, f32, f32)> {
+    use crate::core::value::Value;
+    let dense_norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let (dim_a, dim_b) = match (a, b) {
+        (Value::SparseVector(x), Value::SparseVector(y)) => (x.dim(), y.dim()),
+        (Value::SparseVector(x), Value::Vector(y)) => (x.dim(), y.len()),
+        (Value::Vector(x), Value::SparseVector(y)) => (x.len(), y.dim()),
+        _ => return None,
+    };
+    if dim_a != dim_b {
+        crate::query::row_error::record(format!(
+            "{}: dimensions differ ({} vs {})",
+            name, dim_a, dim_b
+        ));
+        return None;
+    }
+    Some(match (a, b) {
+        (Value::SparseVector(x), Value::SparseVector(y)) => (x.dot(y), x.l2_norm(), y.l2_norm()),
+        (Value::SparseVector(x), Value::Vector(y)) => (x.dot_dense(y), x.l2_norm(), dense_norm(y)),
+        (Value::Vector(x), Value::SparseVector(y)) => (y.dot_dense(x), dense_norm(x), y.l2_norm()),
+        _ => unreachable!(),
+    })
+}
+
+/// `SPARSE(dim, [indices], [values])`. Bad input (non-integral or
+/// out-of-range indices, unsorted or duplicate indices, non-finite values,
+/// mismatched lengths) is recorded in `row_error`.
+fn sparse_new(vals: &[crate::core::value::Value]) -> crate::core::value::Value {
+    use crate::core::value::Value;
+    if vals.iter().any(|v| v.is_null()) {
+        return Value::Null;
+    }
+    let result = (|| -> Result<Value, String> {
+        let dim = match vals.first() {
+            Some(Value::Int(d)) if *d > 0 => *d as usize,
+            _ => return Err("the first argument (dimension) must be a positive integer".into()),
+        };
+        let (Some(Value::Vector(idx)), Some(Value::Vector(v))) = (vals.get(1), vals.get(2)) else {
+            return Err("expects SPARSE(dim, [indices], [values])".into());
+        };
+        let indices = idx
+            .iter()
+            .map(|x| {
+                if x.fract() == 0.0 && *x >= 0.0 && *x <= u32::MAX as f32 {
+                    Ok(*x as u32)
+                } else {
+                    Err(format!("index {} is not a non-negative integer", x))
+                }
+            })
+            .collect::<Result<Vec<u32>, String>>()?;
+        crate::core::sparse::SparseVec::new(dim, indices, v.clone()).map(Value::SparseVector)
+    })();
+    result.unwrap_or_else(|e| {
+        crate::query::row_error::record(format!("SPARSE: {}", e));
+        Value::Null
+    })
 }
 
 /// `SPEC_COSINE` / `SPEC_COSINE_MOD` / `SPEC_MATCHES` (`core::spectral`).
@@ -1507,7 +1632,13 @@ pub fn evaluate_expression(
 ) -> crate::core::value::Value {
     use crate::core::value::Value;
     match expr {
-        crate::query::logical::Expr::Column(name) => row.get(name).cloned().unwrap_or(Value::Null),
+        // The one place a quantized column is turned back into f32 for
+        // expressions; projections of the bare column keep the stored value.
+        crate::query::logical::Expr::Column(name) => match row.get(name) {
+            Some(Value::QVector(q)) => Value::Vector(q.dequantize()),
+            Some(v) => v.clone(),
+            None => Value::Null,
+        },
         crate::query::logical::Expr::Literal(val) => val.clone(),
         crate::query::logical::Expr::And(l, r) => {
             match (evaluate_expression(l, row), evaluate_expression(r, row)) {
@@ -1851,6 +1982,7 @@ pub fn evaluate_expression(
                     Value::Float64(f) => f.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::BitVector(b) => b.to_bit_string(),
+                    Value::SparseVector(s) => s.to_string(),
                     _ => return Value::Null,
                 }),
                 CastTarget::Bool => match val {
@@ -1864,6 +1996,7 @@ pub fn evaluate_expression(
                 // it only reinterprets the same data under a new shape.
                 CastTarget::Vector(n) => match val {
                     Value::Vector(v) if v.len() == *n => Value::Vector(v),
+                    Value::SparseVector(s) if s.dim() == *n => Value::Vector(s.to_dense()),
                     Value::BitVector(b) if b.len() == *n => Value::Vector(b.to_floats()),
                     Value::Matrix(m) => {
                         let flat: Vec<f32> = m.into_iter().flatten().collect();
@@ -1883,6 +2016,29 @@ pub fn evaluate_expression(
                         let rows: Vec<Vec<f32>> =
                             v.chunks(*c).map(|chunk| chunk.to_vec()).collect();
                         Value::Matrix(rows)
+                    }
+                    _ => Value::Null,
+                },
+                CastTarget::QVector(n, e) => match val {
+                    Value::Vector(v) if v.len() == *n => {
+                        match crate::core::quant::QuantVec::quantize(&v, *e) {
+                            Ok(q) => Value::QVector(q),
+                            Err(err) => {
+                                crate::query::row_error::record(format!(
+                                    "CAST AS VECTOR({}, {}): {}",
+                                    n, e, err
+                                ));
+                                Value::Null
+                            }
+                        }
+                    }
+                    Value::QVector(q) if q.len() == *n && q.encoding() == *e => Value::QVector(q),
+                    _ => Value::Null,
+                },
+                CastTarget::SparseVector(n) => match val {
+                    Value::SparseVector(s) if s.dim() == *n => Value::SparseVector(s),
+                    Value::Vector(v) if v.len() == *n && v.iter().all(|x| x.is_finite()) => {
+                        Value::SparseVector(crate::core::sparse::SparseVec::from_dense(&v))
                     }
                     _ => Value::Null,
                 },
@@ -1915,6 +2071,14 @@ pub fn evaluate_expression(
             let vals: Vec<Value> = args.iter().map(|a| evaluate_expression(a, row)).collect();
             match func {
                 VectorFnKind::Normalize => match vals.first() {
+                    Some(Value::SparseVector(s)) => {
+                        let norm = s.l2_norm();
+                        if norm == 0.0 {
+                            Value::SparseVector(s.clone())
+                        } else {
+                            Value::SparseVector(s.divide(norm))
+                        }
+                    }
                     Some(Value::Vector(v)) => {
                         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
                         if norm == 0.0 {
@@ -1926,6 +2090,7 @@ pub fn evaluate_expression(
                     _ => Value::Null,
                 },
                 VectorFnKind::L2Norm => match vals.first() {
+                    Some(Value::SparseVector(s)) => Value::Float(s.l2_norm()),
                     Some(Value::Vector(v)) => {
                         Value::Float(v.iter().map(|x| x * x).sum::<f32>().sqrt())
                     }
@@ -1935,12 +2100,24 @@ pub fn evaluate_expression(
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
                         Value::Float(cosine_sim(a, b))
                     }
+                    (Some(a), Some(b)) => match sparse_dot(a, b, "COSINE_SIM") {
+                        Some((dot, na, nb)) => Value::Float(if na == 0.0 || nb == 0.0 {
+                            0.0
+                        } else {
+                            dot / (na * nb)
+                        }),
+                        None => Value::Null,
+                    },
                     _ => Value::Null,
                 },
                 VectorFnKind::Dot => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
                         Value::Float(a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>())
                     }
+                    (Some(a), Some(b)) => match sparse_dot(a, b, "DOT") {
+                        Some((dot, _, _)) => Value::Float(dot),
+                        None => Value::Null,
+                    },
                     _ => Value::Null,
                 },
                 // A length mismatch between two typed BitVector columns is
@@ -1969,6 +2146,7 @@ pub fn evaluate_expression(
                 VectorFnKind::SpecCosine
                 | VectorFnKind::SpecCosineMod
                 | VectorFnKind::SpecMatches => spectral_fn(*func, &vals),
+                VectorFnKind::SparseNew => sparse_new(&vals),
                 VectorFnKind::Distance => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => Value::Float(
                         a.iter()
@@ -1986,6 +2164,11 @@ pub fn evaluate_expression(
                     _ => Value::Null,
                 },
                 VectorFnKind::VecScale => match (vals.first(), vals.get(1)) {
+                    (Some(Value::SparseVector(s)), Some(factor_val)) => match factor_val {
+                        Value::Float(f) => Value::SparseVector(s.scale(*f)),
+                        Value::Int(i) => Value::SparseVector(s.scale(*i as f32)),
+                        _ => Value::Null,
+                    },
                     (Some(Value::Vector(v)), Some(factor_val)) => {
                         let factor = match factor_val {
                             Value::Float(f) => *f,

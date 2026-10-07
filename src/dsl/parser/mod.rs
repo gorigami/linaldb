@@ -958,14 +958,29 @@ impl Parser {
         self.eat_usize()
     }
 
+    /// `(n)` or `(n, F16|I8)` after VECTOR in a column type.
+    fn parse_vector_col_type(&mut self) -> Result<ColType, ParseError> {
+        self.eat(&Token::LParen)?;
+        let n = self.eat_usize()?;
+        let col = if self.at(&Token::Comma) {
+            self.advance();
+            let enc = self.eat_ident()?;
+            let enc = enc
+                .parse::<crate::core::quant::Quantization>()
+                .map_err(|e| self.error(e))?;
+            ColType::QVector(n, enc)
+        } else {
+            ColType::Vector(n)
+        };
+        self.eat(&Token::RParen)?;
+        Ok(col)
+    }
+
     fn parse_col_type(&mut self) -> Result<ColType, ParseError> {
         match self.peek() {
             Some(Token::Vector) => {
                 self.advance();
-                self.eat(&Token::LParen)?;
-                let n = self.eat_usize()?;
-                self.eat(&Token::RParen)?;
-                Ok(ColType::Vector(n))
+                self.parse_vector_col_type()
             }
             Some(Token::Matrix) => {
                 self.advance();
@@ -1003,6 +1018,15 @@ impl Parser {
                     "STRING" | "TEXT" | "VARCHAR" => Ok(ColType::String),
                     "BOOL" | "BOOLEAN" => Ok(ColType::Bool),
                     "COMPLEX" => Ok(ColType::Complex),
+                    "SPARSEVECTOR" => {
+                        self.eat(&Token::LParen)?;
+                        let n = self.eat_usize()?;
+                        self.eat(&Token::RParen)?;
+                        if n == 0 {
+                            return Err(self.error("SPARSEVECTOR needs a dimension of at least 1"));
+                        }
+                        Ok(ColType::SparseVector(n))
+                    }
                     "BITVECTOR" => {
                         self.eat(&Token::LParen)?;
                         let n = self.eat_usize()?;
@@ -1012,12 +1036,7 @@ impl Parser {
                         }
                         Ok(ColType::BitVector(n))
                     }
-                    "VECTOR" => {
-                        self.eat(&Token::LParen)?;
-                        let n = self.eat_usize()?;
-                        self.eat(&Token::RParen)?;
-                        Ok(ColType::Vector(n))
-                    }
+                    "VECTOR" => self.parse_vector_col_type(),
                     "MATRIX" => {
                         self.eat(&Token::LParen)?;
                         let rows = self.eat_usize()?;
