@@ -35,6 +35,9 @@ pub enum Value {
     /// `Matrix(2, N)` (re/im row) convention, unchanged -- see
     /// SCIENTIFIC_ENGINE_EXPANSION_PLAN.md Phase 3.
     Complex(Complex64),
+    /// Fixed-length bit vector (`BitVector(N)` column), e.g. a molecular
+    /// fingerprint -- see `core::bitvec`.
+    BitVector(crate::core::bitvec::BitVec),
     Null,
 }
 
@@ -73,6 +76,7 @@ impl PartialEq for Value {
             (Value::Complex(a), Value::Complex(b)) => {
                 a.re.to_bits() == b.re.to_bits() && a.im.to_bits() == b.im.to_bits()
             }
+            (Value::BitVector(a), Value::BitVector(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -111,6 +115,7 @@ impl std::hash::Hash for Value {
                 v.re.to_bits().hash(state);
                 v.im.to_bits().hash(state);
             }
+            Value::BitVector(b) => b.hash(state),
             Value::Null => {}
         }
     }
@@ -127,6 +132,8 @@ pub enum ValueType {
     Vector(usize),        // Vector with fixed dimension
     Matrix(usize, usize), // Matrix (rows, cols)
     Complex,
+    /// `BitVector(N)`: N bits.
+    BitVector(usize),
     Null,
 }
 
@@ -148,6 +155,7 @@ impl Value {
                 }
             }
             Value::Complex(_) => ValueType::Complex,
+            Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::Null => ValueType::Null,
         }
     }
@@ -257,6 +265,9 @@ impl Value {
     /// unchanged -- only `Complex` gets a real-`PartialEq`-based answer
     /// instead of `None`.
     pub fn equals(&self, other: &Value) -> Option<bool> {
+        if let (Value::BitVector(a), Value::BitVector(b)) = (self, other) {
+            return Some(a == b);
+        }
         if matches!(self, Value::Complex(_)) || matches!(other, Value::Complex(_)) {
             return match (self.as_complex(), other.as_complex()) {
                 (Some(a), Some(b)) => Some(a == b),
@@ -308,9 +319,13 @@ impl Value {
             (Value::Bool(_), ValueType::Bool) => true,
             (Value::Vector(v), ValueType::Vector(dim)) => v.len() == *dim,
             (Value::Matrix(m), ValueType::Matrix(r, c)) => {
-                m.len() == *r && (m.is_empty() || m[0].len() == *c)
+                m.len() == *r
+                    && (m.is_empty()
+                        || (*c == 0 && m.iter().all(|row| row.len() == m[0].len()))
+                        || m[0].len() == *c)
             }
             (Value::Complex(_), ValueType::Complex) => true,
+            (Value::BitVector(b), ValueType::BitVector(n)) => b.len() == *n,
             (Value::Null, _) => true, // Null matches any type if nullable
             _ => false,
         }
@@ -381,6 +396,7 @@ impl fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Complex(v) => write!(f, "{}", format_complex(*v)),
+            Value::BitVector(b) => write!(f, "{}", b),
             Value::Null => write!(f, "NULL"),
         }
     }
@@ -409,6 +425,7 @@ impl fmt::Display for ValueType {
             ValueType::Vector(dim) => write!(f, "VECTOR[{}]", dim),
             ValueType::Matrix(r, c) => write!(f, "MATRIX[{}, {}]", r, c),
             ValueType::Complex => write!(f, "COMPLEX"),
+            ValueType::BitVector(n) => write!(f, "BITVECTOR[{}]", n),
             ValueType::Null => write!(f, "NULL"),
         }
     }

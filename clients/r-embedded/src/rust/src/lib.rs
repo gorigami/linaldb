@@ -38,6 +38,8 @@ fn value_to_robj(value: &Value) -> Robj {
         // uses, so this is a lossless, zero-conversion wrap into R's
         // native `complex` scalar type.
         Value::Complex(c) => Robj::from(extendr_api::scalar::Rcplx::new(c.re, c.im)),
+        // The bit string, e.g. "0110...".
+        Value::BitVector(b) => Robj::from(b.to_bit_string()),
         Value::Null => Robj::from(f64::na()),
     }
 }

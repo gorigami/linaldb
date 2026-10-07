@@ -38,7 +38,50 @@ __all__ = [
     "ExecuteResult",
     "TensorResult",
     "LinalError",
+    "bitvector_array",
+    "peaks_array",
 ]
+
+
+def bitvector_array(bits):
+    """A `pyarrow.FixedSizeBinaryArray` of packed bit vectors from a 2-D
+    boolean (or 0/1) NumPy array of shape `(n, nbits)`, in the layout a
+    `BitVector(nbits)` column loads from (`numpy.packbits`, MSB first). Give
+    the field `{"linal.logical_value_type": f"BitVector:{nbits}"}` metadata
+    when `nbits` isn't a multiple of 8, so the exact length survives.
+    """
+    import numpy as np
+    import pyarrow as pa
+
+    bits = np.asarray(bits)
+    packed = np.packbits(bits.astype(bool), axis=1)
+    width = packed.shape[1]
+    return pa.FixedSizeBinaryArray.from_buffers(
+        pa.binary(width), len(packed), [None, pa.py_buffer(packed.tobytes())]
+    )
+
+
+def peaks_array(spectra):
+    """A `pyarrow` array for a `Matrix(2, *)` peak-list column (one spectrum
+    per row: row 0 the m/z values, ascending; row 1 the intensities), from
+    a list of `(mz, intensities)` pairs of equal-length 1-D arrays. Values
+    are stored as float32. Pass it to `Db.load_arrow()` in a table.
+    """
+    import numpy as np
+    import pyarrow as pa
+
+    rows = []
+    for i, (mz, intensities) in enumerate(spectra):
+        mz = np.asarray(mz, dtype=np.float32)
+        intensities = np.asarray(intensities, dtype=np.float32)
+        if mz.ndim != 1 or mz.shape != intensities.shape:
+            raise LinalError(
+                f"peaks_array: spectrum {i} needs two 1-D arrays of the same length, "
+                f"got {mz.shape} and {intensities.shape}"
+            )
+        rows.extend([mz, intensities])
+    lists = pa.array(rows, type=pa.list_(pa.field("item", pa.float32(), nullable=False)))
+    return pa.FixedSizeListArray.from_arrays(lists, 2)
 
 
 class ExecuteResult:
@@ -227,6 +270,7 @@ class Db:
         *,
         column: str = "embedding",
         columns: dict | None = None,
+        bit_columns: dict | None = None,
         origin: str = "numpy",
     ) -> int:
         """Create dataset `name` from a 2-D `float32` NumPy array of shape
@@ -235,8 +279,10 @@ class Db:
         `n`, placed before the vector column, in dict order). Values are
         loaded bit-exact; a `float64` array is rejected rather than rounded
         silently -- cast it with `.astype(numpy.float32)` first.
-        Returns the number of rows loaded. See `load_arrow()` for the type
-        mapping and errors.
+        `bit_columns` adds `BitVector` columns (e.g. fingerprints): a dict of
+        name -> 2-D boolean (or 0/1) array of shape `(n, nbits)`; bit `j` of
+        row `i` is `array[i, j]`. Returns the number of rows loaded. See
+        `load_arrow()` for the type mapping and errors.
         """
         import numpy as np
         import pyarrow as pa
@@ -265,13 +311,32 @@ class Db:
                 )
             names.append(col_name)
             arrays.append(pa.array(values))
+        for col_name, bits in (bit_columns or {}).items():
+            bits = np.asarray(bits)
+            if bits.ndim != 2 or bits.shape[0] != n:
+                raise LinalError(
+                    f"load_numpy: bit column '{col_name}' has shape {bits.shape}, "
+                    f"expected ({n}, nbits)"
+                )
+            if not np.isin(bits, (0, 1)).all():
+                raise LinalError(f"load_numpy: bit column '{col_name}' may only hold 0/1 or booleans")
+            names.append(col_name)
+            arrays.append(bitvector_array(bits))
         if column in names:
             raise LinalError(
                 f"load_numpy: column '{column}' is both the vector column and a scalar column"
             )
         names.append(column)
         arrays.append(pa.FixedSizeListArray.from_arrays(flat, d))
-        return self.load_arrow(name, pa.table(arrays, names=names), origin=origin)
+        fields = []
+        for col_name, arr in zip(names, arrays):
+            field = pa.field(col_name, arr.type)
+            if col_name in (bit_columns or {}):
+                nbits = np.asarray(bit_columns[col_name]).shape[1]
+                field = field.with_metadata({"linal.logical_value_type": f"BitVector:{nbits}"})
+            fields.append(field)
+        table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+        return self.load_arrow(name, table, origin=origin)
 
     def dataset(self, name: str) -> Dataset:
         """A handle to a saved dataset's on-disk package —

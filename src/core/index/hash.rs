@@ -36,6 +36,7 @@ impl HashIndex {
             Value::Vector(v) => format!("{:?}", v),
             Value::Matrix(m) => format!("{:?}", m),
             Value::Complex(c) => format!("{:?}", c),
+            Value::BitVector(b) => format!("bits:{}", b),
             Value::Null => "NULL".to_string(),
         }
     }
@@ -51,6 +52,10 @@ impl Index for HashIndex {
     fn lookup(&self, value: &Value) -> Result<Vec<usize>, String> {
         let key = Self::get_key(value);
         Ok(self.map.get(&key).cloned().unwrap_or_default())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn memory_bytes(&self) -> usize {

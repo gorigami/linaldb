@@ -18,7 +18,10 @@ LINAL supports both standard relational types and multi-dimensional numeric stru
 - `String`: UTF-8 character sequence.
 - `Bool`: `true` or `false`.
 - `Complex`: Scalar complex number (`f64` real + imaginary parts, wrapping `num_complex::Complex64`). No dedicated literal syntax — construct one with `COMPLEX(re, im)` (§3). Fully usable as a column type, `SELECT`/`WHERE` expression, and `SUM`/`AVG` aggregate (both well-defined for complex numbers), but **has no ordering**: `MIN`/`MAX`, `ORDER BY`, and `<`/`>`/`<=`/`>=` all error loudly on a `Complex` operand rather than guessing one (`=`/`!=` work — equality is well-defined even without an order). Scalar-only — there is no `Vector`/`Matrix` of `Complex` (a genuine `Tensor<Complex>` type is a separate, larger initiative); a *collection* of complex numbers (e.g. `EIGENVALUES_GENERAL`'s output) is instead a `Matrix(2, N)` with real parts in row 0 and imaginary parts in row 1, the same convention `FFT` already uses for its spectrum.
+- `BitVector(N)`: `N` bits (`N >= 1`), e.g. a molecular fingerprint: 32x smaller than the same bits as a `Vector(N)` of floats. Insert a bit string (`"0101..."`, bit `i` = character `i`, the layout of RDKit's `ToBitString`) or a vector literal of 0s and 1s; anything else, or the wrong number of bits, is an error. Compared with `TANIMOTO`/`JACCARD`/`HAMMING`/`BIT_COUNT` (§4); `=`/`!=` work, but there is no ordering. Stored in Parquet as `FixedSizeBinary` (MSB-first packed bytes, the `numpy.packbits` layout) with the exact bit count in field metadata; returned to Python/R and over HTTP as the bit string.
 - `Null`: Represents a missing value. Use the `?` suffix in `DATASET` definitions for nullable columns (e.g., `score: Float?`).
+
+**Decimal literals and `DOUBLE`.** A decimal literal such as `0.1` is a 32-bit `Float` by default. Next to a `DOUBLE` operand -- in a comparison, arithmetic, `BETWEEN` or an `IN` list, including literal-only arithmetic such as `180.0633 - 0.005` beside a `DOUBLE` column -- it keeps its full 64-bit value, so `WHERE mass BETWEEN 180.0633881 - 0.0000001 AND 180.0633881 + 0.0000001` compares at double precision. Before v0.1.92 the literal was always rounded to 32 bits first.
 
 ### Tensor Types
 
@@ -26,6 +29,7 @@ Defined with specific dimensionality:
 
 - `Vector(N)`: A 1D tensor with `N` elements.
 - `Matrix(R, C)`: A 2D tensor with `R` rows and `C` columns.
+- `Matrix(R, *)` (column type only): `R` rows whose length may differ from one cell to the next -- every row of a cell has the same length. The natural type for MS/MS spectra as peak lists: `Matrix(2, *)` with row 0 the m/z values (ascending) and row 1 the intensities, as used by `SPEC_COSINE` (§4). Stored natively in Parquet as `FixedSizeList<List<Float32>, R>`. Shown by `SHOW SCHEMA` as `MATRIX[R, 0]`.
 - `Tensor(d1, d2, ...)`: An N-dimensional tensor.
 
 ---
@@ -345,6 +349,44 @@ Use inside SELECT columns, WHERE predicates, or ORDER BY:
 | `MATMUL(a, b)` | `Matrix, Matrix/Vector → Matrix/Vector` | Product | Standard matrix multiplication (also usable inside `SELECT`, unlike the standalone `MATMUL a b` keyword form in §3) |
 | `TRANSPOSE(m)` | `Matrix → Matrix` | Swapped dims | Transpose a matrix value (also usable inside `SELECT`) |
 
+### Bit-Vector Functions
+
+| Function | Signature | Returns | Description |
+|---|---|---|---|
+| `TANIMOTO(a, b)` | `BitVector, BitVector → Double` | [0, 1] | `|a AND b| / |a OR b|`; two all-zero vectors give `1.0`, as RDKit does |
+| `JACCARD(a, b)` | `BitVector, BitVector → Double` | [0, 1] | Same value as `TANIMOTO` (identical on bit sets) |
+| `HAMMING(a, b)` | `BitVector, BitVector → Int` | Count | Number of differing bits |
+| `BIT_COUNT(a)` | `BitVector → Int` | Count | Number of 1 bits |
+
+- Both arguments must be `BitVector`s of the same length. This is checked before any row is evaluated: `TANIMOTO(fp2048, fp1024)` or `TANIMOTO(vector_col, fp)` is an error, never a `NULL` or a silently truncated comparison. A literal comes from `CAST("0101..." AS BITVECTOR(n))`.
+- Checked against RDKit's `DataStructs.TanimotoSimilarity` on Morgan fingerprints (2048 and 1000 bits).
+
+```sql
+-- Candidates ranked by fingerprint similarity to a predicted fingerprint
+SELECT id, smiles, TANIMOTO(fp, CAST("0110...1" AS BITVECTOR(2048))) AS t
+FROM candidates ORDER BY t DESC LIMIT 25
+```
+
+### Spectral Similarity Functions
+
+For MS/MS spectra stored as peak lists in a `Matrix(2, *)` column (row 0 m/z, ascending; row 1 intensity):
+
+| Function | Returns | Description |
+|---|---|---|
+| `SPEC_COSINE(a, b, tolerance [, mz_power, intensity_power])` | `Double` | Greedy cosine: peaks match when their m/z differ by at most `tolerance`; each peak is used at most once |
+| `SPEC_COSINE_MOD(a, b, tolerance, shift [, mz_power, intensity_power])` | `Double` | Modified cosine: peaks also match after shifting `b` by `shift` (precursor m/z of `a` minus that of `b`); with `|shift| <= tolerance` it equals `SPEC_COSINE` |
+| `SPEC_MATCHES(a, b, tolerance [, shift])` | `Int` | How many peak pairs the (modified, with `shift`) cosine matched |
+
+- Each matched pair weighs `(mz_a^p · I_a^q) · (mz_b^p · I_b^q)` with `p = mz_power` (default 0) and `q = intensity_power` (default 1; use 0.5 for the common square-root transform); the score divides the matched sum by both spectra's norms over all their peaks.
+- Follows matchms' `CosineGreedy` and `ModifiedCosineGreedy` step by step, including their order for tied weights, and agrees with them to 1e-12 (tested on 900 pairs). Arithmetic is 64-bit over the stored 32-bit peaks. One difference: matched peaks with all-zero intensities score 0 here, `NaN` in matchms.
+- Errors, never `NULL`: m/z not sorted ascending, a non-finite value, a negative or non-finite tolerance or shift (all reported with the row), and -- before any row runs -- a wrong number of arguments or a first/second argument that isn't a `Matrix(2, n)`. A `NULL` argument gives `NULL`.
+
+```sql
+SELECT id, SPEC_COSINE_MOD(spec, qspec, 0.01, pm - qpm) AS score
+FROM library JOIN queries ON library.k = queries.k
+ORDER BY score DESC
+```
+
 **Typical similarity search**:
 
 ```sql
@@ -490,8 +532,10 @@ DELETE FROM users WHERE active = false
 ```
 
 - `INSERT` values may be `NULL`, a string, a number, `true`/`false`, a bracketed vector `[..]`/matrix `[[..], ..]` literal, or a bare identifier referencing an existing tensor.
-- `UPDATE ... SET` accepts one or more `col = expr` assignments (comma-separated) and an optional `WHERE`/`FILTER` predicate; omitting the predicate updates every row.
+- `UPDATE ... SET` accepts one or more `col = expr` assignments (comma-separated) and an optional `WHERE`/`FILTER` predicate; omitting the predicate updates every row. Assignments accept any expression a `SELECT` column does (vector literals, functions, `CAST`, ...). Every new value is computed and type-checked before anything changes: numbers widen or narrow like `INSERT` literals (a non-integral number into an `Int` column is an error, not a truncation), `NULL` needs a nullable column, anything else must match the column's type. On any error no row changes.
 - `DELETE FROM` accepts an optional `WHERE`/`FILTER` predicate; omitting it deletes every row.
+- Both keep the dataset's indexes, per-partition range statistics and metadata in sync. Before v0.1.92 they edited rows in place and left those stale: a `SEARCH` after a `DELETE` could return the wrong rows, and a range query after an `UPDATE` could miss matching rows.
+- Arithmetic works on either side of a comparison in `WHERE`/`FILTER`/`UPDATE`/`DELETE` (`WHERE price * qty > 100`). Before v0.1.92 such a predicate silently matched no rows.
 
 ### JOIN
 
@@ -590,6 +634,7 @@ SELECT id, FLATTEN(grid) AS flattened FROM t   -- equivalent, no shape needed
 - `CASE [operand] WHEN <cond> THEN <expr> [WHEN ... THEN ...] [ELSE <expr>] END` — with an operand, each `WHEN` value is compared for equality against it; without one, each `WHEN` is a standalone boolean condition.
 - `COALESCE(a, b, ...)` returns the first non-`NULL` argument (2+ args). `NULLIF(a, b)` (alias `IFNULL`) returns `NULL` if `a = b`, else `a`.
 - `CAST(expr AS <type>)` — scalar target types: `INT`/`INTEGER`, `FLOAT`/`FLOAT32` (32-bit), `DOUBLE`/`FLOAT64` (64-bit, full precision), `TEXT`/`STRING`/`VARCHAR`, `BOOL`/`BOOLEAN`.
+- `CAST(expr AS BITVECTOR)` / `CAST(expr AS BITVECTOR(n))` — from a `"0101..."` string or a 0/1 `Vector`; with `(n)`, only a value of exactly `n` bits converts (anything else is `NULL`). Write the length whenever the result is compared with a `BitVector` column, so a length mismatch is caught before the query runs. A `BitVector` casts to `TEXT` (the bit string) and to `VECTOR(n)` (0.0/1.0).
 - `CAST(expr AS VECTOR(n))` / `CAST(expr AS MATRIX(r, c))` — reshape/flatten a `Vector`/`Matrix` value to the given shape, row-major. The source and target must have the same total element count (`r * c == n` when converting between the two, or an exact length/shape match for same-kind casts); a mismatch returns `NULL` rather than resizing or erroring, consistent with other invalid `CAST` combinations. This is the way to reshape *to an arbitrary shape* inside a query — the standalone `RESHAPE` keyword (§3) only operates on tensor variables outside of `SELECT` (`RESHAPE(...)` inside a query does not parse).
 - `FLATTEN(expr)` also works inside `SELECT` (in addition to its standalone tensor-DSL form, §3) — flattens a `Matrix` row-major into a `Vector`, or is a no-op on an already-flat `Vector`. Equivalent to `CAST(expr AS VECTOR(total_element_count))` but without needing to know the count up front.
 
@@ -756,17 +801,21 @@ CREATE INDEX ON docs(category)
 CREATE INDEX my_idx ON docs(category)      -- name is optional and currently unused
 CREATE VECTOR INDEX ON docs(embedding)
 CREATE VECTOR INDEX ON docs(embedding) USING HNSW   -- opt into an HNSW graph index instead
+CREATE SORTED INDEX ON spectra(precursor_mz)        -- ordered values for range lookups
 ```
 
 - `CREATE INDEX [<name>] ON <dataset>(<column>)`: Build a standard lookup index on a scalar column.
+- `CREATE SORTED INDEX [<name>] ON <dataset>(<column>)`: Keep an `Int`/`Float`/`Double`/`String` column's values in order, so a range (`<`, `<=`, `>`, `>=`, `=`, `BETWEEN`) on it -- alone or as any conjunct of an `AND` -- is answered by binary search instead of a full scan; the whole predicate is still applied to what the index returns, so results are identical to a scan. `EXPLAIN` shows `SortedRangeScanExec` when it's used. Also narrows `SEARCH ... PREFILTER` windows (below). `NULL`s are not indexed; `NaN`, vectors, or a mix of numbers and strings are an error.
 - `CREATE VECTOR INDEX [<name>] ON <dataset>(<column>) [USING HNSW]`: Build an index-accelerated structure over a `Vector` column, enabling `SEARCH` and index-aware `COSINE_SIM` filtering in `WHERE` clauses. Without `USING HNSW` (the default), this builds the IVF-clustered index described below. With `USING HNSW`, it instead builds an HNSW (Hierarchical Navigable Small World) graph index — see "HNSW vector index" below for how the two differ.
   - **Hybrid filters**: `WHERE COSINE_SIM(embedding, [...]) > threshold AND category = 'electronics'` is index-accelerated too, not just the bare `COSINE_SIM` comparison alone — the query planner finds the `COSINE_SIM(...) > threshold` conjunct anywhere in a top-level `AND` chain (any position, any number of other conjuncts), routes it through the vector index, and applies the remaining conjuncts as a post-filter on those results. `EXPLAIN` always shows whether this actually fired (look for `CosineFilterExec` in the physical plan) — an `AND` predicate whose `COSINE_SIM` conjunct doesn't match this shape, or whose column has no *IVF* vector index (an HNSW-only index never accelerates this path — see below), falls back to a full scan+filter exactly as before, never silently wrong, just unaccelerated.
-- List existing indexes with `SHOW INDEXES [<dataset>]` (§9) — an HNSW index is reported as type `VECTOR (HNSW)`, distinct from a plain IVF `VECTOR` index.
+- List existing indexes with `SHOW INDEXES [<dataset>]` (§9) — an HNSW index is reported as type `VECTOR (HNSW)`, distinct from a plain IVF `VECTOR` index, and a sorted index as `SORTED`.
 - **Persistence**: `SAVE DATASET` writes which columns are indexed (and with what index type) alongside the data; `LOAD DATASET` rebuilds each one from the reloaded rows automatically. Before this, a `CREATE INDEX` only lived for the current process — reloading a saved dataset silently lost every index with no warning. `LOAD DATASET`'s output message now reports which indexes were restored (e.g. `"... indices restored on: category, embedding"`).
-  - **Vector index clustering is persisted too**, not just the (column, type) definition: `SAVE DATASET` also writes a `vector_index_clusters.json` snapshot of a `CREATE VECTOR INDEX` column's k-means clustering (once it's large enough to have actually clustered — see below), and `LOAD DATASET` restores that clustering directly instead of recomputing it, avoiding a potentially expensive k-means rebuild on every load. A content hash of the column's data travels with the snapshot; if it no longer matches the freshly loaded column (e.g. `data.parquet` edited independently of the snapshot), `LOAD DATASET` silently falls back to a full rebuild rather than trusting a stale clustering — the restored-indexes message distinguishes the two (`"... (from snapshot: embedding)"` vs. plain `"... indices restored on: embedding"`).
-  - **An HNSW index's built graph is persisted the same way**, in a sibling `hnsw_index_graphs.json`, with the same content-hash staleness check and the same `"... (from snapshot: embedding)"` restored-indexes message.
+  - **Vector index clustering is persisted too**, not just the (column, type) definition: `SAVE DATASET` also writes a `vector_index_clusters.bin` snapshot of a `CREATE VECTOR INDEX` column's k-means clustering (once it's large enough to have actually clustered — see below), and `LOAD DATASET` restores that clustering directly instead of recomputing it, avoiding a potentially expensive k-means rebuild on every load. A content hash of the column's data travels with the snapshot; if it no longer matches the freshly loaded column (e.g. `data.parquet` edited independently of the snapshot), `LOAD DATASET` silently falls back to a full rebuild rather than trusting a stale clustering — the restored-indexes message distinguishes the two (`"... (from snapshot: embedding)"` vs. plain `"... indices restored on: embedding"`).
+  - **An HNSW index's built graph is persisted the same way**, in a sibling `hnsw_index_graphs.bin`, with the same content-hash staleness check and the same `"... (from snapshot: embedding)"` restored-indexes message.
+  - **Snapshot files are binary** since v0.1.92 (`vector_index_clusters.bin`, `hnsw_index_graphs.bin`, layouts documented in `core::index::vector`/`core::index::hnsw`), replacing pretty-printed JSON. A dataset saved by an older version still restores its IVF clustering from `vector_index_clusters.json`; its old `hnsw_index_graphs.json` (a graph from the HNSW library used before v0.1.92) can't be reused, so that index is rebuilt on load. The next `SAVE DATASET` writes the binary files and removes the JSON ones.
 - **Vector index clustering**: `CREATE VECTOR INDEX` automatically clusters the column's vectors (IVF-style, k-means with a cosine-similarity metric) once the column has at least ~64 rows — no extra syntax, this is transparent. Below that size, or before enough rows exist, it falls back to the original brute-force scan. `SEARCH`/`SELECT ... ORDER BY COSINE_SIM(...)` (approximate top-k) only probe the nearest few clusters; `WHERE COSINE_SIM(...) > threshold` (an exact predicate, not a ranking) instead uses a provable per-cluster similarity bound to skip clusters that provably can't contain a match, so it never drops a qualifying row.
-- **HNSW vector index**: `CREATE VECTOR INDEX ... USING HNSW` builds an HNSW graph once the column has at least ~16 rows (below that, brute-force scan, same idea as IVF's ~64-row threshold). It only accelerates top-k `SEARCH`/`ORDER BY COSINE_SIM(...)` — unlike IVF's clusters, an HNSW graph traversal has no cheap provable bound on what it might have skipped, so it can't safely accelerate an *exact* `WHERE COSINE_SIM(...) > threshold` predicate the way IVF's per-cluster bound does. A column with only an HNSW index still answers such a `WHERE` correctly (falls back to a full scan+filter, exact, just not index-accelerated) — it never errors and never drops a qualifying row. Rows inserted after the index was created (or after the last `LOAD DATASET`) are always additionally brute-force scanned regardless of index type, so correctness never depends on how recently the graph/clustering was (re-)built, only performance does. `EXPLAIN` reports which index type (`Vector`, `Hnsw`, or none) a `SEARCH` will actually use.
+- **HNSW vector index**: `CREATE VECTOR INDEX ... USING HNSW` builds an HNSW graph once the column has at least ~16 rows (below that, brute-force scan, same idea as IVF's ~64-row threshold). It is LINAL's own implementation (since v0.1.92): 32 neighbors per node (64 on the bottom layer), build beam 256, search beam 768 (or `k` if larger), built in parallel and deterministically (the same rows always give the same graph). Scores are the exact cosine of each returned row, identical to `COSINE_SIM`. Measured at 200,000 random 128-dimensional vectors: build 64 s, recall@10 0.955 against an exact scan, 3.6 ms per query (the library it replaced: 419 s, 0.905, 8.3 ms). It only accelerates top-k `SEARCH`/`ORDER BY COSINE_SIM(...)` — a graph traversal has no cheap provable bound on what it might have skipped, so it can't safely accelerate an *exact* `WHERE COSINE_SIM(...) > threshold` predicate the way IVF's per-cluster bound does. A column with only an HNSW index still answers such a `WHERE` correctly (a full scan, exact) — it never errors and never drops a qualifying row. Rows inserted after the index was built (or after the last `LOAD DATASET`) are always additionally brute-force scanned regardless of index type, so correctness never depends on how recently the graph/clustering was (re-)built, only performance does. `EXPLAIN` reports which index type (`Vector`, `Hnsw`, or none) a `SEARCH` will actually use.
+- **Vector storage**: IVF and HNSW indexes keep one contiguous copy of the indexed vectors with their norms precomputed (the graph and clusters refer to it), so an index costs roughly the vectors once plus its structure. `SHOW MEMORY` (§9) reports both.
 
 ### SEARCH (Vector Similarity)
 
@@ -791,6 +840,22 @@ SEARCH docs WHERE embedding ~= [0.9, 0.1, 0.0] LIMIT 10
 -- Legacy explicit-target form
 SEARCH results FROM docs QUERY [0.9, 0.1, 0.0] ON embedding K=10
 ```
+
+#### Pre-filtering: `PREFILTER`
+
+Restrict the candidates *before* ranking -- e.g. to library spectra within each query's precursor-mass window:
+
+```sql
+SEARCH library ON embedding QUERY [0.9, 0.1, 0.0] PREFILTER mass BETWEEN 180.0 AND 181.0 LIMIT 25
+SEARCH library ON embedding QUERIES q.embedding KEY spectrum_id PREFILTER mass BETWEEN q.precursor_mz - 0.01 AND q.precursor_mz + 0.01 LIMIT 25
+SEARCH library ON embedding QUERIES q.embedding PREFILTER mass >= q.precursor_mz * (1 - 0.00001) AND mass <= q.precursor_mz * (1 + 0.00001) LIMIT 25
+```
+
+- `PREFILTER <predicate>` goes right before `LIMIT` and runs before ranking: each query's top-`k` is an **exact** cosine ranking over the rows that pass, so `k` rows come back whenever `k` rows pass (unlike `FILTER`, which can starve). Ties keep row order.
+- In a `QUERIES <dataset>.<column>` batch, `<dataset>.<column>` inside the predicate is the current query's own value -- here `q.precursor_mz` -- so every query gets its own window (absolute or ppm). Any other column name is the searched dataset's.
+- With a `SORTED` index on the searched column of a range whose bounds use only constants and query values (`mass BETWEEN q.x - t AND q.x + t`, `mass >= ...`), each query's candidates come from a binary search; otherwise every row is checked. `EXPLAIN` says which (`narrowed by SORTED index on mass` / `full scan`).
+- Needs no vector index (the ranking is an exact scan of the candidates). A single `QUERY` with `PREFILTER` returns the same shape as plain `SEARCH` (the dataset's rows); a batch returns the `QUERIES` shape below.
+- An unknown column, or an unknown `<query dataset>.<column>`, is an error.
 
 #### Batch queries: `QUERIES`
 
@@ -908,10 +973,9 @@ automatically:
   index), `detail` (index type, or tensor shape), `rows` and `bytes`. A `dataset` row counts the
   dataset's rows only; each of its indexes has its own row, so the dataset's total is the sum.
   With `<dataset>`, only that dataset and its indexes are listed. Estimates count heap
-  allocations by capacity; the HNSW graph is estimated from its layout, since the library
-  doesn't report it; a tensor buffer shared by several names is counted under each name. IVF
-  and HNSW indexes keep their own copies of the indexed vectors, which is why an HNSW index
-  reports more than twice the bytes of the vectors themselves. `SHOW MEMORY` alone shows a
+  allocations by capacity; a tensor buffer shared by several names is counted under each name. IVF
+  and HNSW indexes each hold one copy of the indexed vectors plus their structure (before
+  v0.1.92 an HNSW index held two copies and per-vector metadata). `SHOW MEMORY` alone shows a
   tensor or dataset literally named `MEMORY` if one exists.
 
 ### Compute backend (experimental GPU)

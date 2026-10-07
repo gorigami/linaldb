@@ -787,10 +787,99 @@ columns too.
 `SHOW MEMORY` (`dsl/executor/show.rs`) adds up estimates from three places:
 `Dataset::estimated_rows_bytes` (each row's `Value`s by capacity, via
 `Value::estimated_bytes`), `Index::memory_bytes` (required on every index
-type, so a new one has to account for itself), and each tensor's buffer. The
-HNSW estimate is derived from `instant-distance` 0.6's layout (a second copy
-of each point, 2·M layer-0 neighbor ids, upper layers with ~1/(M−1) of the
-points), since the library doesn't report its size.
+type, so a new one has to account for itself), and each tensor's buffer.
+
+### Vector Index Storage and HNSW
+
+Both vector indexes (`core/index/vector.rs` IVF, `core/index/hnsw.rs`)
+hold their vectors in one `FlatVectors` store (`core/index/flat.rs`): a
+contiguous `Vec<f32>`, row ids, and precomputed L2 norms. Cosine scores use
+the same formula and summation order as `COSINE_SIM`
+(`flat::cosine_with_norms`), so an index-accelerated predicate and a plain
+scan agree bit for bit at a threshold.
+
+HNSW is implemented in-tree (it replaced `instant-distance` in v0.1.92,
+which kept its own copy of every point and couldn't share storage or
+filter): `M = 32`, 64 neighbors on layer 0, `u32` neighbor lists in flat
+arrays, the Malkov–Yashunin neighbor-selection heuristic with pruned
+candidates kept, `ef_construction = 256`, `ef_search = max(768, k)`. Node
+levels come from a hash of the node position, and the build inserts nodes
+in batches: each batch's neighbor searches run in parallel against the graph
+as it stood before the batch (plus a direct comparison with the batch's
+earlier nodes), then links are applied in node order and every touched
+neighbor list is pruned in parallel -- so the same rows always give the
+same graph, whatever the thread count. A tuning harness lives in
+`hnsw::tests::hnsw_experiment` (`#[ignore]`).
+
+Snapshots (`SAVE DATASET`) are hand-rolled little-endian binaries
+(`core/index/binio.rs`, magic-prefixed, every length and link bounds-checked
+on read): `vector_index_clusters.bin` (centroids, member positions, radii)
+and `hnsw_index_graphs.bin` (levels, layer-0 links, upper offsets and
+links -- no vectors; those are the dataset's own column, re-added in row
+order on load and guarded by the column's content hash). `persistence.rs`
+gets each index's typed snapshot through `Index::as_any` downcasting.
+
+### Sorted Index and PREFILTER
+
+`SortedIndex` (`core/index/sorted.rs`) keeps `(value, row_id)` sorted
+after `build()`, plus an unsorted tail for rows added since. `range()`
+narrows by `partition_point` per constraint, re-checks each candidate
+exactly, and returns row ids ascending. The planner's
+`try_optimize_filter` turns a range conjunct on a sorted column into
+`SortedRangeScanExec` wrapped in a `FilterExec` with the full predicate.
+
+`SEARCH ... PREFILTER` lowers the predicate against a *combined* schema --
+the searched dataset's columns followed by the query dataset's columns
+renamed `"\0q.<name>"` (`logical::QUERY_COLUMN_PREFIX`; a NUL can't occur
+in a real name) -- after an AST rewrite (`map_expr`) turns
+`<query dataset>.<col>` into those names. `sorted_prefilter_range` looks
+for a range on a sorted column whose bounds reference only query columns;
+`BatchVectorSearchExec` evaluates those bounds per query, takes candidates
+from the index (or all rows), evaluates the predicate on a reused row that
+copies only the referenced columns, and ranks the survivors with an exact
+cosine, in parallel across queries.
+
+`UPDATE`/`DELETE` call `Dataset::rebuild_after_mutation`, which refreshes
+stats and zone maps and rebuilds affected indexes (all of them after a
+`DELETE`, which shifts row ids).
+
+### Plan-Time Type Checks and Row Errors
+
+`physical::evaluate_expression` returns a plain `Value`, so a bad input
+used to become a silent `NULL`. Two mechanisms now make those loud:
+
+- `query/typecheck.rs` walks every lowered expression before rows are
+  evaluated (filters and aggregates in the planner, computed `SELECT`
+  columns, `UPDATE` assignments) and rejects structural mistakes:
+  `TANIMOTO` on `BitVector`s of different lengths or on a non-`BitVector`,
+  `SPEC_*` with the wrong arity or a non-peak-list argument.
+- `query/row_error.rs` is a per-thread "first error" slot for problems only
+  the data shows (an unsorted spectrum): the function records the error and
+  returns `NULL`, and the executor that evaluated it -- `FilterExec`,
+  `AggregateExec`, computed columns, `UPDATE`, `DELETE`, the `PREFILTER`
+  workers -- clears the slot before its loop and fails the statement if it
+  is set afterwards. Evaluation always happens on the thread that checks.
+
+Lowering keeps a decimal literal (`Expr::Scalar`, an f64 in the AST) at
+f64 when it sits beside a `Float64` operand (`lower_pair`/`lower_beside`
+in `dsl/executor/query.rs`); elsewhere it stays an f32 `Float`, so existing
+`Float` comparisons are unchanged.
+
+### Bit Vectors and Peak Lists
+
+`Value::BitVector(BitVec)` (`core/bitvec.rs`): `u64` words, bits past the
+length always zero, `count_ones` over words for Tanimoto/Hamming. Arrow
+encoding is `FixedSizeBinary(ceil(N/8))`, MSB-first per byte
+(`numpy.packbits`), with `linal.logical_value_type = "BitVector:N"` field
+metadata for the exact length; serde (and so the HTTP JSON) uses the bit
+string.
+
+`Matrix(r, *)` is `ValueType::Matrix(r, 0)`: a declared column count of 0
+accepts any count (`Field::is_compatible`), with every row of one cell the
+same length. Arrow encoding is `FixedSizeList<List<Float32>, r>`
+(`build_variable_matrix_column`); the reader recognizes it in
+`vector_or_matrix_type`/`matrix_array_to_values`. `core/spectral.rs`
+implements the matchms-compatible greedy cosine on such peak lists.
 
 ---
 

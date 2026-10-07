@@ -738,6 +738,8 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 CastTarget::Bool => "BOOL".to_string(),
                 CastTarget::Vector(n) => format!("VECTOR({})", n),
                 CastTarget::Matrix(r, c) => format!("MATRIX({}, {})", r, c),
+                CastTarget::BitVector(Some(n)) => format!("BITVECTOR({})", n),
+                CastTarget::BitVector(None) => "BITVECTOR".to_string(),
             };
             format!("CAST({} AS {})", expr_to_string(expr), type_name)
         }
@@ -775,6 +777,13 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 VectorFnKind::Phase => "PHASE",
                 VectorFnKind::Conj => "CONJ",
                 VectorFnKind::ComplexNew => "COMPLEX",
+                VectorFnKind::Tanimoto => "TANIMOTO",
+                VectorFnKind::Jaccard => "JACCARD",
+                VectorFnKind::Hamming => "HAMMING",
+                VectorFnKind::BitCount => "BIT_COUNT",
+                VectorFnKind::SpecCosine => "SPEC_COSINE",
+                VectorFnKind::SpecCosineMod => "SPEC_COSINE_MOD",
+                VectorFnKind::SpecMatches => "SPEC_MATCHES",
             };
             let items: Vec<String> = args.iter().map(expr_to_string).collect();
             format!("{}({})", name, items.join(", "))

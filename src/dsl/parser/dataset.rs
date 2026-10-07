@@ -1124,6 +1124,7 @@ impl Parser {
                 query,
                 top_k,
                 filter: None,
+                prefilter: None,
                 target: Some(first),
             }))
         } else if self.at(&Token::Where) {
@@ -1140,6 +1141,7 @@ impl Parser {
                 query,
                 top_k,
                 filter: None,
+                prefilter: None,
                 target: None,
             }))
         } else {
@@ -1187,6 +1189,13 @@ impl Parser {
                     SearchQuery::TensorRef(self.eat_ident()?)
                 }
             };
+            // PREFILTER: applied before ranking (exact top-k over passing rows).
+            let prefilter = if self.at_ident("PREFILTER") {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
             self.eat(&Token::Limit)?;
             let top_k = self.eat_usize()?;
             // FILTER, not WHERE: WHERE is already claimed by this statement's
@@ -1211,6 +1220,7 @@ impl Parser {
                 query,
                 top_k,
                 filter,
+                prefilter,
                 target,
             }))
         }

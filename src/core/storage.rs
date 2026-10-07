@@ -135,14 +135,30 @@ impl ParquetStorage {
         format!("{}/datasets/{}/indexes.json", self.base_path, name)
     }
 
+    /// Binary vector-index snapshot (`vector::encode_snapshots`).
     fn vector_index_clusters_path(&self, name: &str) -> String {
+        format!(
+            "{}/datasets/{}/vector_index_clusters.bin",
+            self.base_path, name
+        )
+    }
+
+    /// The JSON snapshot versions before 0.1.92 wrote; still read.
+    fn legacy_vector_index_clusters_path(&self, name: &str) -> String {
         format!(
             "{}/datasets/{}/vector_index_clusters.json",
             self.base_path, name
         )
     }
 
+    /// Binary HNSW graph snapshot (`hnsw::encode_snapshots`).
     fn hnsw_index_graphs_path(&self, name: &str) -> String {
+        format!("{}/datasets/{}/hnsw_index_graphs.bin", self.base_path, name)
+    }
+
+    /// The JSON graph versions before 0.1.92 wrote (an `instant-distance`
+    /// graph, which today's HNSW can't use); removed on the next save.
+    fn legacy_hnsw_index_graphs_path(&self, name: &str) -> String {
         format!(
             "{}/datasets/{}/hnsw_index_graphs.json",
             self.base_path, name
@@ -151,11 +167,11 @@ impl ParquetStorage {
 
     /// Persist each vector-indexed column's clustering (`VectorIndex::
     /// snapshot`) plus the content hash it was computed from, so `LOAD
-    /// DATASET` can restore the clustering without recomputing k-means --
-    /// closes the "full rebuild + blocking k-means on every ... LOAD
-    /// DATASET" gap `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`'s audit flagged.
-    /// Overwrites unconditionally (including with an empty map), same
-    /// policy as `save_index_definitions`.
+    /// DATASET` can restore the clustering without recomputing k-means.
+    /// Binary (`vector_index_clusters.bin`, layout in
+    /// `vector::encode_snapshots`). Overwrites unconditionally (including
+    /// with an empty map), same policy as `save_index_definitions`, and
+    /// removes a pre-binary `.json` snapshot so it can't go stale.
     pub fn save_vector_index_snapshots(
         &self,
         name: &str,
@@ -165,21 +181,18 @@ impl ParquetStorage {
         >,
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
-        let path = self.vector_index_clusters_path(name);
-        let json = serde_json::to_string_pretty(snapshots).map_err(|e| {
-            StorageError::Serialization(format!(
-                "Failed to serialize vector index snapshots: {}",
-                e
-            ))
-        })?;
-        fs::write(path, json)?;
+        let bytes = crate::core::index::vector::encode_snapshots(snapshots);
+        fs::write(self.vector_index_clusters_path(name), bytes)?;
+        let legacy = self.legacy_vector_index_clusters_path(name);
+        if Path::new(&legacy).exists() {
+            fs::remove_file(legacy)?;
+        }
         Ok(())
     }
 
-    /// Loads previously persisted vector index snapshots. Returns an empty
-    /// map (not an error) if none were ever saved -- datasets written
-    /// before this feature existed, or with no vector index large enough
-    /// to have clustered, simply have no such file.
+    /// Loads previously persisted vector index snapshots: the binary file,
+    /// else a pre-binary `.json` one. Returns an empty map (not an error)
+    /// if none were ever saved.
     pub fn load_vector_index_snapshots(
         &self,
         name: &str,
@@ -188,41 +201,46 @@ impl ParquetStorage {
         StorageError,
     > {
         let path = self.vector_index_clusters_path(name);
-        if !Path::new(&path).exists() {
+        if Path::new(&path).exists() {
+            let bytes = fs::read(path)?;
+            return crate::core::index::vector::decode_snapshots(&bytes).map_err(|e| {
+                StorageError::Serialization(format!("Failed to read vector index snapshots: {}", e))
+            });
+        }
+        let legacy = self.legacy_vector_index_clusters_path(name);
+        if !Path::new(&legacy).exists() {
             return Ok(std::collections::HashMap::new());
         }
-        let json = fs::read_to_string(path)?;
-        let snapshots = serde_json::from_str(&json).map_err(|e| {
+        let json = fs::read_to_string(legacy)?;
+        serde_json::from_str(&json).map_err(|e| {
             StorageError::Serialization(format!(
                 "Failed to deserialize vector index snapshots: {}",
                 e
             ))
-        })?;
-        Ok(snapshots)
+        })
     }
 
     /// Same persistence contract as `save_vector_index_snapshots`, for
-    /// HNSW-backed vector indices (`CREATE VECTOR INDEX ... USING HNSW`,
-    /// `core::index::hnsw::HnswIndex`) -- a separate file/column-keyed map
-    /// since the two index types' snapshot shapes are unrelated (a full
-    /// serialized graph vs. IVF cluster assignments) and a column can only
-    /// ever have one or the other, never both.
+    /// HNSW indexes (`hnsw_index_graphs.bin`, layout in
+    /// `hnsw::encode_snapshots`). A column has one or the other, never both.
     pub fn save_hnsw_index_snapshots(
         &self,
         name: &str,
         snapshots: &std::collections::HashMap<String, crate::core::index::hnsw::PersistedHnswIndex>,
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
-        let path = self.hnsw_index_graphs_path(name);
-        let json = serde_json::to_string_pretty(snapshots).map_err(|e| {
-            StorageError::Serialization(format!("Failed to serialize HNSW index snapshots: {}", e))
-        })?;
-        fs::write(path, json)?;
+        let bytes = crate::core::index::hnsw::encode_snapshots(snapshots);
+        fs::write(self.hnsw_index_graphs_path(name), bytes)?;
+        let legacy = self.legacy_hnsw_index_graphs_path(name);
+        if Path::new(&legacy).exists() {
+            fs::remove_file(legacy)?;
+        }
         Ok(())
     }
 
-    /// Loads previously persisted HNSW index snapshots. Returns an empty
-    /// map (not an error) if none were ever saved.
+    /// Loads previously persisted HNSW graphs. Returns an empty map (not an
+    /// error) if none were saved -- including when only a pre-binary
+    /// `.json` graph exists: `LOAD DATASET` then rebuilds the index.
     pub fn load_hnsw_index_snapshots(
         &self,
         name: &str,
@@ -234,14 +252,10 @@ impl ParquetStorage {
         if !Path::new(&path).exists() {
             return Ok(std::collections::HashMap::new());
         }
-        let json = fs::read_to_string(path)?;
-        let snapshots = serde_json::from_str(&json).map_err(|e| {
-            StorageError::Serialization(format!(
-                "Failed to deserialize HNSW index snapshots: {}",
-                e
-            ))
-        })?;
-        Ok(snapshots)
+        let bytes = fs::read(path)?;
+        crate::core::index::hnsw::decode_snapshots(&bytes).map_err(|e| {
+            StorageError::Serialization(format!("Failed to read HNSW index snapshots: {}", e))
+        })
     }
 
     /// Persist which columns have indices (and of what type) so `LOAD
@@ -536,11 +550,19 @@ impl From<Arc<ArrowSchema>> for DatasetSchema {
                 let (vt, shape_dims) = match logical_vector_or_matrix_type(f) {
                     Some(ValueType::Vector(dim)) => (ValueType::Vector(dim), vec![dim]),
                     Some(ValueType::Matrix(r, c)) => (ValueType::Matrix(r, c), vec![r, c]),
-                    _ => match f.data_type() {
-                        DataType::Int64 => (ValueType::Int, vec![]),
+                    Some(ValueType::BitVector(n)) => (ValueType::BitVector(n), vec![n]),
+                    // Any other annotated logical type (`Complex`, stored as
+                    // JSON text) -- this arm used to fall through to the
+                    // physical type and report such a column as `String`.
+                    Some(other) => (other, vec![]),
+                    None => match f.data_type() {
+                        DataType::Int64 | DataType::Int32 => (ValueType::Int, vec![]),
                         DataType::Float32 => (ValueType::Float, vec![]),
                         DataType::Float64 => (ValueType::Float64, vec![]),
                         DataType::Boolean => (ValueType::Bool, vec![]),
+                        DataType::FixedSizeBinary(w) => {
+                            (ValueType::BitVector(*w as usize * 8), vec![*w as usize * 8])
+                        }
                         _ => (ValueType::String, vec![]),
                     },
                 };
@@ -569,6 +591,10 @@ fn vector_or_matrix_type(data_type: &DataType) -> Option<ValueType> {
                 if matches!(innermost.data_type(), DataType::Float32) =>
             {
                 Some(ValueType::Matrix(*size as usize, *inner_size as usize))
+            }
+            // `Matrix(r, *)`: r rows of varying length.
+            DataType::List(innermost) if matches!(innermost.data_type(), DataType::Float32) => {
+                Some(ValueType::Matrix(*size as usize, 0))
             }
             _ => None,
         },
@@ -601,6 +627,8 @@ fn encode_logical_value_type(vt: &ValueType) -> Option<String> {
         // metadata every time, not just when a shape-mismatch forces a
         // Vector/Matrix column to fall back.
         ValueType::Complex => Some("Complex".to_string()),
+        // FixedSizeBinary holds whole bytes; the exact bit count rides along.
+        ValueType::BitVector(n) => Some(format!("BitVector:{}", n)),
         _ => None,
     }
 }
@@ -612,6 +640,7 @@ fn decode_logical_value_type(raw: &str) -> Option<ValueType> {
     let (kind, rest) = raw.split_once(':')?;
     match kind {
         "Vector" => rest.parse::<usize>().ok().map(ValueType::Vector),
+        "BitVector" => rest.parse::<usize>().ok().map(ValueType::BitVector),
         "Matrix" => {
             let (rows, cols) = rest.split_once(',')?;
             Some(ValueType::Matrix(rows.parse().ok()?, cols.parse().ok()?))
@@ -653,6 +682,9 @@ pub(crate) fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema
                     DataType::Float64 => ValueType::Float64,
                     DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
                     DataType::Boolean => ValueType::Bool,
+                    // Without a logical-type annotation, every bit of the
+                    // bytes counts.
+                    DataType::FixedSizeBinary(w) => ValueType::BitVector(*w as usize * 8),
                     _ => ValueType::String,
                 });
             let mut field = crate::core::tuple::Field::new(f.name().clone(), value_type);
@@ -829,6 +861,29 @@ fn arrow_array_to_values(
         // No native Arrow encoding for Complex (unlike Vector/Matrix's
         // FixedSizeList) -- always the legacy JSON-string fallback.
         ValueType::Complex => legacy_json_column_to_values(array, num_rows, "Complex"),
+        ValueType::BitVector(n) => {
+            let bytes = array
+                .as_any()
+                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                .ok_or_else(|| {
+                    StorageError::Serialization(format!(
+                        "Expected FixedSizeBinary for a BitVector({}) column, got {:?}",
+                        n,
+                        array.data_type()
+                    ))
+                })?;
+            (0..num_rows)
+                .map(|i| {
+                    if bytes.is_null(i) {
+                        Ok(Value::Null)
+                    } else {
+                        crate::core::bitvec::BitVec::from_bytes(bytes.value(i), *n)
+                            .map(Value::BitVector)
+                            .map_err(StorageError::Serialization)
+                    }
+                })
+                .collect()
+        }
         ValueType::Null => Ok(vec![Value::Null; num_rows]),
     }
 }
@@ -877,6 +932,38 @@ fn matrix_array_to_values(array: &ArrayRef, num_rows: usize) -> Result<Vec<Value
             StorageError::Serialization("Expected FixedSizeListArray for Matrix column".to_string())
         })?;
     let outer_size = outer_list.value_length() as usize;
+
+    // `Matrix(r, *)`: each of the r rows is a variable-length list.
+    if matches!(outer_list.value_type(), DataType::List(_)) {
+        return (0..num_rows)
+            .map(|i| {
+                if outer_list.is_null(i) {
+                    return Ok(Value::Null);
+                }
+                let rows = outer_list.value(i);
+                let rows = rows
+                    .as_any()
+                    .downcast_ref::<arrow::array::ListArray>()
+                    .ok_or_else(|| {
+                        StorageError::Serialization("Expected List rows in Matrix column".into())
+                    })?;
+                (0..rows.len())
+                    .map(|r| {
+                        let row = rows.value(r);
+                        row.as_any()
+                            .downcast_ref::<Float32Array>()
+                            .map(|f| f.values().to_vec())
+                            .ok_or_else(|| {
+                                StorageError::Serialization(
+                                    "Expected Float32 values inside Matrix column".into(),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Value::Matrix)
+            })
+            .collect();
+    }
 
     let inner_list = outer_list
         .values()
@@ -1135,6 +1222,22 @@ fn dataset_to_record_batch_with_options(
             // same as Null (see encode_logical_value_type's doc comment for
             // why this still needs the field-metadata stashing below).
             ValueType::Complex => build_legacy_json_column(&column_data),
+            // MSB-first packed bytes (`BitVec::to_bytes`); nulls are native.
+            ValueType::BitVector(n) => {
+                let width = n.div_ceil(8) as i32;
+                let array = arrow::array::FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                    column_data.iter().map(|v| match v {
+                        Value::BitVector(b) => Some(b.to_bytes()),
+                        _ => None,
+                    }),
+                    width,
+                )
+                .map_err(StorageError::Arrow)?;
+                (
+                    DataType::FixedSizeBinary(width),
+                    Arc::new(array) as ArrayRef,
+                )
+            }
             ValueType::Null => build_legacy_json_column(&column_data),
         };
 
@@ -1145,7 +1248,7 @@ fn dataset_to_record_batch_with_options(
         // stash the real logical type as field metadata so schema.json /
         // the legacy .meta.json sidecar don't report a fallback-encoded
         // Vector/Matrix column as plain "String" (v0.1.73).
-        if matches!(data_type, DataType::Utf8) {
+        if matches!(data_type, DataType::Utf8 | DataType::FixedSizeBinary(_)) {
             if let Some(encoded) = encode_logical_value_type(&field.value_type) {
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert(LOGICAL_VALUE_TYPE_METADATA_KEY.to_string(), encoded);
@@ -1220,12 +1323,55 @@ fn build_vector_column(column_data: &[&Value], declared_dim: usize) -> (DataType
 /// `FixedSizeList<FixedSizeList<Float32>>` column, rows-then-cols nested,
 /// with the same declared-dims-first / infer-from-data / fall-back-to-JSON
 /// strategy.
+/// `Matrix(r, *)` as a native `FixedSizeList<List<Float32>, r>`: r rows of
+/// varying length per cell (e.g. a spectrum's m/z and intensity rows).
+/// `None` when the column has a NULL or a cell with a different row count
+/// (the caller falls back to JSON text, like the fixed-size builders).
+fn build_variable_matrix_column(
+    column_data: &[&Value],
+    rows: usize,
+) -> Option<(DataType, ArrayRef)> {
+    let mut offsets: Vec<i32> = vec![0];
+    let mut values: Vec<f32> = Vec::new();
+    for v in column_data {
+        let Value::Matrix(m) = v else { return None };
+        if m.len() != rows {
+            return None;
+        }
+        for row in m {
+            values.extend_from_slice(row);
+            offsets.push(i32::try_from(values.len()).ok()?);
+        }
+    }
+    let item = Arc::new(ArrowField::new("item", DataType::Float32, false));
+    let list = arrow::array::ListArray::try_new(
+        item,
+        arrow::buffer::OffsetBuffer::new(offsets.into()),
+        Arc::new(Float32Array::from(values)),
+        None,
+    )
+    .ok()?;
+    let row_field = Arc::new(ArrowField::new("item", list.data_type().clone(), false));
+    let outer =
+        FixedSizeListArray::try_new(row_field.clone(), rows as i32, Arc::new(list), None).ok()?;
+    Some((
+        DataType::FixedSizeList(row_field, rows as i32),
+        Arc::new(outer),
+    ))
+}
+
 fn build_matrix_column(
     column_data: &[&Value],
     declared_rows: usize,
     declared_cols: usize,
 ) -> (DataType, ArrayRef) {
     let num_rows = column_data.len();
+    if declared_rows > 0 && declared_cols == 0 {
+        if let Some(native) = build_variable_matrix_column(column_data, declared_rows) {
+            return native;
+        }
+        return build_legacy_json_column(column_data);
+    }
     let dims = if declared_rows > 0 && declared_cols > 0 {
         Some((declared_rows, declared_cols))
     } else {

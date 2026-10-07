@@ -685,8 +685,9 @@ pub struct CreateIndexStmt {
 #[derive(Debug, Clone)]
 pub enum IndexKindAst {
     Default,
-    BTree,
     Hash,
+    /// `CREATE SORTED INDEX` -- ordered values for range lookups
+    Sorted,
     Vector,
     /// `CREATE VECTOR INDEX ... USING HNSW`
     VectorHnsw,
@@ -735,6 +736,12 @@ pub struct SearchStmt {
     /// would need the vector index itself to understand predicates) --
     /// documented as a real limitation rather than silently claiming more.
     pub filter: Option<Expr>,
+    /// Optional `PREFILTER <predicate>` (modern syntax only): applied
+    /// *before* ranking, so the top-k is exact over the rows that pass and
+    /// `k` rows come back whenever `k` pass. In a `QUERIES <dataset>.<col>`
+    /// batch, `<dataset>.<column>` in the predicate is that query's own
+    /// value (e.g. a per-query mass window).
+    pub prefilter: Option<Expr>,
     /// Optional output dataset name (defaults to `"search_results"`).
     pub target: Option<String>,
 }
@@ -768,6 +775,8 @@ pub enum ColType {
     Tensor(Vec<usize>),
     /// `Complex` — scalar complex number (`f64` real/imaginary parts).
     Complex,
+    /// `BitVector(n)` — n bits, e.g. a molecular fingerprint.
+    BitVector(usize),
 }
 
 /// Tensor kind as expressed in the DSL. Decoupled from `engine::TensorKind`.
@@ -889,6 +898,24 @@ pub enum VectorFnKind {
     /// (no dedicated `3+2i`-style token syntax) -- every other producer
     /// (`EIGENVALUES_GENERAL`, arithmetic promotion) makes one internally.
     ComplexNew,
+    /// `TANIMOTO(a, b)` — `|a AND b| / |a OR b|` of two `BitVector`s.
+    /// Result: `Float64`.
+    Tanimoto,
+    /// `JACCARD(a, b)` — same value as `TANIMOTO` for bit vectors.
+    Jaccard,
+    /// `HAMMING(a, b)` — number of differing bits. Result: `Int`.
+    Hamming,
+    /// `BIT_COUNT(a)` — number of 1 bits. Result: `Int`.
+    BitCount,
+    /// `SPEC_COSINE(a, b, tolerance [, mz_power, intensity_power])` —
+    /// greedy cosine of two peak lists (`core::spectral`). Result: `Float64`.
+    SpecCosine,
+    /// `SPEC_COSINE_MOD(a, b, tolerance, shift [, mz_power, intensity_power])`
+    /// — modified cosine, `shift` = precursor m/z of `a` minus that of `b`.
+    SpecCosineMod,
+    /// `SPEC_MATCHES(a, b, tolerance [, shift])` — number of peaks the
+    /// greedy (modified, with `shift`) cosine matched. Result: `Int`.
+    SpecMatches,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -913,6 +940,9 @@ pub enum CastTarget {
     Vector(usize),
     /// `CAST(expr AS MATRIX(r, c))` — reshape/flatten to a Matrix of shape `r x c`.
     Matrix(usize, usize),
+    /// `CAST(expr AS BITVECTOR[(n)])` — from a `'0'`/`'1'` string or a 0/1
+    /// Vector; with `(n)`, only a value of exactly `n` bits converts.
+    BitVector(Option<usize>),
 }
 
 /// Infix arithmetic operators (symbols: `+`, `-`, `*`, `/`).

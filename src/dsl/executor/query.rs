@@ -162,108 +162,140 @@ pub(super) fn search_plan(
     };
     let source_ds = db.get_dataset(&s.dataset).map_err(engine_err)?;
     let schema = source_ds.schema.clone();
-    let query_tensor = match s.query {
-        SearchQuery::TensorRef(ref name) => db.get(name).map_err(engine_err)?.clone(),
-        SearchQuery::Inline(ref values) => {
-            use crate::core::tensor::{TensorId, TensorMetadata};
-            let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-            let n = vals_f32.len();
-            let id = TensorId::new();
-            let meta = TensorMetadata::new(id, None);
-            crate::core::tensor::Tensor::new(
-                id,
-                crate::core::tensor::Shape::new(vec![n]),
-                vals_f32,
-                meta,
-            )
-            .map_err(|e| DslError::Parse {
-                line: line_no,
-                msg: e,
-            })?
+    let single_query = |db: &TensorDb| -> Result<crate::core::tensor::Tensor, DslError> {
+        Ok(match s.query {
+            SearchQuery::TensorRef(ref name) => db.get(name).map_err(engine_err)?.clone(),
+            SearchQuery::Inline(ref values) => {
+                use crate::core::tensor::{TensorId, TensorMetadata};
+                let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                let n = vals_f32.len();
+                let id = TensorId::new();
+                let meta = TensorMetadata::new(id, None);
+                crate::core::tensor::Tensor::new(
+                    id,
+                    crate::core::tensor::Shape::new(vec![n]),
+                    vals_f32,
+                    meta,
+                )
+                .map_err(|e| DslError::Parse {
+                    line: line_no,
+                    msg: e,
+                })?
+            }
+            SearchQuery::Batch { .. } => unreachable!("handled by the batch path"),
+        })
+    };
+
+    let is_batch = matches!(s.query, SearchQuery::Batch { .. });
+    if !is_batch && s.prefilter.is_none() {
+        let plan = LogicalPlan::VectorSearch {
+            input: Box::new(LogicalPlan::Scan {
+                dataset_name: s.dataset.clone(),
+                schema: schema.clone(),
+            }),
+            column: s.column.clone(),
+            query: single_query(db)?,
+            k: s.top_k,
+        };
+        return Ok((plan, schema));
+    }
+
+    // Batch queries, and any PREFILTER search (a single query runs as a
+    // batch of one, projected back to the dataset's columns below).
+    let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
+        Some(ValueType::Vector(d)) => *d,
+        Some(other) => {
+            return Err(invalid(format!(
+                "SEARCH: column '{}' is {:?}, not a Vector",
+                s.column, other
+            )))
         }
+        None => {
+            return Err(invalid(format!(
+                "SEARCH: column '{}' not found in dataset '{}'",
+                s.column, s.dataset
+            )))
+        }
+    };
+    let batch = match s.query {
         SearchQuery::Batch {
             ref source,
             ref column,
             ref key,
         } => {
-            let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
-                Some(ValueType::Vector(d)) => *d,
-                Some(other) => {
-                    return Err(invalid(format!(
-                        "SEARCH: column '{}' is {:?}, not a Vector",
-                        s.column, other
-                    )))
-                }
-                None => {
-                    return Err(invalid(format!(
-                        "SEARCH: column '{}' not found in dataset '{}'",
-                        s.column, s.dataset
-                    )))
-                }
-            };
-            let (queries, key_type) =
-                resolve_batch_queries(db, source, column.as_deref(), key.as_deref())
-                    .map_err(invalid)?;
-            for (i, (_, v)) in queries.iter().enumerate() {
-                if target_dim != 0 && v.len() != target_dim {
-                    return Err(invalid(format!(
-                        "SEARCH QUERIES: query {} has dimension {}, but '{}' is Vector({})",
-                        i,
-                        v.len(),
-                        s.column,
-                        target_dim
-                    )));
-                }
-            }
-            let mut fields = vec![
-                crate::core::tuple::Field::new("query_id", key_type),
-                crate::core::tuple::Field::new("rank", ValueType::Int),
-                crate::core::tuple::Field::new("score", ValueType::Float),
-                crate::core::tuple::Field::new("row_id", ValueType::Int),
-            ];
-            for f in &schema.fields {
-                if fields.iter().any(|g| g.name == f.name) {
-                    return Err(invalid(format!(
-                        "SEARCH QUERIES: dataset '{}' has a column named '{}', which collides with the batch result column of the same name -- rename it first",
-                        s.dataset, f.name
-                    )));
-                }
-                let mut field = f.clone();
-                field.is_lazy = false;
-                fields.push(field);
-            }
-            let out_schema = Arc::new(crate::core::tuple::Schema::new(fields));
-            return Ok((
-                LogicalPlan::BatchVectorSearch {
-                    dataset_name: s.dataset.clone(),
-                    column: s.column.clone(),
-                    queries: Arc::new(queries),
-                    k: s.top_k,
-                    schema: out_schema.clone(),
-                },
-                out_schema,
-            ));
+            resolve_batch_queries(db, source, column.as_deref(), key.as_deref()).map_err(invalid)?
         }
+        _ => BatchQueries {
+            queries: vec![(Value::Int(0), single_query(db)?.to_logical_vec())],
+            key_type: ValueType::Int,
+            source: None,
+        },
     };
-    let plan = LogicalPlan::VectorSearch {
-        input: Box::new(LogicalPlan::Scan {
-            dataset_name: s.dataset.clone(),
-            schema: schema.clone(),
-        }),
+    for (i, (_, v)) in batch.queries.iter().enumerate() {
+        if target_dim != 0 && v.len() != target_dim {
+            return Err(invalid(format!(
+                "SEARCH: query {} has dimension {}, but '{}' is Vector({})",
+                i,
+                v.len(),
+                s.column,
+                target_dim
+            )));
+        }
+    }
+    // A single prefiltered query returns the same shape as plain SEARCH
+    // (the dataset's own rows); a batch adds the per-hit columns in front.
+    let mut fields = if is_batch {
+        vec![
+            crate::core::tuple::Field::new("query_id", batch.key_type.clone()),
+            crate::core::tuple::Field::new("rank", ValueType::Int),
+            crate::core::tuple::Field::new("score", ValueType::Float),
+            crate::core::tuple::Field::new("row_id", ValueType::Int),
+        ]
+    } else {
+        Vec::new()
+    };
+    for f in &schema.fields {
+        if fields.iter().any(|g| g.name == f.name) {
+            return Err(invalid(format!(
+                "SEARCH QUERIES: dataset '{}' has a column named '{}', which collides with the batch result column of the same name -- rename it first",
+                s.dataset, f.name
+            )));
+        }
+        let mut field = f.clone();
+        field.is_lazy = false;
+        fields.push(field);
+    }
+    let out_schema = Arc::new(crate::core::tuple::Schema::new(fields));
+    let prefilter = match &s.prefilter {
+        Some(expr) => Some(Arc::new(
+            build_prefilter(db, expr, &s.dataset, &schema, &batch).map_err(invalid)?,
+        )),
+        None => None,
+    };
+    let plan = LogicalPlan::BatchVectorSearch {
+        dataset_name: s.dataset.clone(),
         column: s.column.clone(),
-        query: query_tensor,
+        queries: Arc::new(crate::query::logical::QueryBatch(batch.queries)),
         k: s.top_k,
+        schema: out_schema.clone(),
+        prefilter,
+        rows_only: !is_batch,
     };
-    Ok((plan, schema))
+    Ok((plan, out_schema))
 }
 
-/// `SEARCH ... QUERIES`'s resolved queries, `(query_id, vector)`, plus the
-/// `query_id` column's type.
-type BatchQueries = (Vec<(Value, Vec<f32>)>, ValueType);
+/// `SEARCH ... QUERIES`'s resolved queries, `(query_id, vector)`, the
+/// `query_id` column's type, and -- for a dataset source -- its name,
+/// schema and every query row's values (for `PREFILTER`).
+struct BatchQueries {
+    queries: Vec<(Value, Vec<f32>)>,
+    key_type: ValueType,
+    source: Option<(String, Arc<crate::core::tuple::Schema>, Vec<Vec<Value>>)>,
+}
 
-/// Resolves `SEARCH ... QUERIES`'s source into `(query_id, vector)` pairs
-/// plus the `query_id` column's type: rows of a 2-D tensor (ids `0..n`), or
-/// a dataset's vector column (ids from its `KEY` column, else `0..n`).
+/// Resolves `SEARCH ... QUERIES`'s source: rows of a 2-D tensor (ids
+/// `0..n`), or a dataset's vector column (ids from its `KEY` column, else
+/// `0..n`).
 fn resolve_batch_queries(
     db: &TensorDb,
     source: &str,
@@ -284,7 +316,11 @@ fn resolve_batch_queries(
         let queries = (0..dims[0])
             .map(|i| (Value::Int(i as i64), data[i * d..(i + 1) * d].to_vec()))
             .collect();
-        return Ok((queries, ValueType::Int));
+        return Ok(BatchQueries {
+            queries,
+            key_type: ValueType::Int,
+            source: None,
+        });
     };
     let ds = db.get_dataset(source).map_err(|e| e.to_string())?;
     let col_idx = ds.schema.get_field_index(column).ok_or_else(|| {
@@ -307,6 +343,7 @@ fn resolve_batch_queries(
         None => ValueType::Int,
     };
     let mut queries = Vec::with_capacity(ds.rows.len());
+    let mut rows = Vec::with_capacity(ds.rows.len());
     for (i, row) in ds.rows.iter().enumerate() {
         let row = crate::query::physical::evaluate_lazy_columns_in_row(ds, row)
             .map_err(|e| e.to_string())?;
@@ -327,8 +364,159 @@ fn resolve_batch_queries(
             None => Value::Int(i as i64),
         };
         queries.push((id, v));
+        rows.push(row.values);
     }
-    Ok((queries, key_type))
+    Ok(BatchQueries {
+        queries,
+        key_type,
+        source: Some((source.to_string(), ds.schema.clone(), rows)),
+    })
+}
+
+/// Lowers a `PREFILTER` predicate. `<query dataset>.<column>` becomes the
+/// query column `QUERY_COLUMN_PREFIX + column`, evaluated per query; every
+/// other name must be a column of the searched dataset.
+fn build_prefilter(
+    db: &TensorDb,
+    expr: &Expr,
+    dataset: &str,
+    schema: &crate::core::tuple::Schema,
+    batch: &BatchQueries,
+) -> Result<crate::query::logical::Prefilter, String> {
+    use crate::query::logical::QUERY_COLUMN_PREFIX;
+
+    let query_source = batch.source.as_ref();
+    let unknown = std::cell::RefCell::new(Vec::new());
+    let rewritten = map_expr(expr, &|e| match (e, query_source) {
+        (Expr::Field { base, field }, Some((qname, qschema, _))) => match base.as_ref() {
+            Expr::Ref(b) if b == qname => {
+                if qschema.get_field_index(field).is_none() {
+                    unknown.borrow_mut().push(format!("{}.{}", qname, field));
+                }
+                Some(Expr::Ref(format!("{}{}", QUERY_COLUMN_PREFIX, field)))
+            }
+            _ => None,
+        },
+        _ => None,
+    });
+    if let Some(name) = unknown.into_inner().first() {
+        return Err(format!("PREFILTER: unknown query column '{}'", name));
+    }
+
+    let mut fields: Vec<crate::core::tuple::Field> = schema
+        .fields
+        .iter()
+        .map(|f| {
+            let mut f = f.clone();
+            f.is_lazy = false;
+            f
+        })
+        .collect();
+    let mut query_values = Vec::new();
+    if let Some((_, qschema, rows)) = query_source {
+        for f in &qschema.fields {
+            let mut f = f.clone();
+            f.name = format!("{}{}", QUERY_COLUMN_PREFIX, f.name);
+            f.is_lazy = false;
+            fields.push(f.nullable());
+        }
+        query_values = rows.clone();
+    }
+    let combined_schema = Arc::new(crate::core::tuple::Schema::new(fields));
+    let predicate = dsl_expr_to_logical_expr(
+        &rewritten,
+        &combined_schema,
+        &std::collections::HashSet::new(),
+    );
+    let mut referenced = Vec::new();
+    collect_referenced_columns(&predicate, &mut referenced);
+    for name in &referenced {
+        if combined_schema.get_field_index(name).is_none() {
+            return Err(format!(
+                "PREFILTER: unknown column '{}' in dataset '{}'",
+                name, dataset
+            ));
+        }
+    }
+
+    let sorted_range = sorted_prefilter_range(db, dataset, &predicate);
+    Ok(crate::query::logical::Prefilter {
+        predicate,
+        combined_schema,
+        query_values,
+        sorted_range,
+    })
+}
+
+/// The first conjunct of a `PREFILTER` predicate that the SORTED index on
+/// one of `dataset`'s columns can answer, with bounds that use only
+/// constants and query columns (so they're known per query).
+fn sorted_prefilter_range(
+    db: &TensorDb,
+    dataset: &str,
+    predicate: &LogicalExpr,
+) -> Option<(String, Vec<(String, LogicalExpr)>)> {
+    use crate::query::logical::QUERY_COLUMN_PREFIX;
+
+    let ds = db.get_dataset(dataset).ok()?;
+    let has_sorted = |c: &str| {
+        ds.get_index(c)
+            .is_some_and(|i| i.index_type() == crate::core::index::IndexType::Sorted)
+    };
+    let query_only = |e: &LogicalExpr| {
+        let mut cols = Vec::new();
+        collect_referenced_columns(e, &mut cols);
+        cols.iter().all(|c| c.starts_with(QUERY_COLUMN_PREFIX))
+    };
+    let flip = |op: &str| {
+        match op {
+            "<" => ">",
+            "<=" => ">=",
+            ">" => "<",
+            ">=" => "<=",
+            other => other,
+        }
+        .to_string()
+    };
+
+    let mut conjuncts = vec![predicate];
+    let mut i = 0;
+    while i < conjuncts.len() {
+        if let LogicalExpr::And(l, r) = conjuncts[i] {
+            conjuncts[i] = l;
+            conjuncts.push(r);
+        } else {
+            i += 1;
+        }
+    }
+    conjuncts.into_iter().find_map(|c| match c {
+        LogicalExpr::Between { expr, low, high } => match expr.as_ref() {
+            LogicalExpr::Column(col) if has_sorted(col) && query_only(low) && query_only(high) => {
+                Some((
+                    col.clone(),
+                    vec![
+                        (">=".to_string(), (**low).clone()),
+                        ("<=".to_string(), (**high).clone()),
+                    ],
+                ))
+            }
+            _ => None,
+        },
+        LogicalExpr::BinaryExpr { left, op, right }
+            if matches!(op.as_str(), "<" | "<=" | ">" | ">=" | "=") =>
+        {
+            match (left.as_ref(), right.as_ref()) {
+                (LogicalExpr::Column(col), other) if has_sorted(col) && query_only(other) => {
+                    Some((col.clone(), vec![(op.clone(), other.clone())]))
+                }
+                (other, LogicalExpr::Column(col)) if has_sorted(col) && query_only(other) => {
+                    Some((col.clone(), vec![(flip(op), other.clone())]))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    })
 }
 
 /// A `SEARCH` result returned inline (no `INTO`).
@@ -1026,6 +1214,7 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             CastTarget::Bool => ValueType::Bool,
             CastTarget::Vector(n) => ValueType::Vector(*n),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
+            CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),
         Expr::MatLiteral(_) => ValueType::Matrix(0, 0),
@@ -1045,6 +1234,10 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             | VectorFnKind::ComplexAbs
             | VectorFnKind::Phase => ValueType::Float64,
             VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
+            VectorFnKind::Tanimoto | VectorFnKind::Jaccard => ValueType::Float64,
+            VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
+            VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
+            VectorFnKind::SpecMatches => ValueType::Int,
         },
         _ => ValueType::Float,
     }
@@ -1074,6 +1267,12 @@ fn apply_window_and_computed_exprs(
                 // always refers to a real source column, never to a
                 // previously-appended computed one.
                 let logical_expr = dsl_expr_to_logical_expr(expr, base_schema, right_tables);
+                crate::query::typecheck::check_expr(&logical_expr, base_schema).map_err(|e| {
+                    DslError::Engine {
+                        line: line_no,
+                        source: crate::engine::EngineError::InvalidOp(e),
+                    }
+                })?;
                 let fallback_vtype = infer_expr_result_type(expr);
 
                 // Evaluate every row first so the whole column gets ONE
@@ -1086,10 +1285,17 @@ fn apply_window_and_computed_exprs(
                 // their real type, silently building rows with different
                 // schemas for the same logical column and later failing
                 // Dataset::with_rows's structural schema-equality check.
+                crate::query::row_error::clear();
                 let vals: Vec<Value> = rows
                     .iter()
                     .map(|row| evaluate_expression(&logical_expr, row))
                     .collect();
+                if let Some(e) = crate::query::row_error::take() {
+                    return Err(DslError::Engine {
+                        line: line_no,
+                        source: crate::engine::EngineError::InvalidOp(e),
+                    });
+                }
                 let vtype = vals
                     .iter()
                     .find(|v| !matches!(v, Value::Null))
@@ -1522,6 +1728,7 @@ pub(super) fn execute_add_computed_column(
             Value::String(_) => ValueType::String,
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
+            Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::Matrix(m) => {
                 let r = m.len();
                 let c = m.first().map_or(0, |row| row.len());
@@ -1575,6 +1782,7 @@ pub(super) fn execute_add_computed_column(
             Value::String(_) => ValueType::String,
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
+            Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::Matrix(m) => ValueType::Matrix(m.len(), m.first().map_or(0, |r| r.len())),
             Value::Complex(_) => ValueType::Complex,
             Value::Null => ValueType::Null,
@@ -1658,9 +1866,21 @@ pub(super) fn agg_func_to_logical(
 /// into `CallExpr`'s own variants for a shape this rewrite never needs to
 /// reach.
 fn rewrite_ref_names(expr: &Expr, rename: &std::collections::HashMap<String, String>) -> Expr {
+    map_expr(expr, &|e| match e {
+        Expr::Ref(name) => rename.get(name).map(|n| Expr::Ref(n.clone())),
+        _ => None,
+    })
+}
+
+/// Rebuilds `expr` bottom-up, except that any node for which `f` returns
+/// `Some(replacement)` is replaced whole (its children aren't visited).
+fn map_expr(expr: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
+    if let Some(replacement) = f(expr) {
+        return replacement;
+    }
     match expr {
-        Expr::Ref(name) => Expr::Ref(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
-        Expr::Int(_)
+        Expr::Ref(_)
+        | Expr::Int(_)
         | Expr::Scalar(_)
         | Expr::StringLit(_)
         | Expr::Bool(_)
@@ -1671,31 +1891,25 @@ fn rewrite_ref_names(expr: &Expr, rename: &std::collections::HashMap<String, Str
         | Expr::Index { .. } => expr.clone(),
         Expr::Infix { op, lhs, rhs } => Expr::Infix {
             op: *op,
-            lhs: Box::new(rewrite_ref_names(lhs, rename)),
-            rhs: Box::new(rewrite_ref_names(rhs, rename)),
+            lhs: Box::new(map_expr(lhs, f)),
+            rhs: Box::new(map_expr(rhs, f)),
         },
-        Expr::And(l, r) => Expr::And(
-            Box::new(rewrite_ref_names(l, rename)),
-            Box::new(rewrite_ref_names(r, rename)),
-        ),
-        Expr::Or(l, r) => Expr::Or(
-            Box::new(rewrite_ref_names(l, rename)),
-            Box::new(rewrite_ref_names(r, rename)),
-        ),
-        Expr::Not(e) => Expr::Not(Box::new(rewrite_ref_names(e, rename))),
-        Expr::IsNull(e) => Expr::IsNull(Box::new(rewrite_ref_names(e, rename))),
-        Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(rewrite_ref_names(e, rename))),
+        Expr::And(l, r) => Expr::And(Box::new(map_expr(l, f)), Box::new(map_expr(r, f))),
+        Expr::Or(l, r) => Expr::Or(Box::new(map_expr(l, f)), Box::new(map_expr(r, f))),
+        Expr::Not(e) => Expr::Not(Box::new(map_expr(e, f))),
+        Expr::IsNull(e) => Expr::IsNull(Box::new(map_expr(e, f))),
+        Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(map_expr(e, f))),
         Expr::In { expr, list } => Expr::In {
-            expr: Box::new(rewrite_ref_names(expr, rename)),
-            list: list.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+            expr: Box::new(map_expr(expr, f)),
+            list: list.iter().map(|e| map_expr(e, f)).collect(),
         },
         Expr::Between { expr, low, high } => Expr::Between {
-            expr: Box::new(rewrite_ref_names(expr, rename)),
-            low: Box::new(rewrite_ref_names(low, rename)),
-            high: Box::new(rewrite_ref_names(high, rename)),
+            expr: Box::new(map_expr(expr, f)),
+            low: Box::new(map_expr(low, f)),
+            high: Box::new(map_expr(high, f)),
         },
         Expr::Field { base, field } => Expr::Field {
-            base: Box::new(rewrite_ref_names(base, rename)),
+            base: Box::new(map_expr(base, f)),
             field: field.clone(),
         },
         Expr::Case {
@@ -1703,35 +1917,26 @@ fn rewrite_ref_names(expr: &Expr, rename: &std::collections::HashMap<String, Str
             branches,
             else_expr,
         } => Expr::Case {
-            operand: operand
-                .as_ref()
-                .map(|e| Box::new(rewrite_ref_names(e, rename))),
+            operand: operand.as_ref().map(|e| Box::new(map_expr(e, f))),
             branches: branches
                 .iter()
-                .map(|(c, r)| (rewrite_ref_names(c, rename), rewrite_ref_names(r, rename)))
+                .map(|(c, r)| (map_expr(c, f), map_expr(r, f)))
                 .collect(),
-            else_expr: else_expr
-                .as_ref()
-                .map(|e| Box::new(rewrite_ref_names(e, rename))),
+            else_expr: else_expr.as_ref().map(|e| Box::new(map_expr(e, f))),
         },
-        Expr::Coalesce(args) => {
-            Expr::Coalesce(args.iter().map(|e| rewrite_ref_names(e, rename)).collect())
-        }
-        Expr::Nullif(a, b) => Expr::Nullif(
-            Box::new(rewrite_ref_names(a, rename)),
-            Box::new(rewrite_ref_names(b, rename)),
-        ),
+        Expr::Coalesce(args) => Expr::Coalesce(args.iter().map(|e| map_expr(e, f)).collect()),
+        Expr::Nullif(a, b) => Expr::Nullif(Box::new(map_expr(a, f)), Box::new(map_expr(b, f))),
         Expr::ScalarFn { func, args } => Expr::ScalarFn {
             func: *func,
-            args: args.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+            args: args.iter().map(|e| map_expr(e, f)).collect(),
         },
         Expr::Cast { expr, to } => Expr::Cast {
-            expr: Box::new(rewrite_ref_names(expr, rename)),
+            expr: Box::new(map_expr(expr, f)),
             to: *to,
         },
         Expr::VectorFn { func, args } => Expr::VectorFn {
             func: *func,
-            args: args.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+            args: args.iter().map(|e| map_expr(e, f)).collect(),
         },
     }
 }
@@ -1862,6 +2067,76 @@ fn resolve_having(
     Ok(predicate)
 }
 
+/// Lowers the two operands of a binary operator. A decimal literal
+/// (`Expr::Scalar`) normally becomes an f32 `Float`; next to a `Float64`
+/// operand it keeps its full f64 value instead, so `double_col >= 0.1234567891`
+/// or `mass BETWEEN q.mass - 0.005 AND ...` compare at full precision rather
+/// than against an f32-rounded constant.
+fn lower_pair(
+    lhs: &Expr,
+    rhs: &Expr,
+    schema: &crate::core::tuple::Schema,
+    right_tables: &std::collections::HashSet<String>,
+) -> (LogicalExpr, LogicalExpr) {
+    let left = dsl_expr_to_logical_expr(lhs, schema, right_tables);
+    let right = dsl_expr_to_logical_expr(rhs, schema, right_tables);
+    let lt = crate::query::logical::infer_expr_type_full(&left, schema);
+    let rt = crate::query::logical::infer_expr_type_full(&right, schema);
+    let left = if rt == ValueType::Float64 {
+        lower_beside(lhs, &rt, schema, right_tables)
+    } else {
+        left
+    };
+    let right = if lt == ValueType::Float64 {
+        lower_beside(rhs, &lt, schema, right_tables)
+    } else {
+        right
+    };
+    (left, right)
+}
+
+/// Lowers `e`, keeping a decimal literal at f64 when it sits beside a
+/// `Float64` value (see `lower_pair`).
+fn lower_beside(
+    e: &Expr,
+    other: &ValueType,
+    schema: &crate::core::tuple::Schema,
+    right_tables: &std::collections::HashSet<String>,
+) -> LogicalExpr {
+    // Arithmetic made of literals (`180.06 - 0.005`) beside a DOUBLE: the
+    // DOUBLE context applies to its operands too.
+    if let (
+        Expr::Infix {
+            op: op @ (InfixOp::Add | InfixOp::Subtract | InfixOp::Multiply | InfixOp::Divide),
+            lhs,
+            rhs,
+        },
+        ValueType::Float64,
+    ) = (e, other)
+    {
+        let sym = match op {
+            InfixOp::Add => "+",
+            InfixOp::Subtract => "-",
+            InfixOp::Multiply => "*",
+            _ => "/",
+        };
+        return LogicalExpr::BinaryExpr {
+            left: Box::new(lower_beside(lhs, other, schema, right_tables)),
+            op: sym.to_string(),
+            right: Box::new(lower_beside(rhs, other, schema, right_tables)),
+        };
+    }
+    let lowered = dsl_expr_to_logical_expr(e, schema, right_tables);
+    widen_scalar_literal(e, lowered, other)
+}
+
+fn widen_scalar_literal(source: &Expr, lowered: LogicalExpr, other: &ValueType) -> LogicalExpr {
+    match (source, other) {
+        (Expr::Scalar(f), ValueType::Float64) => LogicalExpr::Literal(Value::Float64(*f)),
+        _ => lowered,
+    }
+}
+
 /// Convert a parsed DSL `Expr` into a `LogicalExpr` the physical evaluator
 /// understands. `schema` is the schema of the row(s) this expression will
 /// actually be evaluated against, and `right_tables` is the set of dataset
@@ -1912,10 +2187,11 @@ pub(super) fn dsl_expr_to_logical_expr(
                 InfixOp::GtEq => ">=",
                 InfixOp::LtEq => "<=",
             };
+            let (left, right) = lower_pair(lhs, rhs, schema, right_tables);
             LogicalExpr::BinaryExpr {
-                left: Box::new(dsl_expr_to_logical_expr(lhs, schema, right_tables)),
+                left: Box::new(left),
                 op: sym.to_string(),
-                right: Box::new(dsl_expr_to_logical_expr(rhs, schema, right_tables)),
+                right: Box::new(right),
             }
         }
         Expr::And(lhs, rhs) => LogicalExpr::And(
@@ -1941,18 +2217,26 @@ pub(super) fn dsl_expr_to_logical_expr(
             schema,
             right_tables,
         ))),
-        Expr::In { expr, list } => LogicalExpr::In {
-            expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
-            list: list
-                .iter()
-                .map(|e| dsl_expr_to_logical_expr(e, schema, right_tables))
-                .collect(),
-        },
-        Expr::Between { expr, low, high } => LogicalExpr::Between {
-            expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
-            low: Box::new(dsl_expr_to_logical_expr(low, schema, right_tables)),
-            high: Box::new(dsl_expr_to_logical_expr(high, schema, right_tables)),
-        },
+        Expr::In { expr, list } => {
+            let value = dsl_expr_to_logical_expr(expr, schema, right_tables);
+            let value_type = crate::query::logical::infer_expr_type_full(&value, schema);
+            LogicalExpr::In {
+                list: list
+                    .iter()
+                    .map(|e| lower_beside(e, &value_type, schema, right_tables))
+                    .collect(),
+                expr: Box::new(value),
+            }
+        }
+        Expr::Between { expr, low, high } => {
+            let value = dsl_expr_to_logical_expr(expr, schema, right_tables);
+            let value_type = crate::query::logical::infer_expr_type_full(&value, schema);
+            LogicalExpr::Between {
+                low: Box::new(lower_beside(low, &value_type, schema, right_tables)),
+                high: Box::new(lower_beside(high, &value_type, schema, right_tables)),
+                expr: Box::new(value),
+            }
+        }
         Expr::Case {
             operand,
             branches,
@@ -2023,6 +2307,7 @@ pub(super) fn dsl_expr_to_logical_expr(
                 CastTarget::Bool => LCast::Bool,
                 CastTarget::Vector(n) => LCast::Vector(*n),
                 CastTarget::Matrix(r, c) => LCast::Matrix(*r, *c),
+                CastTarget::BitVector(n) => LCast::BitVector(*n),
             };
             LogicalExpr::Cast {
                 expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
@@ -2057,6 +2342,13 @@ pub(super) fn dsl_expr_to_logical_expr(
                 VectorFnKind::Phase => LVk::Phase,
                 VectorFnKind::Conj => LVk::Conj,
                 VectorFnKind::ComplexNew => LVk::ComplexNew,
+                VectorFnKind::Tanimoto => LVk::Tanimoto,
+                VectorFnKind::Jaccard => LVk::Jaccard,
+                VectorFnKind::Hamming => LVk::Hamming,
+                VectorFnKind::BitCount => LVk::BitCount,
+                VectorFnKind::SpecCosine => LVk::SpecCosine,
+                VectorFnKind::SpecCosineMod => LVk::SpecCosineMod,
+                VectorFnKind::SpecMatches => LVk::SpecMatches,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,
@@ -2148,55 +2440,137 @@ pub(super) fn execute_update(
     s: UpdateStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    // Build a filter predicate (if any) using the same physical evaluator.
-    // Single dataset, no JOIN -- an empty right-table set/schema makes any
-    // `Expr::Field` qualifier resolve to its bare name, as before.
-    let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
-        let logical = dsl_expr_to_logical_expr(
-            f,
-            &crate::core::tuple::Schema::new(vec![]),
-            &std::collections::HashSet::new(),
-        );
-        Box::new(move |row| {
-            use crate::query::planner::evaluate_predicate;
-            evaluate_predicate(&logical, row)
-        })
-    });
+    let invalid = |msg: String| DslError::Engine {
+        line: line_no,
+        source: crate::engine::EngineError::InvalidOp(msg),
+    };
+    let schema = db
+        .get_dataset(&s.dataset)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?
+        .schema
+        .clone();
 
+    // Single dataset, no JOIN -- an empty right-table set makes any
+    // `Expr::Field` qualifier resolve to its bare name.
+    let no_right_tables = std::collections::HashSet::new();
+    let predicate = s
+        .filter
+        .as_ref()
+        .map(|f| dsl_expr_to_logical_expr(f, &schema, &no_right_tables));
+    // Assignments go through the same evaluator as SELECT/WHERE, so every
+    // expression form works (vector literals, functions, CAST, ...).
+    let mut assignments = Vec::with_capacity(s.assignments.len());
+    for (col_name, expr) in &s.assignments {
+        let idx = schema.get_field_index(col_name).ok_or_else(|| {
+            invalid(format!(
+                "UPDATE: unknown column '{}' in '{}'",
+                col_name, s.dataset
+            ))
+        })?;
+        let lowered = dsl_expr_to_logical_expr(expr, &schema, &no_right_tables);
+        crate::query::typecheck::check_expr(&lowered, &schema).map_err(invalid)?;
+        assignments.push((idx, lowered));
+    }
+
+    // Compute and type-check every new value before changing anything, so
+    // a bad assignment leaves the dataset untouched.
+    let ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+        line: line_no,
+        source: e,
+    })?;
+    let mut changes: Vec<(usize, Vec<(usize, Value)>)> = Vec::new();
+    crate::query::row_error::clear();
+    for (row_idx, row) in ds.rows.iter().enumerate() {
+        if let Some(pred) = &predicate {
+            if !crate::query::planner::evaluate_predicate(pred, row) {
+                continue;
+            }
+        }
+        let mut new_values = Vec::with_capacity(assignments.len());
+        for (col_idx, expr) in &assignments {
+            let field = &schema.fields[*col_idx];
+            let value = crate::query::physical::evaluate_expression(expr, row);
+            if let Some(e) = crate::query::row_error::take() {
+                return Err(invalid(format!(
+                    "UPDATE '{}' row {}: {}",
+                    s.dataset, row_idx, e
+                )));
+            }
+            let value = coerce_for_field(value, field)
+                .map_err(|e| invalid(format!("UPDATE '{}' row {}: {}", s.dataset, row_idx, e)))?;
+            new_values.push((*col_idx, value));
+        }
+        changes.push((row_idx, new_values));
+    }
+
+    if let Some(e) = crate::query::row_error::take() {
+        return Err(invalid(format!("UPDATE '{}': {}", s.dataset, e)));
+    }
+    let updated = changes.len();
+    let changed_columns: Vec<String> = assignments
+        .iter()
+        .map(|(i, _)| schema.fields[*i].name.clone())
+        .collect();
     let ds = db
         .get_dataset_mut(&s.dataset)
         .map_err(|e| DslError::Engine {
             line: line_no,
             source: e,
         })?;
-
-    let field_names: Vec<String> = ds.schema.fields.iter().map(|f| f.name.clone()).collect();
-    let mut updated = 0usize;
-
-    for row in ds.rows.iter_mut() {
-        if let Some(ref pred) = predicate {
-            if !pred(row) {
-                continue;
-            }
+    for (row_idx, new_values) in changes {
+        for (col_idx, value) in new_values {
+            ds.rows[row_idx].values[col_idx] = value;
         }
-        for (col_name, expr) in &s.assignments {
-            let env: std::collections::HashMap<&str, &Value> = field_names
-                .iter()
-                .zip(row.values.iter())
-                .map(|(k, v)| (k.as_str(), v))
-                .collect();
-            let new_val = eval_row_expr(expr, &env);
-            if let Some(idx) = field_names.iter().position(|n| n == col_name) {
-                row.values[idx] = new_val;
-            }
-        }
-        updated += 1;
+    }
+    if updated > 0 {
+        ds.rebuild_after_mutation(Some(&changed_columns))
+            .map_err(invalid)?;
     }
 
     Ok(DslOutput::Message(format!(
         "Updated {} row(s) in '{}'",
         updated, s.dataset
     )))
+}
+
+/// Fits an `UPDATE`'s computed value to its column's type: numeric values
+/// widen or narrow between `Int`/`Float`/`Float64` the way `INSERT`'s
+/// literals do (a non-integral number into an `Int` column is an error,
+/// never truncated), `NULL` needs a nullable column, and anything else must
+/// already match.
+fn coerce_for_field(value: Value, field: &crate::core::tuple::Field) -> Result<Value, String> {
+    let coerced = match (&field.value_type, value) {
+        (_, Value::Null) => Value::Null,
+        (ValueType::Float, Value::Int(i)) => Value::Float(i as f32),
+        (ValueType::Float, Value::Float64(f)) => Value::Float(f as f32),
+        (ValueType::Float64, Value::Int(i)) => Value::Float64(i as f64),
+        (ValueType::Float64, Value::Float(f)) => Value::Float64(f as f64),
+        (ValueType::Int, Value::Float(f)) if f.fract() == 0.0 && f.is_finite() => {
+            Value::Int(f as i64)
+        }
+        (ValueType::Int, Value::Float64(f)) if f.fract() == 0.0 && f.is_finite() => {
+            Value::Int(f as i64)
+        }
+        (_, v) => v,
+    };
+    if field.is_compatible(&coerced) {
+        Ok(coerced)
+    } else if coerced.is_null() {
+        Err(format!(
+            "column '{}' is not nullable, but the new value is NULL",
+            field.name
+        ))
+    } else {
+        Err(format!(
+            "column '{}' is {:?}, but the new value is {:?}",
+            field.name,
+            field.value_type,
+            coerced.value_type()
+        ))
+    }
 }
 
 // ─── DELETE ───────────────────────────────────────────────────────────────────
@@ -2229,10 +2603,30 @@ pub(super) fn execute_delete(
 
     let before = ds.rows.len();
     match predicate {
-        Some(pred) => ds.rows.retain(|row| !pred(row)),
+        Some(pred) => {
+            // Decide every row first, so a data error deletes nothing.
+            crate::query::row_error::clear();
+            let doomed: Vec<bool> = ds.rows.iter().map(&pred).collect();
+            if let Some(e) = crate::query::row_error::take() {
+                return Err(DslError::Engine {
+                    line: line_no,
+                    source: crate::engine::EngineError::InvalidOp(e),
+                });
+            }
+            let mut doomed = doomed.into_iter();
+            ds.rows.retain(|_| !doomed.next().unwrap_or(false));
+        }
         None => ds.rows.clear(),
     }
     let deleted = before - ds.rows.len();
+    if deleted > 0 {
+        // Row ids shifted: every index, zone map and stat is stale.
+        ds.rebuild_after_mutation(None)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: crate::engine::EngineError::InvalidOp(e),
+            })?;
+    }
 
     Ok(DslOutput::Message(format!(
         "Deleted {} row(s) from '{}'",

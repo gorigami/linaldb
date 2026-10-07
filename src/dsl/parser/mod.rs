@@ -588,6 +588,20 @@ impl Parser {
                     kind,
                 }))
             }
+            // `CREATE SORTED INDEX [<name>] ON <dataset>(<column>)` -- SORTED
+            // is contextual, only meaningful right before INDEX.
+            Some(Token::Ident(s))
+                if s == "SORTED" && matches!(self.peek_at(1), Some(Token::Index)) =>
+            {
+                self.advance();
+                self.advance();
+                let (dataset, column, kind) = self.parse_index_target(IndexKindAst::Sorted)?;
+                Ok(Statement::CreateIndex(CreateIndexStmt {
+                    dataset,
+                    column,
+                    kind,
+                }))
+            }
             Some(Token::Vector) => {
                 self.advance();
                 self.eat(&Token::Index)?;
@@ -613,7 +627,7 @@ impl Parser {
                     kind,
                 }))
             }
-            _ => Err(self.unexpected("DATABASE or INDEX after CREATE")),
+            _ => Err(self.unexpected("DATABASE, INDEX, SORTED INDEX or VECTOR INDEX after CREATE")),
         }
     }
 
@@ -933,6 +947,17 @@ impl Parser {
         })
     }
 
+    /// A `Matrix(r, c)` column's `c`: a number, or `*` for "any number of
+    /// columns, varying per row" (stored as 0), e.g. `Matrix(2, *)` for
+    /// spectra as peak lists of different lengths.
+    fn parse_matrix_cols(&mut self) -> Result<usize, ParseError> {
+        if self.at(&Token::Star) {
+            self.advance();
+            return Ok(0);
+        }
+        self.eat_usize()
+    }
+
     fn parse_col_type(&mut self) -> Result<ColType, ParseError> {
         match self.peek() {
             Some(Token::Vector) => {
@@ -947,7 +972,7 @@ impl Parser {
                 self.eat(&Token::LParen)?;
                 let rows = self.eat_usize()?;
                 self.eat(&Token::Comma)?;
-                let cols = self.eat_usize()?;
+                let cols = self.parse_matrix_cols()?;
                 self.eat(&Token::RParen)?;
                 Ok(ColType::Matrix(rows, cols))
             }
@@ -978,6 +1003,15 @@ impl Parser {
                     "STRING" | "TEXT" | "VARCHAR" => Ok(ColType::String),
                     "BOOL" | "BOOLEAN" => Ok(ColType::Bool),
                     "COMPLEX" => Ok(ColType::Complex),
+                    "BITVECTOR" => {
+                        self.eat(&Token::LParen)?;
+                        let n = self.eat_usize()?;
+                        self.eat(&Token::RParen)?;
+                        if n == 0 {
+                            return Err(self.error("BITVECTOR needs at least 1 bit"));
+                        }
+                        Ok(ColType::BitVector(n))
+                    }
                     "VECTOR" => {
                         self.eat(&Token::LParen)?;
                         let n = self.eat_usize()?;
@@ -988,7 +1022,7 @@ impl Parser {
                         self.eat(&Token::LParen)?;
                         let rows = self.eat_usize()?;
                         self.eat(&Token::Comma)?;
-                        let cols = self.eat_usize()?;
+                        let cols = self.parse_matrix_cols()?;
                         self.eat(&Token::RParen)?;
                         Ok(ColType::Matrix(rows, cols))
                     }

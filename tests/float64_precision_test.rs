@@ -303,3 +303,49 @@ fn cast_negative_float_literal_as_double_preserves_full_precision() {
     let ds = db.get_dataset("r").expect("dataset not found");
     assert_eq!(ds.rows[0].values[0], Value::Float64(-LITERAL_VALUE));
 }
+
+/// A decimal literal next to a DOUBLE operand keeps its full f64 value. It
+/// used to be lowered to an f32 `Float` first, so comparisons, windows and
+/// IN lists against DOUBLE columns used an f32-rounded constant.
+#[test]
+fn decimal_literals_beside_double_keep_full_precision() {
+    let mut db = linal::engine::TensorDb::new();
+    for l in [
+        "DATASET p COLUMNS (id: Int, x: DOUBLE, f: Float)",
+        "INSERT INTO p VALUES (1, 0.30434782608695654, 0.1)",
+        "INSERT INTO p VALUES (2, 180.0633881, 0.2)",
+    ] {
+        linal::dsl::execute_line(&mut db, l, 1).unwrap();
+    }
+    let count = |db: &mut linal::engine::TensorDb, q: &str| match linal::dsl::execute_line(db, q, 1)
+        .unwrap()
+    {
+        linal::dsl::DslOutput::Table(t) => t.rows.len(),
+        other => panic!("{:?}", other),
+    };
+    assert_eq!(
+        count(&mut db, "SELECT id FROM p WHERE x >= 0.30434782608695654"),
+        2
+    );
+    assert_eq!(
+        count(&mut db, "SELECT id FROM p WHERE x = 0.30434782608695654"),
+        1
+    );
+    assert_eq!(
+        count(
+            &mut db,
+            "SELECT id FROM p WHERE x IN (0.30434782608695654, 1.5)"
+        ),
+        1
+    );
+    // 180.0633881 as f32 is 180.06338500..., outside this 1e-7 window.
+    assert_eq!(
+        count(
+            &mut db,
+            "SELECT id FROM p WHERE x BETWEEN 180.0633881 - 0.0000001 AND 180.0633881 + 0.0000001"
+        ),
+        1
+    );
+    // FLOAT columns still compare against an f32 literal, as before.
+    assert_eq!(count(&mut db, "SELECT id FROM p WHERE f = 0.1"), 1);
+}

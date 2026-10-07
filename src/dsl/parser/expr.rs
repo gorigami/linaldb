@@ -539,6 +539,16 @@ impl Parser {
                                     "DOUBLE" | "FLOAT64" => CastTarget::Double,
                                     "TEXT" | "STRING" | "VARCHAR" => CastTarget::Text,
                                     "BOOL" | "BOOLEAN" => CastTarget::Bool,
+                                    "BITVECTOR" => {
+                                        if self.at(&Token::LParen) {
+                                            self.advance();
+                                            let n = self.eat_usize()?;
+                                            self.eat(&Token::RParen)?;
+                                            CastTarget::BitVector(Some(n))
+                                        } else {
+                                            CastTarget::BitVector(None)
+                                        }
+                                    }
                                     other => {
                                         return Err(
                                             self.error(format!("Unknown CAST target '{}'", other))
@@ -573,7 +583,9 @@ impl Parser {
                     }
                     // Vector scalar functions (SQL-style with parens)
                     "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE" | "MAT_SHAPE"
-                    | "REAL" | "IMAG" | "ABS" | "PHASE" | "CONJ" | "COMPLEX"
+                    | "REAL" | "IMAG" | "ABS" | "PHASE" | "CONJ" | "COMPLEX" | "TANIMOTO"
+                    | "JACCARD" | "HAMMING" | "BIT_COUNT" | "SPEC_COSINE" | "SPEC_COSINE_MOD"
+                    | "SPEC_MATCHES"
                         if self.at(&Token::LParen) =>
                     {
                         let func = match upper.as_str() {
@@ -589,6 +601,13 @@ impl Parser {
                             "PHASE" => VectorFnKind::Phase,
                             "CONJ" => VectorFnKind::Conj,
                             "COMPLEX" => VectorFnKind::ComplexNew,
+                            "TANIMOTO" => VectorFnKind::Tanimoto,
+                            "JACCARD" => VectorFnKind::Jaccard,
+                            "HAMMING" => VectorFnKind::Hamming,
+                            "BIT_COUNT" => VectorFnKind::BitCount,
+                            "SPEC_COSINE" => VectorFnKind::SpecCosine,
+                            "SPEC_COSINE_MOD" => VectorFnKind::SpecCosineMod,
+                            "SPEC_MATCHES" => VectorFnKind::SpecMatches,
                             _ => unreachable!(),
                         };
                         self.advance(); // consume '('
