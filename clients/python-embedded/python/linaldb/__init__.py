@@ -39,6 +39,7 @@ __all__ = [
     "TensorResult",
     "LinalError",
     "bitvector_array",
+    "peaks_array",
 ]
 
 
@@ -58,6 +59,29 @@ def bitvector_array(bits):
     return pa.FixedSizeBinaryArray.from_buffers(
         pa.binary(width), len(packed), [None, pa.py_buffer(packed.tobytes())]
     )
+
+
+def peaks_array(spectra):
+    """A `pyarrow` array for a `Matrix(2, *)` peak-list column (one spectrum
+    per row: row 0 the m/z values, ascending; row 1 the intensities), from
+    a list of `(mz, intensities)` pairs of equal-length 1-D arrays. Values
+    are stored as float32. Pass it to `Db.load_arrow()` in a table.
+    """
+    import numpy as np
+    import pyarrow as pa
+
+    rows = []
+    for i, (mz, intensities) in enumerate(spectra):
+        mz = np.asarray(mz, dtype=np.float32)
+        intensities = np.asarray(intensities, dtype=np.float32)
+        if mz.ndim != 1 or mz.shape != intensities.shape:
+            raise LinalError(
+                f"peaks_array: spectrum {i} needs two 1-D arrays of the same length, "
+                f"got {mz.shape} and {intensities.shape}"
+            )
+        rows.extend([mz, intensities])
+    lists = pa.array(rows, type=pa.list_(pa.field("item", pa.float32(), nullable=False)))
+    return pa.FixedSizeListArray.from_arrays(lists, 2)
 
 
 class ExecuteResult:

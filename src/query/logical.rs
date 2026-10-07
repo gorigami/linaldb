@@ -89,6 +89,9 @@ pub enum VectorFnKind {
     Jaccard,
     Hamming,
     BitCount,
+    SpecCosine,
+    SpecCosineMod,
+    SpecMatches,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +530,8 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
             VectorFnKind::Tanimoto | VectorFnKind::Jaccard => ValueType::Float64,
             VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
+            VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
+            VectorFnKind::SpecMatches => ValueType::Int,
         },
         Expr::Case {
             else_expr,

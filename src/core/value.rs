@@ -319,7 +319,10 @@ impl Value {
             (Value::Bool(_), ValueType::Bool) => true,
             (Value::Vector(v), ValueType::Vector(dim)) => v.len() == *dim,
             (Value::Matrix(m), ValueType::Matrix(r, c)) => {
-                m.len() == *r && (m.is_empty() || m[0].len() == *c)
+                m.len() == *r
+                    && (m.is_empty()
+                        || (*c == 0 && m.iter().all(|row| row.len() == m[0].len()))
+                        || m[0].len() == *c)
             }
             (Value::Complex(_), ValueType::Complex) => true,
             (Value::BitVector(b), ValueType::BitVector(n)) => b.len() == *n,

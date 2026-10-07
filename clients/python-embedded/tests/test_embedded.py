@@ -243,3 +243,72 @@ def test_bitvector_array_and_errors(db):
     with pytest.raises(LinalError, match="expects BitVector"):
         db.load_numpy("y", np.zeros((2, 3), dtype=np.float32), column="v")
         db.execute("SELECT TANIMOTO(v, v) AS t FROM y")
+
+
+# --- Spectral similarity, checked against matchms (CASMI P5) --------------
+
+
+def _random_spectra(np, n, seed):
+    rng = np.random.default_rng(seed)
+    spectra = []
+    for _ in range(n):
+        k = int(rng.integers(3, 40))
+        mz = np.sort(rng.uniform(50, 400, k))
+        # Near-duplicate peaks and equal intensities, to exercise several
+        # candidates within tolerance and tied weights.
+        mz[1::5] = mz[0::5][: len(mz[1::5])] + 0.05
+        mz = np.sort(mz).astype(np.float32)
+        inten = rng.choice([1.0, 0.5, 0.25, rng.uniform(0.01, 1.0)], k).astype(np.float32)
+        spectra.append((mz, inten, float(rng.uniform(150, 450))))
+    return spectra
+
+
+def test_spectral_similarity_matches_matchms(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("matchms")
+    from matchms import Spectrum
+    from matchms.similarity import CosineGreedy, ModifiedCosineGreedy
+
+    specs = _random_spectra(np, 30, 1)
+    peaks = linaldb.peaks_array([(mz, it) for mz, it, _ in specs])
+    ids = np.arange(len(specs))
+    pms = np.array([pm for _, _, pm in specs])
+    one = np.ones(len(specs), dtype=np.int64)
+    db.load_arrow("lib", pa.table({"id": ids, "pm": pms, "k": one, "spec": peaks}))
+    db.load_arrow("qry", pa.table({"qid": ids, "qpm": pms, "k": one, "qspec": peaks}))
+    result = db.execute(
+        "SELECT id, qid, SPEC_COSINE(spec, qspec, 0.1) AS c, "
+        "SPEC_COSINE_MOD(spec, qspec, 0.1, pm - qpm) AS m, "
+        "SPEC_COSINE(spec, qspec, 0.1, 0, 0.5) AS c_sqrt, "
+        "SPEC_MATCHES(spec, qspec, 0.1) AS n, "
+        "SPEC_MATCHES(spec, qspec, 0.1, pm - qpm) AS n_mod "
+        "FROM lib JOIN qry ON lib.k = qry.k"
+    )
+    assert len(result.rows) == len(specs) ** 2
+
+    ms = [
+        Spectrum(mz=mz.astype(float), intensities=it.astype(float), metadata={"precursor_mz": pm})
+        for mz, it, pm in specs
+    ]
+    cos = CosineGreedy(tolerance=0.1)
+    cos_sqrt = CosineGreedy(tolerance=0.1, intensity_power=0.5)
+    mod = ModifiedCosineGreedy(tolerance=0.1)
+    for a, b, c, m, c_sqrt, n, n_mod in result.rows:
+        ref = cos.pair(ms[a], ms[b])
+        ref_mod = mod.pair(ms[a], ms[b])
+        assert c == pytest.approx(float(ref["score"]), abs=1e-12)
+        assert n == int(ref["matches"])
+        assert m == pytest.approx(float(ref_mod["score"]), abs=1e-12)
+        assert n_mod == int(ref_mod["matches"])
+        assert c_sqrt == pytest.approx(float(cos_sqrt.pair(ms[a], ms[b])["score"]), abs=1e-12)
+
+
+def test_unsorted_spectrum_is_an_error(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+
+    peaks = linaldb.peaks_array([([100.0, 200.0], [1.0, 1.0]), ([300.0, 150.0], [1.0, 1.0])])
+    db.load_arrow("s", pa.table({"id": np.array([0, 1]), "spec": peaks}))
+    with pytest.raises(LinalError, match="sorted ascending"):
+        db.execute("SELECT id, SPEC_COSINE(spec, spec, 0.1) AS c FROM s")

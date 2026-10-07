@@ -4,8 +4,10 @@
 //! Run on every lowered expression before rows are evaluated, so the
 //! mistake surfaces as an error naming the function and the types.
 //!
-//! Covers the bit-vector functions: `TANIMOTO`/`JACCARD`/`HAMMING` need two
-//! `BitVector`s of the same length, `BIT_COUNT` one `BitVector`.
+//! Covers the bit-vector functions (`TANIMOTO`/`JACCARD`/`HAMMING` need two
+//! `BitVector`s of the same length, `BIT_COUNT` one `BitVector`) and the
+//! spectral ones (`SPEC_*`: two `Matrix(2, n)` peak lists, then numbers).
+//! Problems only the data can show (unsorted m/z) go through `row_error`.
 
 use super::logical::{infer_expr_type_full, Expr, VectorFnKind};
 use crate::core::tuple::Schema;
@@ -51,6 +53,50 @@ pub fn check_expr(expr: &Expr, schema: &Schema) -> Result<(), String> {
                     "{}: BitVector lengths differ ({} vs {})",
                     name, known[0], known[1]
                 ));
+            }
+        }
+    }
+    if let Expr::VectorFn { func, args } = expr {
+        let spec = match func {
+            VectorFnKind::SpecCosine => Some(("SPEC_COSINE", 3, 5)),
+            VectorFnKind::SpecCosineMod => Some(("SPEC_COSINE_MOD", 4, 6)),
+            VectorFnKind::SpecMatches => Some(("SPEC_MATCHES", 3, 4)),
+            _ => None,
+        };
+        if let Some((name, min, max)) = spec {
+            if args.len() < min || args.len() > max {
+                return Err(format!(
+                    "{} takes {} to {} arguments, got {}",
+                    name,
+                    min,
+                    max,
+                    args.len()
+                ));
+            }
+            for (i, arg) in args.iter().enumerate() {
+                let t = infer_expr_type_full(arg, schema);
+                let ok = if i < 2 {
+                    matches!(t, ValueType::Matrix(2, _) | ValueType::Null)
+                } else {
+                    matches!(
+                        t,
+                        ValueType::Int | ValueType::Float | ValueType::Float64 | ValueType::Null
+                    )
+                };
+                if !ok {
+                    let expected = if i < 2 {
+                        "a peak list Matrix(2, n)"
+                    } else {
+                        "a number"
+                    };
+                    return Err(format!(
+                        "{}: argument {} must be {}, got {}",
+                        name,
+                        i + 1,
+                        expected,
+                        t
+                    ));
+                }
             }
         }
     }

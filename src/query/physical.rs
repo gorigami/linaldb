@@ -130,10 +130,14 @@ impl PhysicalPlan for FilterExec {
 
     fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
         let input_rows = self.input.execute(db)?;
+        crate::query::row_error::clear();
         let filtered = input_rows
             .into_iter()
             .filter(|row| (self.predicate)(row))
             .collect();
+        if let Some(e) = crate::query::row_error::take() {
+            return Err(EngineError::InvalidOp(e));
+        }
         Ok(filtered)
     }
 }
@@ -422,7 +426,12 @@ impl BatchVectorSearchExec {
                             eval_row.values[i] = row.values[i].clone();
                         }
                     }
-                    if !crate::query::planner::evaluate_predicate(&pf.predicate, &eval_row) {
+                    let passes =
+                        crate::query::planner::evaluate_predicate(&pf.predicate, &eval_row);
+                    if let Some(e) = crate::query::row_error::take() {
+                        return Err(e);
+                    }
+                    if !passes {
                         continue;
                     }
                     match &row.values[col_idx] {
@@ -458,6 +467,77 @@ impl BatchVectorSearchExec {
             })
             .collect::<Result<_, String>>()
             .map_err(EngineError::InvalidOp)
+    }
+}
+
+/// `SPEC_COSINE` / `SPEC_COSINE_MOD` / `SPEC_MATCHES` (`core::spectral`).
+/// A NULL argument gives NULL; bad data (unsorted m/z, a non-finite value,
+/// a negative tolerance) is recorded in `row_error` so the statement fails
+/// with it.
+fn spectral_fn(
+    func: crate::query::logical::VectorFnKind,
+    vals: &[crate::core::value::Value],
+) -> crate::core::value::Value {
+    use crate::core::spectral::{cosine_greedy, peaks, Params};
+    use crate::core::value::Value;
+    use crate::query::logical::VectorFnKind;
+
+    let name = match func {
+        VectorFnKind::SpecCosine => "SPEC_COSINE",
+        VectorFnKind::SpecCosineMod => "SPEC_COSINE_MOD",
+        _ => "SPEC_MATCHES",
+    };
+    if vals.iter().any(|v| v.is_null()) {
+        return Value::Null;
+    }
+    let num = |i: usize| -> Option<f64> {
+        match vals.get(i)? {
+            Value::Int(n) => Some(*n as f64),
+            Value::Float(f) => Some(*f as f64),
+            Value::Float64(f) => Some(*f),
+            _ => None,
+        }
+    };
+    let result = (|| -> Result<Value, String> {
+        let (Some(Value::Matrix(a)), Some(Value::Matrix(b))) = (vals.first(), vals.get(1)) else {
+            return Err("the first two arguments must be peak lists, Matrix(2, n)".to_string());
+        };
+        let a = peaks(a, "first spectrum")?;
+        let b = peaks(b, "second spectrum")?;
+        let tolerance = num(2).ok_or("tolerance must be a number")?;
+        let (shift, powers_at) = match func {
+            VectorFnKind::SpecCosineMod => (Some(num(3).ok_or("shift must be a number")?), 4),
+            VectorFnKind::SpecMatches => (num(3), 4),
+            _ => (None, 3),
+        };
+        let mz_power = if vals.len() > powers_at {
+            num(powers_at).ok_or("mz_power must be a number")?
+        } else {
+            0.0
+        };
+        let intensity_power = if vals.len() > powers_at + 1 {
+            num(powers_at + 1).ok_or("intensity_power must be a number")?
+        } else {
+            1.0
+        };
+        let params = Params::new(tolerance, mz_power, intensity_power)?;
+        if let Some(s) = shift {
+            if !s.is_finite() {
+                return Err("shift must be finite".to_string());
+            }
+        }
+        let (score, matched) = cosine_greedy(&a, &b, params, shift);
+        Ok(match func {
+            VectorFnKind::SpecMatches => Value::Int(matched as i64),
+            _ => Value::Float64(score),
+        })
+    })();
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            crate::query::row_error::record(format!("{}: {}", name, e));
+            Value::Null
+        }
     }
 }
 
@@ -673,6 +753,7 @@ impl PhysicalPlan for AggregateExec {
 
     fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
         let rows = self.input.execute(db)?;
+        crate::query::row_error::clear();
 
         // If no rows and no group by, return empty result set
         // (Aggregations on empty sets typically return no rows, not NULL rows)
@@ -1270,6 +1351,10 @@ impl PhysicalPlan for AggregateExec {
                     }
                 }
             }
+        }
+
+        if let Some(e) = crate::query::row_error::take() {
+            return Err(EngineError::InvalidOp(e));
         }
 
         // Output rows - compute AVG/VARIANCE/MEDIAN from their accumulators
@@ -1881,6 +1966,9 @@ pub fn evaluate_expression(
                     Some(Value::BitVector(a)) => Value::Int(a.count_ones() as i64),
                     _ => Value::Null,
                 },
+                VectorFnKind::SpecCosine
+                | VectorFnKind::SpecCosineMod
+                | VectorFnKind::SpecMatches => spectral_fn(*func, &vals),
                 VectorFnKind::Distance => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => Value::Float(
                         a.iter()

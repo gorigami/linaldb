@@ -1236,6 +1236,8 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
             VectorFnKind::Tanimoto | VectorFnKind::Jaccard => ValueType::Float64,
             VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
+            VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
+            VectorFnKind::SpecMatches => ValueType::Int,
         },
         _ => ValueType::Float,
     }
@@ -1283,10 +1285,17 @@ fn apply_window_and_computed_exprs(
                 // their real type, silently building rows with different
                 // schemas for the same logical column and later failing
                 // Dataset::with_rows's structural schema-equality check.
+                crate::query::row_error::clear();
                 let vals: Vec<Value> = rows
                     .iter()
                     .map(|row| evaluate_expression(&logical_expr, row))
                     .collect();
+                if let Some(e) = crate::query::row_error::take() {
+                    return Err(DslError::Engine {
+                        line: line_no,
+                        source: crate::engine::EngineError::InvalidOp(e),
+                    });
+                }
                 let vtype = vals
                     .iter()
                     .find(|v| !matches!(v, Value::Null))
@@ -2337,6 +2346,9 @@ pub(super) fn dsl_expr_to_logical_expr(
                 VectorFnKind::Jaccard => LVk::Jaccard,
                 VectorFnKind::Hamming => LVk::Hamming,
                 VectorFnKind::BitCount => LVk::BitCount,
+                VectorFnKind::SpecCosine => LVk::SpecCosine,
+                VectorFnKind::SpecCosineMod => LVk::SpecCosineMod,
+                VectorFnKind::SpecMatches => LVk::SpecMatches,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,
@@ -2470,6 +2482,7 @@ pub(super) fn execute_update(
         source: e,
     })?;
     let mut changes: Vec<(usize, Vec<(usize, Value)>)> = Vec::new();
+    crate::query::row_error::clear();
     for (row_idx, row) in ds.rows.iter().enumerate() {
         if let Some(pred) = &predicate {
             if !crate::query::planner::evaluate_predicate(pred, row) {
@@ -2480,6 +2493,12 @@ pub(super) fn execute_update(
         for (col_idx, expr) in &assignments {
             let field = &schema.fields[*col_idx];
             let value = crate::query::physical::evaluate_expression(expr, row);
+            if let Some(e) = crate::query::row_error::take() {
+                return Err(invalid(format!(
+                    "UPDATE '{}' row {}: {}",
+                    s.dataset, row_idx, e
+                )));
+            }
             let value = coerce_for_field(value, field)
                 .map_err(|e| invalid(format!("UPDATE '{}' row {}: {}", s.dataset, row_idx, e)))?;
             new_values.push((*col_idx, value));
@@ -2487,6 +2506,9 @@ pub(super) fn execute_update(
         changes.push((row_idx, new_values));
     }
 
+    if let Some(e) = crate::query::row_error::take() {
+        return Err(invalid(format!("UPDATE '{}': {}", s.dataset, e)));
+    }
     let updated = changes.len();
     let changed_columns: Vec<String> = assignments
         .iter()
@@ -2581,7 +2603,19 @@ pub(super) fn execute_delete(
 
     let before = ds.rows.len();
     match predicate {
-        Some(pred) => ds.rows.retain(|row| !pred(row)),
+        Some(pred) => {
+            // Decide every row first, so a data error deletes nothing.
+            crate::query::row_error::clear();
+            let doomed: Vec<bool> = ds.rows.iter().map(|row| pred(row)).collect();
+            if let Some(e) = crate::query::row_error::take() {
+                return Err(DslError::Engine {
+                    line: line_no,
+                    source: crate::engine::EngineError::InvalidOp(e),
+                });
+            }
+            let mut doomed = doomed.into_iter();
+            ds.rows.retain(|_| !doomed.next().unwrap_or(false));
+        }
         None => ds.rows.clear(),
     }
     let deleted = before - ds.rows.len();

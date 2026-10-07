@@ -584,6 +584,10 @@ fn vector_or_matrix_type(data_type: &DataType) -> Option<ValueType> {
             {
                 Some(ValueType::Matrix(*size as usize, *inner_size as usize))
             }
+            // `Matrix(r, *)`: r rows of varying length.
+            DataType::List(innermost) if matches!(innermost.data_type(), DataType::Float32) => {
+                Some(ValueType::Matrix(*size as usize, 0))
+            }
             _ => None,
         },
         _ => None,
@@ -920,6 +924,38 @@ fn matrix_array_to_values(array: &ArrayRef, num_rows: usize) -> Result<Vec<Value
             StorageError::Serialization("Expected FixedSizeListArray for Matrix column".to_string())
         })?;
     let outer_size = outer_list.value_length() as usize;
+
+    // `Matrix(r, *)`: each of the r rows is a variable-length list.
+    if matches!(outer_list.value_type(), DataType::List(_)) {
+        return (0..num_rows)
+            .map(|i| {
+                if outer_list.is_null(i) {
+                    return Ok(Value::Null);
+                }
+                let rows = outer_list.value(i);
+                let rows = rows
+                    .as_any()
+                    .downcast_ref::<arrow::array::ListArray>()
+                    .ok_or_else(|| {
+                        StorageError::Serialization("Expected List rows in Matrix column".into())
+                    })?;
+                (0..rows.len())
+                    .map(|r| {
+                        let row = rows.value(r);
+                        row.as_any()
+                            .downcast_ref::<Float32Array>()
+                            .map(|f| f.values().to_vec())
+                            .ok_or_else(|| {
+                                StorageError::Serialization(
+                                    "Expected Float32 values inside Matrix column".into(),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Value::Matrix)
+            })
+            .collect();
+    }
 
     let inner_list = outer_list
         .values()
@@ -1279,12 +1315,55 @@ fn build_vector_column(column_data: &[&Value], declared_dim: usize) -> (DataType
 /// `FixedSizeList<FixedSizeList<Float32>>` column, rows-then-cols nested,
 /// with the same declared-dims-first / infer-from-data / fall-back-to-JSON
 /// strategy.
+/// `Matrix(r, *)` as a native `FixedSizeList<List<Float32>, r>`: r rows of
+/// varying length per cell (e.g. a spectrum's m/z and intensity rows).
+/// `None` when the column has a NULL or a cell with a different row count
+/// (the caller falls back to JSON text, like the fixed-size builders).
+fn build_variable_matrix_column(
+    column_data: &[&Value],
+    rows: usize,
+) -> Option<(DataType, ArrayRef)> {
+    let mut offsets: Vec<i32> = vec![0];
+    let mut values: Vec<f32> = Vec::new();
+    for v in column_data {
+        let Value::Matrix(m) = v else { return None };
+        if m.len() != rows {
+            return None;
+        }
+        for row in m {
+            values.extend_from_slice(row);
+            offsets.push(i32::try_from(values.len()).ok()?);
+        }
+    }
+    let item = Arc::new(ArrowField::new("item", DataType::Float32, false));
+    let list = arrow::array::ListArray::try_new(
+        item,
+        arrow::buffer::OffsetBuffer::new(offsets.into()),
+        Arc::new(Float32Array::from(values)),
+        None,
+    )
+    .ok()?;
+    let row_field = Arc::new(ArrowField::new("item", list.data_type().clone(), false));
+    let outer =
+        FixedSizeListArray::try_new(row_field.clone(), rows as i32, Arc::new(list), None).ok()?;
+    Some((
+        DataType::FixedSizeList(row_field, rows as i32),
+        Arc::new(outer),
+    ))
+}
+
 fn build_matrix_column(
     column_data: &[&Value],
     declared_rows: usize,
     declared_cols: usize,
 ) -> (DataType, ArrayRef) {
     let num_rows = column_data.len();
+    if declared_rows > 0 && declared_cols == 0 {
+        if let Some(native) = build_variable_matrix_column(column_data, declared_rows) {
+            return native;
+        }
+        return build_legacy_json_column(column_data);
+    }
     let dims = if declared_rows > 0 && declared_cols > 0 {
         Some((declared_rows, declared_cols))
     } else {

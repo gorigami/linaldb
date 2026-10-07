@@ -907,6 +907,15 @@ pub enum VectorFnKind {
     Hamming,
     /// `BIT_COUNT(a)` — number of 1 bits. Result: `Int`.
     BitCount,
+    /// `SPEC_COSINE(a, b, tolerance [, mz_power, intensity_power])` —
+    /// greedy cosine of two peak lists (`core::spectral`). Result: `Float64`.
+    SpecCosine,
+    /// `SPEC_COSINE_MOD(a, b, tolerance, shift [, mz_power, intensity_power])`
+    /// — modified cosine, `shift` = precursor m/z of `a` minus that of `b`.
+    SpecCosineMod,
+    /// `SPEC_MATCHES(a, b, tolerance [, shift])` — number of peaks the
+    /// greedy (modified, with `shift`) cosine matched. Result: `Int`.
+    SpecMatches,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

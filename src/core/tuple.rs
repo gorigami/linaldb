@@ -50,7 +50,10 @@ impl Field {
             (ValueType::Vector(expected_dim), ValueType::Vector(actual_dim)) => {
                 expected_dim == &0 || expected_dim == &actual_dim
             }
-            (ValueType::Matrix(er, ec), ValueType::Matrix(ar, ac)) => er == &ar && ec == &ac,
+            // A declared column count of 0 (`Matrix(r, *)`) accepts any.
+            (ValueType::Matrix(er, ec), ValueType::Matrix(ar, ac)) => {
+                er == &ar && (ec == &0 || ec == &ac)
+            }
             (ValueType::Complex, ValueType::Complex) => true,
             (ValueType::BitVector(expected), ValueType::BitVector(actual)) => expected == &actual,
             (ValueType::Null, ValueType::Null) => self.nullable,

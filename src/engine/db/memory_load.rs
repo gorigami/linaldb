@@ -46,6 +46,12 @@ fn first_non_finite(array: &ArrayRef) -> Option<(usize, f64)> {
                 .slice(list.offset() * *size as usize, list.len() * *size as usize);
             first_non_finite(&child).map(|(i, v)| (i / *size as usize, v))
         }
+        DataType::List(_) => {
+            let list = array.as_any().downcast_ref::<arrow::array::ListArray>()?;
+            (0..list.len())
+                .filter(|&i| list.is_valid(i))
+                .find_map(|i| first_non_finite(&list.value(i)).map(|(_, v)| (i, v)))
+        }
         _ => None,
     }
 }
@@ -62,7 +68,7 @@ fn check_supported(name: &str, data_type: &DataType) -> Result<(), EngineError> 
         | DataType::FixedSizeBinary(_) => true,
         DataType::FixedSizeList(inner, _) => match inner.data_type() {
             DataType::Float32 => true,
-            DataType::FixedSizeList(innermost, _) => {
+            DataType::FixedSizeList(innermost, _) | DataType::List(innermost) => {
                 matches!(innermost.data_type(), DataType::Float32)
             }
             _ => false,

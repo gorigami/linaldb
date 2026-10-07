@@ -584,7 +584,8 @@ impl Parser {
                     // Vector scalar functions (SQL-style with parens)
                     "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE" | "MAT_SHAPE"
                     | "REAL" | "IMAG" | "ABS" | "PHASE" | "CONJ" | "COMPLEX" | "TANIMOTO"
-                    | "JACCARD" | "HAMMING" | "BIT_COUNT"
+                    | "JACCARD" | "HAMMING" | "BIT_COUNT" | "SPEC_COSINE" | "SPEC_COSINE_MOD"
+                    | "SPEC_MATCHES"
                         if self.at(&Token::LParen) =>
                     {
                         let func = match upper.as_str() {
@@ -604,6 +605,9 @@ impl Parser {
                             "JACCARD" => VectorFnKind::Jaccard,
                             "HAMMING" => VectorFnKind::Hamming,
                             "BIT_COUNT" => VectorFnKind::BitCount,
+                            "SPEC_COSINE" => VectorFnKind::SpecCosine,
+                            "SPEC_COSINE_MOD" => VectorFnKind::SpecCosineMod,
+                            "SPEC_MATCHES" => VectorFnKind::SpecMatches,
                             _ => unreachable!(),
                         };
                         self.advance(); // consume '('

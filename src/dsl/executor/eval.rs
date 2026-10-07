@@ -781,6 +781,9 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 VectorFnKind::Jaccard => "JACCARD",
                 VectorFnKind::Hamming => "HAMMING",
                 VectorFnKind::BitCount => "BIT_COUNT",
+                VectorFnKind::SpecCosine => "SPEC_COSINE",
+                VectorFnKind::SpecCosineMod => "SPEC_COSINE_MOD",
+                VectorFnKind::SpecMatches => "SPEC_MATCHES",
             };
             let items: Vec<String> = args.iter().map(expr_to_string).collect();
             format!("{}({})", name, items.join(", "))

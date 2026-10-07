@@ -947,6 +947,17 @@ impl Parser {
         })
     }
 
+    /// A `Matrix(r, c)` column's `c`: a number, or `*` for "any number of
+    /// columns, varying per row" (stored as 0), e.g. `Matrix(2, *)` for
+    /// spectra as peak lists of different lengths.
+    fn parse_matrix_cols(&mut self) -> Result<usize, ParseError> {
+        if self.at(&Token::Star) {
+            self.advance();
+            return Ok(0);
+        }
+        self.eat_usize()
+    }
+
     fn parse_col_type(&mut self) -> Result<ColType, ParseError> {
         match self.peek() {
             Some(Token::Vector) => {
@@ -961,7 +972,7 @@ impl Parser {
                 self.eat(&Token::LParen)?;
                 let rows = self.eat_usize()?;
                 self.eat(&Token::Comma)?;
-                let cols = self.eat_usize()?;
+                let cols = self.parse_matrix_cols()?;
                 self.eat(&Token::RParen)?;
                 Ok(ColType::Matrix(rows, cols))
             }
@@ -1011,7 +1022,7 @@ impl Parser {
                         self.eat(&Token::LParen)?;
                         let rows = self.eat_usize()?;
                         self.eat(&Token::Comma)?;
-                        let cols = self.eat_usize()?;
+                        let cols = self.parse_matrix_cols()?;
                         self.eat(&Token::RParen)?;
                         Ok(ColType::Matrix(rows, cols))
                     }
