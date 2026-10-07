@@ -33,7 +33,7 @@ One PR per tier, each from `main` after the previous one is merged; one release 
 | P5 | `SPEC_COSINE` / `SPEC_COSINE_MOD` on peak lists; needs a variable-length matrix column first (`Matrix(2, N)` columns require one fixed `N` today) |
 | P7 (copies) | Stop indexes keeping their own copies of every vector (IVF/HNSW hold 1–2 extra copies plus per-vector metadata); binary index snapshots instead of pretty-printed JSON |
 
-### Large impact — done in this tier's PR
+### Large impact — merged (#138)
 
 | Item | What |
 |---|---|

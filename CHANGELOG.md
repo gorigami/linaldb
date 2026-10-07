@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.92] - 2026-10-07
+
 ### Added — scientific retrieval, large-impact tier (CASMI 2026 proposal)
 
 Third and last tier (`CASMI_WORKLOADS_PLAN.md`).
