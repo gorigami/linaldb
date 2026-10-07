@@ -775,6 +775,8 @@ pub enum ColType {
     Tensor(Vec<usize>),
     /// `Complex` — scalar complex number (`f64` real/imaginary parts).
     Complex,
+    /// `BitVector(n)` — n bits, e.g. a molecular fingerprint.
+    BitVector(usize),
 }
 
 /// Tensor kind as expressed in the DSL. Decoupled from `engine::TensorKind`.
@@ -896,6 +898,15 @@ pub enum VectorFnKind {
     /// (no dedicated `3+2i`-style token syntax) -- every other producer
     /// (`EIGENVALUES_GENERAL`, arithmetic promotion) makes one internally.
     ComplexNew,
+    /// `TANIMOTO(a, b)` — `|a AND b| / |a OR b|` of two `BitVector`s.
+    /// Result: `Float64`.
+    Tanimoto,
+    /// `JACCARD(a, b)` — same value as `TANIMOTO` for bit vectors.
+    Jaccard,
+    /// `HAMMING(a, b)` — number of differing bits. Result: `Int`.
+    Hamming,
+    /// `BIT_COUNT(a)` — number of 1 bits. Result: `Int`.
+    BitCount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -920,6 +931,9 @@ pub enum CastTarget {
     Vector(usize),
     /// `CAST(expr AS MATRIX(r, c))` — reshape/flatten to a Matrix of shape `r x c`.
     Matrix(usize, usize),
+    /// `CAST(expr AS BITVECTOR[(n)])` — from a `'0'`/`'1'` string or a 0/1
+    /// Vector; with `(n)`, only a value of exactly `n` bits converts.
+    BitVector(Option<usize>),
 }
 
 /// Infix arithmetic operators (symbols: `+`, `-`, `*`, `/`).

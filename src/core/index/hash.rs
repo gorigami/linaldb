@@ -36,6 +36,7 @@ impl HashIndex {
             Value::Vector(v) => format!("{:?}", v),
             Value::Matrix(m) => format!("{:?}", m),
             Value::Complex(c) => format!("{:?}", c),
+            Value::BitVector(b) => format!("bits:{}", b),
             Value::Null => "NULL".to_string(),
         }
     }

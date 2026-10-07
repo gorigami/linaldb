@@ -85,6 +85,10 @@ pub enum VectorFnKind {
     Phase,
     Conj,
     ComplexNew,
+    Tanimoto,
+    Jaccard,
+    Hamming,
+    BitCount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +110,7 @@ pub enum CastTarget {
     Bool,
     Vector(usize),
     Matrix(usize, usize),
+    BitVector(Option<usize>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,7 +447,7 @@ impl std::fmt::Debug for Prefilter {
 }
 
 // Helper to fix BinaryExpr destructuring in infer_expr_type
-fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::ValueType {
+pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::ValueType {
     use crate::core::value::ValueType;
     match expr {
         Expr::Column(name) => schema
@@ -520,6 +525,8 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             | VectorFnKind::ComplexAbs
             | VectorFnKind::Phase => ValueType::Float64,
             VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
+            VectorFnKind::Tanimoto | VectorFnKind::Jaccard => ValueType::Float64,
+            VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
         },
         Expr::Case {
             else_expr,
@@ -550,6 +557,7 @@ fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::Val
             CastTarget::Text | CastTarget::Bool => ValueType::String,
             CastTarget::Vector(n) => ValueType::Vector(*n),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
+            CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
         },
     }
 }

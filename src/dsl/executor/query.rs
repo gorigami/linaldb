@@ -1214,6 +1214,7 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             CastTarget::Bool => ValueType::Bool,
             CastTarget::Vector(n) => ValueType::Vector(*n),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
+            CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),
         Expr::MatLiteral(_) => ValueType::Matrix(0, 0),
@@ -1233,6 +1234,8 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             | VectorFnKind::ComplexAbs
             | VectorFnKind::Phase => ValueType::Float64,
             VectorFnKind::Conj | VectorFnKind::ComplexNew => ValueType::Complex,
+            VectorFnKind::Tanimoto | VectorFnKind::Jaccard => ValueType::Float64,
+            VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
         },
         _ => ValueType::Float,
     }
@@ -1262,6 +1265,12 @@ fn apply_window_and_computed_exprs(
                 // always refers to a real source column, never to a
                 // previously-appended computed one.
                 let logical_expr = dsl_expr_to_logical_expr(expr, base_schema, right_tables);
+                crate::query::typecheck::check_expr(&logical_expr, base_schema).map_err(|e| {
+                    DslError::Engine {
+                        line: line_no,
+                        source: crate::engine::EngineError::InvalidOp(e),
+                    }
+                })?;
                 let fallback_vtype = infer_expr_result_type(expr);
 
                 // Evaluate every row first so the whole column gets ONE
@@ -1710,6 +1719,7 @@ pub(super) fn execute_add_computed_column(
             Value::String(_) => ValueType::String,
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
+            Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::Matrix(m) => {
                 let r = m.len();
                 let c = m.first().map_or(0, |row| row.len());
@@ -1763,6 +1773,7 @@ pub(super) fn execute_add_computed_column(
             Value::String(_) => ValueType::String,
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
+            Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::Matrix(m) => ValueType::Matrix(m.len(), m.first().map_or(0, |r| r.len())),
             Value::Complex(_) => ValueType::Complex,
             Value::Null => ValueType::Null,
@@ -2047,6 +2058,76 @@ fn resolve_having(
     Ok(predicate)
 }
 
+/// Lowers the two operands of a binary operator. A decimal literal
+/// (`Expr::Scalar`) normally becomes an f32 `Float`; next to a `Float64`
+/// operand it keeps its full f64 value instead, so `double_col >= 0.1234567891`
+/// or `mass BETWEEN q.mass - 0.005 AND ...` compare at full precision rather
+/// than against an f32-rounded constant.
+fn lower_pair(
+    lhs: &Expr,
+    rhs: &Expr,
+    schema: &crate::core::tuple::Schema,
+    right_tables: &std::collections::HashSet<String>,
+) -> (LogicalExpr, LogicalExpr) {
+    let left = dsl_expr_to_logical_expr(lhs, schema, right_tables);
+    let right = dsl_expr_to_logical_expr(rhs, schema, right_tables);
+    let lt = crate::query::logical::infer_expr_type_full(&left, schema);
+    let rt = crate::query::logical::infer_expr_type_full(&right, schema);
+    let left = if rt == ValueType::Float64 {
+        lower_beside(lhs, &rt, schema, right_tables)
+    } else {
+        left
+    };
+    let right = if lt == ValueType::Float64 {
+        lower_beside(rhs, &lt, schema, right_tables)
+    } else {
+        right
+    };
+    (left, right)
+}
+
+/// Lowers `e`, keeping a decimal literal at f64 when it sits beside a
+/// `Float64` value (see `lower_pair`).
+fn lower_beside(
+    e: &Expr,
+    other: &ValueType,
+    schema: &crate::core::tuple::Schema,
+    right_tables: &std::collections::HashSet<String>,
+) -> LogicalExpr {
+    // Arithmetic made of literals (`180.06 - 0.005`) beside a DOUBLE: the
+    // DOUBLE context applies to its operands too.
+    if let (
+        Expr::Infix {
+            op: op @ (InfixOp::Add | InfixOp::Subtract | InfixOp::Multiply | InfixOp::Divide),
+            lhs,
+            rhs,
+        },
+        ValueType::Float64,
+    ) = (e, other)
+    {
+        let sym = match op {
+            InfixOp::Add => "+",
+            InfixOp::Subtract => "-",
+            InfixOp::Multiply => "*",
+            _ => "/",
+        };
+        return LogicalExpr::BinaryExpr {
+            left: Box::new(lower_beside(lhs, other, schema, right_tables)),
+            op: sym.to_string(),
+            right: Box::new(lower_beside(rhs, other, schema, right_tables)),
+        };
+    }
+    let lowered = dsl_expr_to_logical_expr(e, schema, right_tables);
+    widen_scalar_literal(e, lowered, other)
+}
+
+fn widen_scalar_literal(source: &Expr, lowered: LogicalExpr, other: &ValueType) -> LogicalExpr {
+    match (source, other) {
+        (Expr::Scalar(f), ValueType::Float64) => LogicalExpr::Literal(Value::Float64(*f)),
+        _ => lowered,
+    }
+}
+
 /// Convert a parsed DSL `Expr` into a `LogicalExpr` the physical evaluator
 /// understands. `schema` is the schema of the row(s) this expression will
 /// actually be evaluated against, and `right_tables` is the set of dataset
@@ -2097,10 +2178,11 @@ pub(super) fn dsl_expr_to_logical_expr(
                 InfixOp::GtEq => ">=",
                 InfixOp::LtEq => "<=",
             };
+            let (left, right) = lower_pair(lhs, rhs, schema, right_tables);
             LogicalExpr::BinaryExpr {
-                left: Box::new(dsl_expr_to_logical_expr(lhs, schema, right_tables)),
+                left: Box::new(left),
                 op: sym.to_string(),
-                right: Box::new(dsl_expr_to_logical_expr(rhs, schema, right_tables)),
+                right: Box::new(right),
             }
         }
         Expr::And(lhs, rhs) => LogicalExpr::And(
@@ -2126,18 +2208,26 @@ pub(super) fn dsl_expr_to_logical_expr(
             schema,
             right_tables,
         ))),
-        Expr::In { expr, list } => LogicalExpr::In {
-            expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
-            list: list
-                .iter()
-                .map(|e| dsl_expr_to_logical_expr(e, schema, right_tables))
-                .collect(),
-        },
-        Expr::Between { expr, low, high } => LogicalExpr::Between {
-            expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
-            low: Box::new(dsl_expr_to_logical_expr(low, schema, right_tables)),
-            high: Box::new(dsl_expr_to_logical_expr(high, schema, right_tables)),
-        },
+        Expr::In { expr, list } => {
+            let value = dsl_expr_to_logical_expr(expr, schema, right_tables);
+            let value_type = crate::query::logical::infer_expr_type_full(&value, schema);
+            LogicalExpr::In {
+                list: list
+                    .iter()
+                    .map(|e| lower_beside(e, &value_type, schema, right_tables))
+                    .collect(),
+                expr: Box::new(value),
+            }
+        }
+        Expr::Between { expr, low, high } => {
+            let value = dsl_expr_to_logical_expr(expr, schema, right_tables);
+            let value_type = crate::query::logical::infer_expr_type_full(&value, schema);
+            LogicalExpr::Between {
+                low: Box::new(lower_beside(low, &value_type, schema, right_tables)),
+                high: Box::new(lower_beside(high, &value_type, schema, right_tables)),
+                expr: Box::new(value),
+            }
+        }
         Expr::Case {
             operand,
             branches,
@@ -2208,6 +2298,7 @@ pub(super) fn dsl_expr_to_logical_expr(
                 CastTarget::Bool => LCast::Bool,
                 CastTarget::Vector(n) => LCast::Vector(*n),
                 CastTarget::Matrix(r, c) => LCast::Matrix(*r, *c),
+                CastTarget::BitVector(n) => LCast::BitVector(*n),
             };
             LogicalExpr::Cast {
                 expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
@@ -2242,6 +2333,10 @@ pub(super) fn dsl_expr_to_logical_expr(
                 VectorFnKind::Phase => LVk::Phase,
                 VectorFnKind::Conj => LVk::Conj,
                 VectorFnKind::ComplexNew => LVk::ComplexNew,
+                VectorFnKind::Tanimoto => LVk::Tanimoto,
+                VectorFnKind::Jaccard => LVk::Jaccard,
+                VectorFnKind::Hamming => LVk::Hamming,
+                VectorFnKind::BitCount => LVk::BitCount,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,
@@ -2363,10 +2458,9 @@ pub(super) fn execute_update(
                 col_name, s.dataset
             ))
         })?;
-        assignments.push((
-            idx,
-            dsl_expr_to_logical_expr(expr, &schema, &no_right_tables),
-        ));
+        let lowered = dsl_expr_to_logical_expr(expr, &schema, &no_right_tables);
+        crate::query::typecheck::check_expr(&lowered, &schema).map_err(invalid)?;
+        assignments.push((idx, lowered));
     }
 
     // Compute and type-check every new value before changing anything, so

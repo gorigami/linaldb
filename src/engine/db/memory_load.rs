@@ -5,8 +5,11 @@
 //! Accepted Arrow column types are the ones this engine's own Parquet
 //! packages use: `Int64`/`Int32` -> `Int`, `Float32` -> `Float`, `Float64` ->
 //! `Float64`, `Utf8`/`LargeUtf8` -> `String`, `Boolean` -> `Bool`,
-//! `FixedSizeList<Float32>` -> `Vector(d)` and
-//! `FixedSizeList<FixedSizeList<Float32>>` -> `Matrix(r, c)`. Anything else
+//! `FixedSizeList<Float32>` -> `Vector(d)`,
+//! `FixedSizeList<FixedSizeList<Float32>>` -> `Matrix(r, c)`, and
+//! `FixedSizeBinary(w)` -> `BitVector` (MSB-first packed bits, `8 * w` of
+//! them unless the field's `linal.logical_value_type` metadata says
+//! `BitVector:N`). Anything else
 //! (including `FixedSizeList<Float64>`) is an error naming the column: values
 //! are never converted to a different precision behind the caller's back.
 //! NaN and infinite floats are rejected too, with the column and row.
@@ -55,7 +58,8 @@ fn check_supported(name: &str, data_type: &DataType) -> Result<(), EngineError> 
         | DataType::Float64
         | DataType::Utf8
         | DataType::LargeUtf8
-        | DataType::Boolean => true,
+        | DataType::Boolean
+        | DataType::FixedSizeBinary(_) => true,
         DataType::FixedSizeList(inner, _) => match inner.data_type() {
             DataType::Float32 => true,
             DataType::FixedSizeList(innermost, _) => {

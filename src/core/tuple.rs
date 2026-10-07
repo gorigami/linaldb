@@ -52,6 +52,7 @@ impl Field {
             }
             (ValueType::Matrix(er, ec), ValueType::Matrix(ar, ac)) => er == &ar && ec == &ac,
             (ValueType::Complex, ValueType::Complex) => true,
+            (ValueType::BitVector(expected), ValueType::BitVector(actual)) => expected == &actual,
             (ValueType::Null, ValueType::Null) => self.nullable,
             _ => false,
         }

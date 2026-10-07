@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod bitvec;
 pub mod config;
 pub mod connectors;
 pub mod dataset;

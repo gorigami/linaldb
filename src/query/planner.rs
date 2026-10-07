@@ -44,6 +44,8 @@ impl<'a> Planner<'a> {
                 rows: rows.clone(),
             })),
             LogicalPlan::Filter { input, predicate } => {
+                crate::query::typecheck::check_expr(predicate, &input.schema())
+                    .map_err(EngineError::InvalidOp)?;
                 // OPTIMIZATION: Check if we can use an Index (replaces the
                 // scan+filter outright -- these executors already apply the
                 // full predicate themselves).
@@ -208,6 +210,11 @@ impl<'a> Planner<'a> {
                 group_expr,
                 aggr_expr,
             } => {
+                let input_schema = input.schema();
+                for e in group_expr.iter().chain(aggr_expr) {
+                    crate::query::typecheck::check_expr(e, &input_schema)
+                        .map_err(EngineError::InvalidOp)?;
+                }
                 let input_plan = self.create_physical_plan(input)?;
                 let schema = logical_plan.schema();
                 Ok(Box::new(AggregateExec {

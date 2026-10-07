@@ -180,3 +180,66 @@ def test_load_is_recorded_in_lineage(db):
     text = db.execute("EXPLAIN LINEAGE spec AS JSON")
     assert "LOAD FROM MEMORY" in text
     assert "numpy" in text
+
+
+# --- BitVector + TANIMOTO, checked against RDKit (CASMI P4) ---------------
+
+
+SMILES = [
+    "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",  # caffeine
+    "CN1C=NC2=C1C(=O)NC(=O)N2C",  # theobromine
+    "O=C1C(O)=C(Oc2cc(O)cc(O)c12)c1ccc(O)c(O)c1",  # quercetin
+    "O=C1C=C(Oc2cc(O)cc(O)c12)c1ccc(O)c(O)c1",  # luteolin
+    "NC(Cc1c[nH]c2ccccc12)C(=O)O",  # tryptophan
+    "NCCc1c[nH]c2ccc(O)cc12",  # serotonin
+    "CC(=O)Oc1ccccc1C(=O)O",  # aspirin
+    "CCO",  # ethanol
+]
+
+
+@pytest.mark.parametrize("nbits", [2048, 1000])
+def test_tanimoto_matches_rdkit(db, nbits):
+    np = pytest.importorskip("numpy")
+    Chem = pytest.importorskip("rdkit.Chem")
+    from rdkit.Chem import rdFingerprintGenerator
+    from rdkit import DataStructs
+
+    gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=nbits)
+    fps = [gen.GetFingerprint(Chem.MolFromSmiles(s)) for s in SMILES]
+    bits = np.array([[fp.GetBit(i) for i in range(nbits)] for fp in fps], dtype=bool)
+    db.load_numpy(
+        "mols",
+        np.zeros((len(SMILES), 1), dtype=np.float32),
+        column="unused",
+        columns={"id": np.arange(len(SMILES))},
+        bit_columns={"fp": bits},
+    )
+    q = fps[0].ToBitString()
+    result = db.execute(
+        f'SELECT id, TANIMOTO(fp, CAST("{q}" AS BITVECTOR({nbits}))) AS t, '
+        f'HAMMING(fp, CAST("{q}" AS BITVECTOR({nbits}))) AS h, BIT_COUNT(fp) AS c, fp '
+        "FROM mols ORDER BY id"
+    )
+    for i, (row_id, t, h, c, fp_bits) in enumerate(result.rows):
+        assert row_id == i
+        assert t == DataStructs.TanimotoSimilarity(fps[0], fps[i])
+        assert h == (fps[0] ^ fps[i]).GetNumOnBits()
+        assert c == fps[i].GetNumOnBits()
+        assert fp_bits == fps[i].ToBitString()  # BitVector comes back as a bit string
+
+
+def test_bitvector_array_and_errors(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+
+    arr = linaldb.bitvector_array(np.array([[1, 0, 0, 0, 0, 0, 0, 0, 0, 1]], dtype=bool))
+    assert arr.type == pa.binary(2)
+    assert arr[0].as_py() == bytes([128, 64])  # numpy.packbits layout
+
+    with pytest.raises(LinalError, match="0/1"):
+        db.load_numpy(
+            "x", np.zeros((1, 1), dtype=np.float32), bit_columns={"fp": np.array([[2, 0]])}
+        )
+    with pytest.raises(LinalError, match="expects BitVector"):
+        db.load_numpy("y", np.zeros((2, 3), dtype=np.float32), column="v")
+        db.execute("SELECT TANIMOTO(v, v) AS t FROM y")

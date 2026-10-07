@@ -615,6 +615,8 @@ fn encode_logical_value_type(vt: &ValueType) -> Option<String> {
         // metadata every time, not just when a shape-mismatch forces a
         // Vector/Matrix column to fall back.
         ValueType::Complex => Some("Complex".to_string()),
+        // FixedSizeBinary holds whole bytes; the exact bit count rides along.
+        ValueType::BitVector(n) => Some(format!("BitVector:{}", n)),
         _ => None,
     }
 }
@@ -626,6 +628,7 @@ fn decode_logical_value_type(raw: &str) -> Option<ValueType> {
     let (kind, rest) = raw.split_once(':')?;
     match kind {
         "Vector" => rest.parse::<usize>().ok().map(ValueType::Vector),
+        "BitVector" => rest.parse::<usize>().ok().map(ValueType::BitVector),
         "Matrix" => {
             let (rows, cols) = rest.split_once(',')?;
             Some(ValueType::Matrix(rows.parse().ok()?, cols.parse().ok()?))
@@ -667,6 +670,9 @@ pub(crate) fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema
                     DataType::Float64 => ValueType::Float64,
                     DataType::Utf8 | DataType::LargeUtf8 => ValueType::String,
                     DataType::Boolean => ValueType::Bool,
+                    // Without a logical-type annotation, every bit of the
+                    // bytes counts.
+                    DataType::FixedSizeBinary(w) => ValueType::BitVector(*w as usize * 8),
                     _ => ValueType::String,
                 });
             let mut field = crate::core::tuple::Field::new(f.name().clone(), value_type);
@@ -843,6 +849,29 @@ fn arrow_array_to_values(
         // No native Arrow encoding for Complex (unlike Vector/Matrix's
         // FixedSizeList) -- always the legacy JSON-string fallback.
         ValueType::Complex => legacy_json_column_to_values(array, num_rows, "Complex"),
+        ValueType::BitVector(n) => {
+            let bytes = array
+                .as_any()
+                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                .ok_or_else(|| {
+                    StorageError::Serialization(format!(
+                        "Expected FixedSizeBinary for a BitVector({}) column, got {:?}",
+                        n,
+                        array.data_type()
+                    ))
+                })?;
+            (0..num_rows)
+                .map(|i| {
+                    if bytes.is_null(i) {
+                        Ok(Value::Null)
+                    } else {
+                        crate::core::bitvec::BitVec::from_bytes(bytes.value(i), *n)
+                            .map(Value::BitVector)
+                            .map_err(StorageError::Serialization)
+                    }
+                })
+                .collect()
+        }
         ValueType::Null => Ok(vec![Value::Null; num_rows]),
     }
 }
@@ -1149,6 +1178,22 @@ fn dataset_to_record_batch_with_options(
             // same as Null (see encode_logical_value_type's doc comment for
             // why this still needs the field-metadata stashing below).
             ValueType::Complex => build_legacy_json_column(&column_data),
+            // MSB-first packed bytes (`BitVec::to_bytes`); nulls are native.
+            ValueType::BitVector(n) => {
+                let width = n.div_ceil(8) as i32;
+                let array = arrow::array::FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                    column_data.iter().map(|v| match v {
+                        Value::BitVector(b) => Some(b.to_bytes()),
+                        _ => None,
+                    }),
+                    width,
+                )
+                .map_err(StorageError::Arrow)?;
+                (
+                    DataType::FixedSizeBinary(width),
+                    Arc::new(array) as ArrayRef,
+                )
+            }
             ValueType::Null => build_legacy_json_column(&column_data),
         };
 
@@ -1159,7 +1204,7 @@ fn dataset_to_record_batch_with_options(
         // stash the real logical type as field metadata so schema.json /
         // the legacy .meta.json sidecar don't report a fallback-encoded
         // Vector/Matrix column as plain "String" (v0.1.73).
-        if matches!(data_type, DataType::Utf8) {
+        if matches!(data_type, DataType::Utf8 | DataType::FixedSizeBinary(_)) {
             if let Some(encoded) = encode_logical_value_type(&field.value_type) {
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert(LOGICAL_VALUE_TYPE_METADATA_KEY.to_string(), encoded);

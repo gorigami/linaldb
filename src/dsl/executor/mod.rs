@@ -226,6 +226,9 @@ pub fn execute_statement(
                         ValueType::Complex => {
                             Value::Complex(crate::core::value::Complex64::new(0.0, 0.0))
                         }
+                        ValueType::BitVector(n) => {
+                            Value::BitVector(crate::core::bitvec::BitVec::zeros(*n))
+                        }
                         ValueType::Null => Value::Null,
                     },
                 };
@@ -331,6 +334,8 @@ pub fn execute_statement(
                         .collect()
                 }
             };
+            let values = coerce_bitvector_inserts(values, &schema)
+                .map_err(|msg| DslError::Parse { line: line_no, msg })?;
             let tuple = Tuple::new(schema.clone(), values).map_err(|e| DslError::Parse {
                 line: line_no,
                 msg: e,
@@ -633,6 +638,47 @@ fn to_engine_kind(k: TensorKindAst) -> TensorKind {
     }
 }
 
+/// `INSERT` into a `BitVector(n)` column takes a bit string (`"0101..."`)
+/// or a vector literal of 0s and 1s, of exactly `n` bits; anything else is
+/// an error naming the column.
+fn coerce_bitvector_inserts(
+    values: Vec<Value>,
+    schema: &crate::core::tuple::Schema,
+) -> Result<Vec<Value>, String> {
+    values
+        .into_iter()
+        .zip(&schema.fields)
+        .map(|(v, f)| {
+            let ValueType::BitVector(n) = f.value_type else {
+                return Ok(v);
+            };
+            let bits = match v {
+                Value::String(s) => crate::core::bitvec::BitVec::from_bit_string(&s)
+                    .map_err(|e| format!("column '{}': {}", f.name, e))?,
+                Value::Vector(x) => {
+                    if !x.iter().all(|b| *b == 0.0 || *b == 1.0) {
+                        return Err(format!(
+                            "column '{}' is BitVector({}): a vector literal must hold only 0 and 1",
+                            f.name, n
+                        ));
+                    }
+                    crate::core::bitvec::BitVec::from_floats(&x)
+                }
+                other => return Ok(other),
+            };
+            if bits.len() != n {
+                return Err(format!(
+                    "column '{}' is BitVector({}), got {} bits",
+                    f.name,
+                    n,
+                    bits.len()
+                ));
+            }
+            Ok(Value::BitVector(bits))
+        })
+        .collect()
+}
+
 pub(super) fn col_type_to_value_type(ct: &ColType) -> ValueType {
     match ct {
         ColType::Int => ValueType::Int,
@@ -642,6 +688,7 @@ pub(super) fn col_type_to_value_type(ct: &ColType) -> ValueType {
         ColType::Bool => ValueType::Bool,
         ColType::Vector(n) => ValueType::Vector(*n),
         ColType::Matrix(r, c) => ValueType::Matrix(*r, *c),
+        ColType::BitVector(n) => ValueType::BitVector(*n),
         ColType::Tensor(dims) => match dims.as_slice() {
             [d] => ValueType::Vector(*d),
             [r, c] => ValueType::Matrix(*r, *c),

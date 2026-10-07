@@ -992,6 +992,15 @@ impl Parser {
                     "STRING" | "TEXT" | "VARCHAR" => Ok(ColType::String),
                     "BOOL" | "BOOLEAN" => Ok(ColType::Bool),
                     "COMPLEX" => Ok(ColType::Complex),
+                    "BITVECTOR" => {
+                        self.eat(&Token::LParen)?;
+                        let n = self.eat_usize()?;
+                        self.eat(&Token::RParen)?;
+                        if n == 0 {
+                            return Err(self.error("BITVECTOR needs at least 1 bit"));
+                        }
+                        Ok(ColType::BitVector(n))
+                    }
                     "VECTOR" => {
                         self.eat(&Token::LParen)?;
                         let n = self.eat_usize()?;

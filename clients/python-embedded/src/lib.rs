@@ -44,6 +44,14 @@ fn value_to_py(py: Python<'_>, value: &Value) -> PyObject {
         Value::Complex(c) => pyo3::types::PyComplex::from_doubles(py, c.re, c.im)
             .into_any()
             .unbind(),
+        // The bit string, e.g. "0110...": what RDKit's
+        // `DataStructs.CreateFromBitString` takes.
+        Value::BitVector(b) => b
+            .to_bit_string()
+            .into_pyobject(py)
+            .unwrap()
+            .into_any()
+            .unbind(),
         Value::Null => py.None(),
     }
 }

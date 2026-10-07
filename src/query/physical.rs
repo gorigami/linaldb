@@ -1765,6 +1765,7 @@ pub fn evaluate_expression(
                     Value::Float(f) => f.to_string(),
                     Value::Float64(f) => f.to_string(),
                     Value::Bool(b) => b.to_string(),
+                    Value::BitVector(b) => b.to_bit_string(),
                     _ => return Value::Null,
                 }),
                 CastTarget::Bool => match val {
@@ -1778,6 +1779,7 @@ pub fn evaluate_expression(
                 // it only reinterprets the same data under a new shape.
                 CastTarget::Vector(n) => match val {
                     Value::Vector(v) if v.len() == *n => Value::Vector(v),
+                    Value::BitVector(b) if b.len() == *n => Value::Vector(b.to_floats()),
                     Value::Matrix(m) => {
                         let flat: Vec<f32> = m.into_iter().flatten().collect();
                         if flat.len() == *n {
@@ -1799,6 +1801,20 @@ pub fn evaluate_expression(
                     }
                     _ => Value::Null,
                 },
+                CastTarget::BitVector(n) => {
+                    let bits = match val {
+                        Value::BitVector(b) => Some(b),
+                        Value::String(s) => crate::core::bitvec::BitVec::from_bit_string(&s).ok(),
+                        Value::Vector(v) if v.iter().all(|x| *x == 0.0 || *x == 1.0) => {
+                            Some(crate::core::bitvec::BitVec::from_floats(&v))
+                        }
+                        _ => None,
+                    };
+                    match bits {
+                        Some(b) if n.is_none_or(|n| b.len() == n) => Value::BitVector(b),
+                        _ => Value::Null,
+                    }
+                }
             }
         }
         crate::query::logical::Expr::VecLiteral(vals) => {
@@ -1840,6 +1856,29 @@ pub fn evaluate_expression(
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
                         Value::Float(a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>())
                     }
+                    _ => Value::Null,
+                },
+                // A length mismatch between two typed BitVector columns is
+                // rejected before execution (`query::typecheck`); one that
+                // only shows up at runtime (CAST of a string column) gives
+                // NULL here, since this evaluator has no error channel.
+                VectorFnKind::Tanimoto | VectorFnKind::Jaccard => {
+                    match (vals.first(), vals.get(1)) {
+                        (Some(Value::BitVector(a)), Some(Value::BitVector(b))) => {
+                            a.tanimoto(b).map(Value::Float64).unwrap_or(Value::Null)
+                        }
+                        _ => Value::Null,
+                    }
+                }
+                VectorFnKind::Hamming => match (vals.first(), vals.get(1)) {
+                    (Some(Value::BitVector(a)), Some(Value::BitVector(b))) => a
+                        .hamming(b)
+                        .map(|h| Value::Int(h as i64))
+                        .unwrap_or(Value::Null),
+                    _ => Value::Null,
+                },
+                VectorFnKind::BitCount => match vals.first() {
+                    Some(Value::BitVector(a)) => Value::Int(a.count_ones() as i64),
                     _ => Value::Null,
                 },
                 VectorFnKind::Distance => match (vals.first(), vals.get(1)) {

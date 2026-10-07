@@ -37,6 +37,15 @@ fn format_table_cell(v: &Value) -> String {
             m.len(),
             m.first().map(|r| r.len()).unwrap_or(0)
         ),
+        Value::BitVector(b) if b.len() > 32 => {
+            let bits = b.to_bit_string();
+            format!(
+                "{}... ({} bits, {} on)",
+                &bits[..32],
+                b.len(),
+                b.count_ones()
+            )
+        }
         other => other.to_string(),
     }
 }
