@@ -92,6 +92,7 @@ pub enum VectorFnKind {
     SpecCosine,
     SpecCosineMod,
     SpecMatches,
+    SparseNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +115,7 @@ pub enum CastTarget {
     Vector(usize),
     Matrix(usize, usize),
     BitVector(Option<usize>),
+    SparseVector(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,7 +518,17 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             let c = rows.first().map_or(0, |row| row.len());
             ValueType::Matrix(r, c)
         }
-        Expr::VectorFn { func, .. } => match func {
+        Expr::VectorFn { func, args } => match func {
+            VectorFnKind::Normalize | VectorFnKind::VecScale
+                if matches!(
+                    args.first().map(|a| infer_expr_type_full(a, schema)),
+                    Some(ValueType::SparseVector(_))
+                ) =>
+            {
+                args.first()
+                    .map(|a| infer_expr_type_full(a, schema))
+                    .unwrap()
+            }
             VectorFnKind::Normalize
             | VectorFnKind::VecAdd
             | VectorFnKind::VecScale
@@ -536,6 +548,12 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
             VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
             VectorFnKind::SpecMatches => ValueType::Int,
+            VectorFnKind::SparseNew => match args.first() {
+                Some(Expr::Literal(Value::Int(d))) if *d > 0 => {
+                    ValueType::SparseVector(*d as usize)
+                }
+                _ => ValueType::SparseVector(0),
+            },
         },
         Expr::Case {
             else_expr,
@@ -567,6 +585,7 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             CastTarget::Vector(n) => ValueType::Vector(*n),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
             CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
+            CastTarget::SparseVector(n) => ValueType::SparseVector(*n),
         },
     }
 }

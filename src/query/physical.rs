@@ -467,6 +467,24 @@ impl BatchVectorSearchExec {
                             }
                             scored.push((id, cosine_with_norms(query, query_norm, v, l2_norm(v))));
                         }
+                        Value::SparseVector(sv) => {
+                            if sv.dim() != query.len() {
+                                return Err(format!(
+                                    "SEARCH: row {} has a {}-dimensional sparse vector, the query has {}",
+                                    id,
+                                    sv.dim(),
+                                    query.len()
+                                ));
+                            }
+                            let dot = sv.dot_dense(query);
+                            let norm = sv.l2_norm();
+                            let score = if norm == 0.0 || query_norm == 0.0 {
+                                0.0
+                            } else {
+                                dot / (query_norm * norm)
+                            };
+                            scored.push((id, score));
+                        }
                         Value::Null => {}
                         other => {
                             return Err(format!(
@@ -497,6 +515,72 @@ impl BatchVectorSearchExec {
             .collect::<Result<_, String>>()
             .map_err(EngineError::InvalidOp)
     }
+}
+
+/// `(dot, ‖a‖, ‖b‖)` when at least one of `a`, `b` is a `SparseVector`
+/// and the other a `SparseVector` or `Vector` of the same dimension; `None`
+/// otherwise. A dimension mismatch is recorded in `row_error` (the plan-time
+/// check catches it first whenever both dimensions are declared).
+fn sparse_dot(
+    a: &crate::core::value::Value,
+    b: &crate::core::value::Value,
+    name: &str,
+) -> Option<(f32, f32, f32)> {
+    use crate::core::value::Value;
+    let dense_norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let (dim_a, dim_b) = match (a, b) {
+        (Value::SparseVector(x), Value::SparseVector(y)) => (x.dim(), y.dim()),
+        (Value::SparseVector(x), Value::Vector(y)) => (x.dim(), y.len()),
+        (Value::Vector(x), Value::SparseVector(y)) => (x.len(), y.dim()),
+        _ => return None,
+    };
+    if dim_a != dim_b {
+        crate::query::row_error::record(format!(
+            "{}: dimensions differ ({} vs {})",
+            name, dim_a, dim_b
+        ));
+        return None;
+    }
+    Some(match (a, b) {
+        (Value::SparseVector(x), Value::SparseVector(y)) => (x.dot(y), x.l2_norm(), y.l2_norm()),
+        (Value::SparseVector(x), Value::Vector(y)) => (x.dot_dense(y), x.l2_norm(), dense_norm(y)),
+        (Value::Vector(x), Value::SparseVector(y)) => (y.dot_dense(x), dense_norm(x), y.l2_norm()),
+        _ => unreachable!(),
+    })
+}
+
+/// `SPARSE(dim, [indices], [values])`. Bad input (non-integral or
+/// out-of-range indices, unsorted or duplicate indices, non-finite values,
+/// mismatched lengths) is recorded in `row_error`.
+fn sparse_new(vals: &[crate::core::value::Value]) -> crate::core::value::Value {
+    use crate::core::value::Value;
+    if vals.iter().any(|v| v.is_null()) {
+        return Value::Null;
+    }
+    let result = (|| -> Result<Value, String> {
+        let dim = match vals.first() {
+            Some(Value::Int(d)) if *d > 0 => *d as usize,
+            _ => return Err("the first argument (dimension) must be a positive integer".into()),
+        };
+        let (Some(Value::Vector(idx)), Some(Value::Vector(v))) = (vals.get(1), vals.get(2)) else {
+            return Err("expects SPARSE(dim, [indices], [values])".into());
+        };
+        let indices = idx
+            .iter()
+            .map(|x| {
+                if x.fract() == 0.0 && *x >= 0.0 && *x <= u32::MAX as f32 {
+                    Ok(*x as u32)
+                } else {
+                    Err(format!("index {} is not a non-negative integer", x))
+                }
+            })
+            .collect::<Result<Vec<u32>, String>>()?;
+        crate::core::sparse::SparseVec::new(dim, indices, v.clone()).map(Value::SparseVector)
+    })();
+    result.unwrap_or_else(|e| {
+        crate::query::row_error::record(format!("SPARSE: {}", e));
+        Value::Null
+    })
 }
 
 /// `SPEC_COSINE` / `SPEC_COSINE_MOD` / `SPEC_MATCHES` (`core::spectral`).
@@ -1880,6 +1964,7 @@ pub fn evaluate_expression(
                     Value::Float64(f) => f.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::BitVector(b) => b.to_bit_string(),
+                    Value::SparseVector(s) => s.to_string(),
                     _ => return Value::Null,
                 }),
                 CastTarget::Bool => match val {
@@ -1893,6 +1978,7 @@ pub fn evaluate_expression(
                 // it only reinterprets the same data under a new shape.
                 CastTarget::Vector(n) => match val {
                     Value::Vector(v) if v.len() == *n => Value::Vector(v),
+                    Value::SparseVector(s) if s.dim() == *n => Value::Vector(s.to_dense()),
                     Value::BitVector(b) if b.len() == *n => Value::Vector(b.to_floats()),
                     Value::Matrix(m) => {
                         let flat: Vec<f32> = m.into_iter().flatten().collect();
@@ -1912,6 +1998,13 @@ pub fn evaluate_expression(
                         let rows: Vec<Vec<f32>> =
                             v.chunks(*c).map(|chunk| chunk.to_vec()).collect();
                         Value::Matrix(rows)
+                    }
+                    _ => Value::Null,
+                },
+                CastTarget::SparseVector(n) => match val {
+                    Value::SparseVector(s) if s.dim() == *n => Value::SparseVector(s),
+                    Value::Vector(v) if v.len() == *n && v.iter().all(|x| x.is_finite()) => {
+                        Value::SparseVector(crate::core::sparse::SparseVec::from_dense(&v))
                     }
                     _ => Value::Null,
                 },
@@ -1944,6 +2037,14 @@ pub fn evaluate_expression(
             let vals: Vec<Value> = args.iter().map(|a| evaluate_expression(a, row)).collect();
             match func {
                 VectorFnKind::Normalize => match vals.first() {
+                    Some(Value::SparseVector(s)) => {
+                        let norm = s.l2_norm();
+                        if norm == 0.0 {
+                            Value::SparseVector(s.clone())
+                        } else {
+                            Value::SparseVector(s.divide(norm))
+                        }
+                    }
                     Some(Value::Vector(v)) => {
                         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
                         if norm == 0.0 {
@@ -1955,6 +2056,7 @@ pub fn evaluate_expression(
                     _ => Value::Null,
                 },
                 VectorFnKind::L2Norm => match vals.first() {
+                    Some(Value::SparseVector(s)) => Value::Float(s.l2_norm()),
                     Some(Value::Vector(v)) => {
                         Value::Float(v.iter().map(|x| x * x).sum::<f32>().sqrt())
                     }
@@ -1964,12 +2066,24 @@ pub fn evaluate_expression(
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
                         Value::Float(cosine_sim(a, b))
                     }
+                    (Some(a), Some(b)) => match sparse_dot(a, b, "COSINE_SIM") {
+                        Some((dot, na, nb)) => Value::Float(if na == 0.0 || nb == 0.0 {
+                            0.0
+                        } else {
+                            dot / (na * nb)
+                        }),
+                        None => Value::Null,
+                    },
                     _ => Value::Null,
                 },
                 VectorFnKind::Dot => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
                         Value::Float(a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>())
                     }
+                    (Some(a), Some(b)) => match sparse_dot(a, b, "DOT") {
+                        Some((dot, _, _)) => Value::Float(dot),
+                        None => Value::Null,
+                    },
                     _ => Value::Null,
                 },
                 // A length mismatch between two typed BitVector columns is
@@ -1998,6 +2112,7 @@ pub fn evaluate_expression(
                 VectorFnKind::SpecCosine
                 | VectorFnKind::SpecCosineMod
                 | VectorFnKind::SpecMatches => spectral_fn(*func, &vals),
+                VectorFnKind::SparseNew => sparse_new(&vals),
                 VectorFnKind::Distance => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => Value::Float(
                         a.iter()
@@ -2015,6 +2130,11 @@ pub fn evaluate_expression(
                     _ => Value::Null,
                 },
                 VectorFnKind::VecScale => match (vals.first(), vals.get(1)) {
+                    (Some(Value::SparseVector(s)), Some(factor_val)) => match factor_val {
+                        Value::Float(f) => Value::SparseVector(s.scale(*f)),
+                        Value::Int(i) => Value::SparseVector(s.scale(*i as f32)),
+                        _ => Value::Null,
+                    },
                     (Some(Value::Vector(v)), Some(factor_val)) => {
                         let factor = match factor_val {
                             Value::Float(f) => *f,

@@ -37,6 +37,21 @@ fn format_table_cell(v: &Value) -> String {
             m.len(),
             m.first().map(|r| r.len()).unwrap_or(0)
         ),
+        Value::SparseVector(s) if s.nnz() > 6 => {
+            let head: Vec<String> = s
+                .indices()
+                .iter()
+                .zip(s.values())
+                .take(6)
+                .map(|(i, v)| format!("{}: {}", i, Value::Float(*v)))
+                .collect();
+            format!(
+                "sparse({}) {{{}, ...}} ({} nonzero)",
+                s.dim(),
+                head.join(", "),
+                s.nnz()
+            )
+        }
         Value::BitVector(b) if b.len() > 32 => {
             let bits = b.to_bit_string();
             format!(

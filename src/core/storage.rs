@@ -629,6 +629,7 @@ fn encode_logical_value_type(vt: &ValueType) -> Option<String> {
         ValueType::Complex => Some("Complex".to_string()),
         // FixedSizeBinary holds whole bytes; the exact bit count rides along.
         ValueType::BitVector(n) => Some(format!("BitVector:{}", n)),
+        ValueType::SparseVector(n) => Some(format!("SparseVector:{}", n)),
         _ => None,
     }
 }
@@ -641,6 +642,7 @@ fn decode_logical_value_type(raw: &str) -> Option<ValueType> {
     match kind {
         "Vector" => rest.parse::<usize>().ok().map(ValueType::Vector),
         "BitVector" => rest.parse::<usize>().ok().map(ValueType::BitVector),
+        "SparseVector" => rest.parse::<usize>().ok().map(ValueType::SparseVector),
         "Matrix" => {
             let (rows, cols) = rest.split_once(',')?;
             Some(ValueType::Matrix(rows.parse().ok()?, cols.parse().ok()?))
@@ -861,6 +863,7 @@ fn arrow_array_to_values(
         // No native Arrow encoding for Complex (unlike Vector/Matrix's
         // FixedSizeList) -- always the legacy JSON-string fallback.
         ValueType::Complex => legacy_json_column_to_values(array, num_rows, "Complex"),
+        ValueType::SparseVector(dim) => sparse_array_to_values(array, *dim, num_rows),
         ValueType::BitVector(n) => {
             let bytes = array
                 .as_any()
@@ -1238,6 +1241,7 @@ fn dataset_to_record_batch_with_options(
                     Arc::new(array) as ArrayRef,
                 )
             }
+            ValueType::SparseVector(_) => build_sparse_column(&column_data)?,
             ValueType::Null => build_legacy_json_column(&column_data),
         };
 
@@ -1248,7 +1252,10 @@ fn dataset_to_record_batch_with_options(
         // stash the real logical type as field metadata so schema.json /
         // the legacy .meta.json sidecar don't report a fallback-encoded
         // Vector/Matrix column as plain "String" (v0.1.73).
-        if matches!(data_type, DataType::Utf8 | DataType::FixedSizeBinary(_)) {
+        if matches!(
+            data_type,
+            DataType::Utf8 | DataType::FixedSizeBinary(_) | DataType::Struct(_)
+        ) {
             if let Some(encoded) = encode_logical_value_type(&field.value_type) {
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert(LOGICAL_VALUE_TYPE_METADATA_KEY.to_string(), encoded);
@@ -1323,6 +1330,98 @@ fn build_vector_column(column_data: &[&Value], declared_dim: usize) -> (DataType
 /// `FixedSizeList<FixedSizeList<Float32>>` column, rows-then-cols nested,
 /// with the same declared-dims-first / infer-from-data / fall-back-to-JSON
 /// strategy.
+/// `SparseVector(dim)` as `Struct{indices: List<UInt32>, values:
+/// List<Float32>}` (the dimension travels in the field metadata); NULL
+/// cells are struct-level nulls.
+fn build_sparse_column(column_data: &[&Value]) -> Result<(DataType, ArrayRef), StorageError> {
+    let mut offsets: Vec<i32> = vec![0];
+    let (mut indices, mut values, mut valid) = (Vec::new(), Vec::new(), Vec::new());
+    for v in column_data {
+        match v {
+            Value::SparseVector(s) => {
+                indices.extend_from_slice(s.indices());
+                values.extend_from_slice(s.values());
+                valid.push(true);
+            }
+            _ => valid.push(false),
+        }
+        offsets.push(
+            i32::try_from(indices.len())
+                .map_err(|_| StorageError::Serialization("sparse column too large".into()))?,
+        );
+    }
+    let offsets = arrow::buffer::OffsetBuffer::new(offsets.into());
+    let index_list = arrow::array::ListArray::try_new(
+        Arc::new(ArrowField::new("item", DataType::UInt32, false)),
+        offsets.clone(),
+        Arc::new(arrow::array::UInt32Array::from(indices)),
+        None,
+    )
+    .map_err(StorageError::Arrow)?;
+    let value_list = arrow::array::ListArray::try_new(
+        Arc::new(ArrowField::new("item", DataType::Float32, false)),
+        offsets,
+        Arc::new(Float32Array::from(values)),
+        None,
+    )
+    .map_err(StorageError::Arrow)?;
+    let fields = arrow::datatypes::Fields::from(vec![
+        ArrowField::new("indices", index_list.data_type().clone(), false),
+        ArrowField::new("values", value_list.data_type().clone(), false),
+    ]);
+    let array = arrow::array::StructArray::try_new(
+        fields.clone(),
+        vec![Arc::new(index_list), Arc::new(value_list)],
+        Some(arrow::buffer::NullBuffer::from(valid)),
+    )
+    .map_err(StorageError::Arrow)?;
+    Ok((DataType::Struct(fields), Arc::new(array)))
+}
+
+/// Decodes a `SparseVector(dim)` column: a struct of `indices` (a list of
+/// unsigned or signed integers) and `values` (a list of float32), validated
+/// by `SparseVec::new`.
+fn sparse_array_to_values(
+    array: &ArrayRef,
+    dim: usize,
+    num_rows: usize,
+) -> Result<Vec<Value>, StorageError> {
+    let bad = |m: &str| StorageError::Serialization(format!("SparseVector({}) column: {}", dim, m));
+    let st = array
+        .as_any()
+        .downcast_ref::<arrow::array::StructArray>()
+        .ok_or_else(|| bad("expected a struct of indices and values"))?;
+    let lists = |name: &str| {
+        st.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::ListArray>())
+            .ok_or_else(|| bad(&format!("missing list field '{}'", name)))
+    };
+    let (index_list, value_list) = (lists("indices")?, lists("values")?);
+    (0..num_rows)
+        .map(|r| {
+            if st.is_null(r) {
+                return Ok(Value::Null);
+            }
+            let idx = arrow::compute::cast(&index_list.value(r), &DataType::Int64)
+                .map_err(StorageError::Arrow)?;
+            let idx = idx.as_any().downcast_ref::<Int64Array>().unwrap();
+            let indices = idx
+                .values()
+                .iter()
+                .map(|&i| u32::try_from(i).map_err(|_| bad(&format!("index {} out of range", i))))
+                .collect::<Result<Vec<u32>, _>>()?;
+            let vals = value_list.value(r);
+            let vals = vals
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| bad("values must be float32"))?;
+            crate::core::sparse::SparseVec::new(dim, indices, vals.values().to_vec())
+                .map(Value::SparseVector)
+                .map_err(|e| bad(&format!("row {}: {}", r, e)))
+        })
+        .collect()
+}
+
 /// `Matrix(r, *)` as a native `FixedSizeList<List<Float32>, r>`: r rows of
 /// varying length per cell (e.g. a spectrum's m/z and intensity rows).
 /// `None` when the column has a NULL or a cell with a different row count

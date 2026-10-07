@@ -780,6 +780,8 @@ pub enum ColType {
     Complex,
     /// `BitVector(n)` — n bits, e.g. a molecular fingerprint.
     BitVector(usize),
+    /// `SparseVector(dim)` — nonzero entries only.
+    SparseVector(usize),
 }
 
 /// Tensor kind as expressed in the DSL. Decoupled from `engine::TensorKind`.
@@ -919,6 +921,8 @@ pub enum VectorFnKind {
     /// `SPEC_MATCHES(a, b, tolerance [, shift])` — number of peaks the
     /// greedy (modified, with `shift`) cosine matched. Result: `Int`.
     SpecMatches,
+    /// `SPARSE(dim, [indices], [values])` — builds a `SparseVector`.
+    SparseNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -946,6 +950,9 @@ pub enum CastTarget {
     /// `CAST(expr AS BITVECTOR[(n)])` — from a `'0'`/`'1'` string or a 0/1
     /// Vector; with `(n)`, only a value of exactly `n` bits converts.
     BitVector(Option<usize>),
+    /// `CAST(expr AS SPARSEVECTOR(n))` — from a Vector of length `n` (its
+    /// nonzero entries) or a SparseVector of dimension `n`.
+    SparseVector(usize),
 }
 
 /// Infix arithmetic operators (symbols: `+`, `-`, `*`, `/`).

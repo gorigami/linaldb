@@ -40,6 +40,10 @@ fn value_to_robj(value: &Value) -> Robj {
         Value::Complex(c) => Robj::from(extendr_api::scalar::Rcplx::new(c.re, c.im)),
         // The bit string, e.g. "0110...".
         Value::BitVector(b) => Robj::from(b.to_bit_string()),
+        // The dense vector (0 for absent entries).
+        Value::SparseVector(s) => {
+            Robj::from(s.to_dense().iter().map(|x| *x as f64).collect::<Vec<f64>>())
+        }
         Value::Null => Robj::from(f64::na()),
     }
 }

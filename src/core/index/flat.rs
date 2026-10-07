@@ -54,6 +54,11 @@ impl FlatVectors {
         match value {
             Value::Vector(v) => self.push(row_id, v),
             Value::Null => Ok(()),
+            Value::SparseVector(_) => Err(
+                "vector indexes (IVF, HNSW) need a dense Vector column; search a SparseVector \
+                 column exactly with SEARCH ... PREFILTER or COSINE_SIM in SELECT/WHERE"
+                    .to_string(),
+            ),
             other => Err(format!("Cannot index {:?} as Vector", other.value_type())),
         }
     }

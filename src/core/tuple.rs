@@ -56,6 +56,9 @@ impl Field {
             }
             (ValueType::Complex, ValueType::Complex) => true,
             (ValueType::BitVector(expected), ValueType::BitVector(actual)) => expected == &actual,
+            (ValueType::SparseVector(expected), ValueType::SparseVector(actual)) => {
+                expected == &actual
+            }
             (ValueType::Null, ValueType::Null) => self.nullable,
             _ => false,
         }

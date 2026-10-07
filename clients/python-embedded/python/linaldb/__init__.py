@@ -40,6 +40,7 @@ __all__ = [
     "LinalError",
     "bitvector_array",
     "peaks_array",
+    "sparse_array",
 ]
 
 
@@ -59,6 +60,46 @@ def bitvector_array(bits):
     return pa.FixedSizeBinaryArray.from_buffers(
         pa.binary(width), len(packed), [None, pa.py_buffer(packed.tobytes())]
     )
+
+
+def sparse_array(rows, dim):
+    """`(array, field_metadata)` for a `SparseVector(dim)` column, from a
+    list of `(indices, values)` pairs (or `None` for a NULL row). Indices
+    must be strictly increasing and below `dim`; the engine checks. Use the
+    metadata on the table's field so the dimension is known::
+
+        arr, meta = linaldb.sparse_array(rows, 10000)
+        table = pa.Table.from_arrays([arr], schema=pa.schema([pa.field("s", arr.type, metadata=meta)]))
+    """
+    import numpy as np
+    import pyarrow as pa
+
+    indices, values, mask = [], [], []
+    for row in rows:
+        if row is None:
+            indices.append([])
+            values.append([])
+            mask.append(True)
+            continue
+        idx, vals = row
+        idx = np.asarray(idx, dtype=np.int64)
+        vals = np.asarray(vals, dtype=np.float32)
+        if idx.shape != vals.shape or idx.ndim != 1:
+            raise LinalError("sparse_array: each row needs 1-D indices and values of equal length")
+        if (idx < 0).any() or (idx > np.iinfo(np.uint32).max).any():
+            raise LinalError("sparse_array: indices must be non-negative and fit in 32 bits")
+        indices.append(idx.astype(np.uint32))
+        values.append(vals)
+        mask.append(False)
+    struct = pa.StructArray.from_arrays(
+        [
+            pa.array(indices, type=pa.list_(pa.field("item", pa.uint32(), nullable=False))),
+            pa.array(values, type=pa.list_(pa.field("item", pa.float32(), nullable=False))),
+        ],
+        names=["indices", "values"],
+        mask=pa.array(mask),
+    )
+    return struct, {"linal.logical_value_type": f"SparseVector:{dim}"}
 
 
 def peaks_array(spectra):

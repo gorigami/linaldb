@@ -186,6 +186,17 @@ pub(super) fn search_plan(
         })
     };
 
+    if s.prefilter.is_none()
+        && matches!(
+            schema.get_field(&s.column).map(|f| &f.value_type),
+            Some(ValueType::SparseVector(_))
+        )
+    {
+        return Err(invalid(format!(
+            "SEARCH: column '{}' is a SparseVector, which vector indexes can't hold -- add PREFILTER <predicate> (e.g. PREFILTER true) for an exact search",
+            s.column
+        )));
+    }
     let is_batch = matches!(s.query, SearchQuery::Batch { .. });
     if !is_batch && s.prefilter.is_none() {
         let plan = LogicalPlan::VectorSearch {
@@ -204,6 +215,7 @@ pub(super) fn search_plan(
     // batch of one, projected back to the dataset's columns below).
     let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
         Some(ValueType::Vector(d)) => *d,
+        Some(ValueType::SparseVector(d)) => *d,
         Some(other) => {
             return Err(invalid(format!(
                 "SEARCH: column '{}' is {:?}, not a Vector",
@@ -349,6 +361,7 @@ fn resolve_batch_queries(
             .map_err(|e| e.to_string())?;
         let v = match &row.values[col_idx] {
             Value::Vector(v) => v.clone(),
+            Value::SparseVector(sv) => sv.to_dense(),
             other => {
                 return Err(format!(
                     "SEARCH QUERIES: row {} of '{}.{}' is {:?}, not a Vector",
@@ -1217,6 +1230,7 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             CastTarget::Vector(n) => ValueType::Vector(*n),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
             CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
+            CastTarget::SparseVector(n) => ValueType::SparseVector(*n),
         },
         Expr::VecLiteral(v) => ValueType::Vector(v.len()),
         Expr::MatLiteral(_) => ValueType::Matrix(0, 0),
@@ -1240,6 +1254,7 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
             VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
             VectorFnKind::SpecMatches => ValueType::Int,
+            VectorFnKind::SparseNew => ValueType::SparseVector(0),
         },
         _ => ValueType::Float,
     }
@@ -1731,6 +1746,7 @@ pub(super) fn execute_add_computed_column(
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
             Value::BitVector(b) => ValueType::BitVector(b.len()),
+            Value::SparseVector(sv) => ValueType::SparseVector(sv.dim()),
             Value::Matrix(m) => {
                 let r = m.len();
                 let c = m.first().map_or(0, |row| row.len());
@@ -1785,6 +1801,7 @@ pub(super) fn execute_add_computed_column(
             Value::Bool(_) => ValueType::Bool,
             Value::Vector(v) => ValueType::Vector(v.len()),
             Value::BitVector(b) => ValueType::BitVector(b.len()),
+            Value::SparseVector(sv) => ValueType::SparseVector(sv.dim()),
             Value::Matrix(m) => ValueType::Matrix(m.len(), m.first().map_or(0, |r| r.len())),
             Value::Complex(_) => ValueType::Complex,
             Value::Null => ValueType::Null,
@@ -2310,6 +2327,7 @@ pub(super) fn dsl_expr_to_logical_expr(
                 CastTarget::Vector(n) => LCast::Vector(*n),
                 CastTarget::Matrix(r, c) => LCast::Matrix(*r, *c),
                 CastTarget::BitVector(n) => LCast::BitVector(*n),
+                CastTarget::SparseVector(n) => LCast::SparseVector(*n),
             };
             LogicalExpr::Cast {
                 expr: Box::new(dsl_expr_to_logical_expr(expr, schema, right_tables)),
@@ -2351,6 +2369,7 @@ pub(super) fn dsl_expr_to_logical_expr(
                 VectorFnKind::SpecCosine => LVk::SpecCosine,
                 VectorFnKind::SpecCosineMod => LVk::SpecCosineMod,
                 VectorFnKind::SpecMatches => LVk::SpecMatches,
+                VectorFnKind::SparseNew => LVk::SparseNew,
             };
             LogicalExpr::VectorFn {
                 func: lfunc,

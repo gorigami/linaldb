@@ -8,6 +8,7 @@ pub mod index;
 pub mod linalg;
 pub mod provenance;
 pub mod signal;
+pub mod sparse;
 pub mod spectral;
 pub mod storage;
 pub mod store;

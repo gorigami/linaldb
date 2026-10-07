@@ -38,6 +38,9 @@ pub enum Value {
     /// Fixed-length bit vector (`BitVector(N)` column), e.g. a molecular
     /// fingerprint -- see `core::bitvec`.
     BitVector(crate::core::bitvec::BitVec),
+    /// Sparse vector (`SparseVector(dim)` column): nonzero entries only --
+    /// see `core::sparse`.
+    SparseVector(crate::core::sparse::SparseVec),
     Null,
 }
 
@@ -77,6 +80,7 @@ impl PartialEq for Value {
                 a.re.to_bits() == b.re.to_bits() && a.im.to_bits() == b.im.to_bits()
             }
             (Value::BitVector(a), Value::BitVector(b)) => a == b,
+            (Value::SparseVector(a), Value::SparseVector(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -116,6 +120,7 @@ impl std::hash::Hash for Value {
                 v.im.to_bits().hash(state);
             }
             Value::BitVector(b) => b.hash(state),
+            Value::SparseVector(s) => s.hash(state),
             Value::Null => {}
         }
     }
@@ -134,6 +139,8 @@ pub enum ValueType {
     Complex,
     /// `BitVector(N)`: N bits.
     BitVector(usize),
+    /// `SparseVector(dim)`.
+    SparseVector(usize),
     Null,
 }
 
@@ -156,6 +163,7 @@ impl Value {
             }
             Value::Complex(_) => ValueType::Complex,
             Value::BitVector(b) => ValueType::BitVector(b.len()),
+            Value::SparseVector(s) => ValueType::SparseVector(s.dim()),
             Value::Null => ValueType::Null,
         }
     }
@@ -168,6 +176,9 @@ impl Value {
         let heap = match self {
             Value::String(s) => s.capacity(),
             Value::Vector(v) => v.capacity() * std::mem::size_of::<f32>(),
+            Value::SparseVector(s) => {
+                s.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+            }
             Value::Matrix(m) => {
                 m.capacity() * std::mem::size_of::<Vec<f32>>()
                     + m.iter()
@@ -268,6 +279,9 @@ impl Value {
         if let (Value::BitVector(a), Value::BitVector(b)) = (self, other) {
             return Some(a == b);
         }
+        if let (Value::SparseVector(a), Value::SparseVector(b)) = (self, other) {
+            return Some(a == b);
+        }
         if matches!(self, Value::Complex(_)) || matches!(other, Value::Complex(_)) {
             return match (self.as_complex(), other.as_complex()) {
                 (Some(a), Some(b)) => Some(a == b),
@@ -326,6 +340,7 @@ impl Value {
             }
             (Value::Complex(_), ValueType::Complex) => true,
             (Value::BitVector(b), ValueType::BitVector(n)) => b.len() == *n,
+            (Value::SparseVector(s), ValueType::SparseVector(n)) => s.dim() == *n,
             (Value::Null, _) => true, // Null matches any type if nullable
             _ => false,
         }
@@ -397,6 +412,7 @@ impl fmt::Display for Value {
             }
             Value::Complex(v) => write!(f, "{}", format_complex(*v)),
             Value::BitVector(b) => write!(f, "{}", b),
+            Value::SparseVector(s) => write!(f, "{}", s),
             Value::Null => write!(f, "NULL"),
         }
     }
@@ -426,6 +442,7 @@ impl fmt::Display for ValueType {
             ValueType::Matrix(r, c) => write!(f, "MATRIX[{}, {}]", r, c),
             ValueType::Complex => write!(f, "COMPLEX"),
             ValueType::BitVector(n) => write!(f, "BITVECTOR[{}]", n),
+            ValueType::SparseVector(n) => write!(f, "SPARSEVECTOR[{}]", n),
             ValueType::Null => write!(f, "NULL"),
         }
     }

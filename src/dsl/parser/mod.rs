@@ -1003,6 +1003,15 @@ impl Parser {
                     "STRING" | "TEXT" | "VARCHAR" => Ok(ColType::String),
                     "BOOL" | "BOOLEAN" => Ok(ColType::Bool),
                     "COMPLEX" => Ok(ColType::Complex),
+                    "SPARSEVECTOR" => {
+                        self.eat(&Token::LParen)?;
+                        let n = self.eat_usize()?;
+                        self.eat(&Token::RParen)?;
+                        if n == 0 {
+                            return Err(self.error("SPARSEVECTOR needs a dimension of at least 1"));
+                        }
+                        Ok(ColType::SparseVector(n))
+                    }
                     "BITVECTOR" => {
                         self.eat(&Token::LParen)?;
                         let n = self.eat_usize()?;

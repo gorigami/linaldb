@@ -32,7 +32,8 @@ fn vectors(n: usize, seed: u64) -> Vec<f32> {
 fn batch(ids: Vec<i64>, mass: Vec<f64>, flat: Vec<f32>) -> RecordBatch {
     let item = Arc::new(Field::new("item", DataType::Float32, false));
     let e: ArrayRef = Arc::new(
-        FixedSizeListArray::try_new(item, D as i32, Arc::new(Float32Array::from(flat)), None).unwrap(),
+        FixedSizeListArray::try_new(item, D as i32, Arc::new(Float32Array::from(flat)), None)
+            .unwrap(),
     );
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
@@ -55,13 +56,23 @@ fn db(hnsw: bool) -> (tempfile::TempDir, TensorDb) {
     let mut config = EngineConfig::default();
     config.storage.data_dir = dir.path().to_path_buf();
     let mut db = TensorDb::with_config(config);
-    let mass: Vec<f64> = (0..N).map(|i| 100.0 + (i * 7919 % N) as f64 * 0.05).collect();
-    db.load_record_batch("lib", &batch((0..N as i64).collect(), mass, vectors(N, 3)), "test")
-        .unwrap();
+    let mass: Vec<f64> = (0..N)
+        .map(|i| 100.0 + (i * 7919 % N) as f64 * 0.05)
+        .collect();
+    db.load_record_batch(
+        "lib",
+        &batch((0..N as i64).collect(), mass, vectors(N, 3)),
+        "test",
+    )
+    .unwrap();
     let nq = 20;
     let qmass: Vec<f64> = (0..nq).map(|j| 150.0 + j as f64 * 5.0).collect();
-    db.load_record_batch("q", &batch((0..nq as i64).collect(), qmass, vectors(nq, 9)), "test")
-        .unwrap();
+    db.load_record_batch(
+        "q",
+        &batch((0..nq as i64).collect(), qmass, vectors(nq, 9)),
+        "test",
+    )
+    .unwrap();
     if hnsw {
         execute_line(&mut db, "CREATE VECTOR INDEX ON lib(e) USING HNSW", 1).unwrap();
     }
@@ -70,7 +81,9 @@ fn db(hnsw: bool) -> (tempfile::TempDir, TensorDb) {
 
 fn hits(db: &mut TensorDb, q: &str) -> BTreeMap<i64, Vec<i64>> {
     let out = execute_line(db, q, 1).unwrap_or_else(|e| panic!("{}: {}", q, e));
-    let DslOutput::Table(t) = out else { panic!("{:?}", out) };
+    let DslOutput::Table(t) = out else {
+        panic!("{:?}", out)
+    };
     let mut m = BTreeMap::new();
     for r in &t.rows {
         let (Value::Int(qid), Value::Int(id)) = (&r.values[0], &r.values[4]) else {
@@ -86,8 +99,17 @@ fn broad_filter_through_the_graph_has_high_recall_and_full_k() {
     let (_dir, mut db) = db(true);
     // About half the library passes: well past the exact-fallback size.
     let pred = "PREFILTER mass < 250.0";
-    let exact = hits(&mut db, &format!("SEARCH lib ON e QUERIES q.e KEY id {} LIMIT 10", pred));
-    let approx = hits(&mut db, &format!("SEARCH lib ON e QUERIES q.e KEY id {} APPROX LIMIT 10", pred));
+    let exact = hits(
+        &mut db,
+        &format!("SEARCH lib ON e QUERIES q.e KEY id {} LIMIT 10", pred),
+    );
+    let approx = hits(
+        &mut db,
+        &format!(
+            "SEARCH lib ON e QUERIES q.e KEY id {} APPROX LIMIT 10",
+            pred
+        ),
+    );
     let (mut found, mut total) = (0, 0);
     for (qid, truth) in &exact {
         let got = &approx[qid];
@@ -103,20 +125,32 @@ fn broad_filter_through_the_graph_has_high_recall_and_full_k() {
     // Every APPROX hit passes the filter.
     let out = execute_line(
         &mut db,
-        &format!("SEARCH lib ON e QUERIES q.e KEY id {} APPROX LIMIT 10", pred),
+        &format!(
+            "SEARCH lib ON e QUERIES q.e KEY id {} APPROX LIMIT 10",
+            pred
+        ),
         1,
     )
     .unwrap();
     let DslOutput::Table(t) = out else { panic!() };
-    assert!(t.rows.iter().all(|r| matches!(r.values[5], Value::Float64(m) if m < 250.0)));
+    assert!(t
+        .rows
+        .iter()
+        .all(|r| matches!(r.values[5], Value::Float64(m) if m < 250.0)));
 }
 
 #[test]
 fn narrow_filter_falls_back_to_the_exact_answer() {
     let (_dir, mut db) = db(true);
     let pred = "PREFILTER mass BETWEEN q.mass - 2.0 AND q.mass + 2.0";
-    let exact = hits(&mut db, &format!("SEARCH lib ON e QUERIES q.e KEY id {} LIMIT 5", pred));
-    let approx = hits(&mut db, &format!("SEARCH lib ON e QUERIES q.e KEY id {} APPROX LIMIT 5", pred));
+    let exact = hits(
+        &mut db,
+        &format!("SEARCH lib ON e QUERIES q.e KEY id {} LIMIT 5", pred),
+    );
+    let approx = hits(
+        &mut db,
+        &format!("SEARCH lib ON e QUERIES q.e KEY id {} APPROX LIMIT 5", pred),
+    );
     assert_eq!(exact, approx);
 }
 
@@ -125,13 +159,26 @@ fn explain_and_missing_index() {
     let (_dir, mut with_index) = db(true);
     let plan = format!(
         "{:?}",
-        execute_line(&mut with_index, "EXPLAIN SEARCH lib ON e QUERIES q.e PREFILTER mass < 250.0 APPROX LIMIT 3", 1).unwrap()
+        execute_line(
+            &mut with_index,
+            "EXPLAIN SEARCH lib ON e QUERIES q.e PREFILTER mass < 250.0 APPROX LIMIT 3",
+            1
+        )
+        .unwrap()
     );
-    assert!(plan.contains("HNSW graph over rows passing PREFILTER (APPROX)"), "{}", plan);
+    assert!(
+        plan.contains("HNSW graph over rows passing PREFILTER (APPROX)"),
+        "{}",
+        plan
+    );
 
     let (_dir2, mut plain) = db(false);
-    let e = execute_line(&mut plain, "SEARCH lib ON e QUERIES q.e PREFILTER mass < 250.0 APPROX LIMIT 3", 1)
-        .unwrap_err()
-        .to_string();
+    let e = execute_line(
+        &mut plain,
+        "SEARCH lib ON e QUERIES q.e PREFILTER mass < 250.0 APPROX LIMIT 3",
+        1,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(e.contains("APPROX needs an HNSW index"), "{}", e);
 }

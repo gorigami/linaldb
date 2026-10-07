@@ -100,6 +100,47 @@ pub fn check_expr(expr: &Expr, schema: &Schema) -> Result<(), String> {
             }
         }
     }
+    if let Expr::VectorFn { func, args } = expr {
+        // Similarity on a SparseVector: the other side must be a Vector or
+        // SparseVector of the same dimension. (Dense-only calls keep their
+        // existing behavior.)
+        if matches!(func, VectorFnKind::CosineSim | VectorFnKind::Dot) && args.len() == 2 {
+            let name = if matches!(func, VectorFnKind::CosineSim) {
+                "COSINE_SIM"
+            } else {
+                "DOT"
+            };
+            let (a, b) = (
+                infer_expr_type_full(&args[0], schema),
+                infer_expr_type_full(&args[1], schema),
+            );
+            let dim = |t: &ValueType| match t {
+                ValueType::Vector(d) | ValueType::SparseVector(d) => Some(*d),
+                _ => None,
+            };
+            if matches!(a, ValueType::SparseVector(_)) || matches!(b, ValueType::SparseVector(_)) {
+                for t in [&a, &b] {
+                    if dim(t).is_none() && *t != ValueType::Null {
+                        return Err(format!(
+                            "{} expects Vector or SparseVector arguments, got {}",
+                            name, t
+                        ));
+                    }
+                }
+                if let (Some(x), Some(y)) = (dim(&a), dim(&b)) {
+                    if x != 0 && y != 0 && x != y {
+                        return Err(format!("{}: dimensions differ ({} vs {})", name, x, y));
+                    }
+                }
+            }
+        }
+        if matches!(func, VectorFnKind::SparseNew) && args.len() != 3 {
+            return Err(format!(
+                "SPARSE takes 3 arguments (dim, [indices], [values]), got {}",
+                args.len()
+            ));
+        }
+    }
     for child in children(expr) {
         check_expr(child, schema)?;
     }
