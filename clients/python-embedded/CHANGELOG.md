@@ -6,6 +6,13 @@ engine's own changelog.
 
 ## [Unreleased]
 
+- **Sparse vectors:** `linaldb.sparse_array(rows, dim)` builds a `SparseVector(dim)` column for
+  `load_arrow()`; values come back as `{"dim", "indices", "values"}`.
+- **Quantized vectors:** `load_numpy(..., quantize="F16" | "I8")` stores the vector column as
+  `Vector(d, F16|I8)`; values come back as the stored floats.
+- Engine: `SEARCH ... PREFILTER ... APPROX` (filtered HNSW), opt-in memory-mapped HNSW
+  snapshots, and a fix for `WHERE true` matching nothing. See the root `CHANGELOG.md`.
+
 - **`Db.load_numpy(name, vectors, *, column="embedding", columns=None, origin="numpy")`** and
   **`Db.load_arrow(name, data, *, origin="arrow")`**: create a dataset straight from a 2-D
   `float32` NumPy array (plus optional scalar columns) or a pyarrow `Table`/`RecordBatch`, with

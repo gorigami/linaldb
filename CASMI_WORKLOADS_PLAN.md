@@ -24,7 +24,7 @@ One PR per tier, each from `main` after the previous one is merged; one release 
 | P3a | Batch top-k: `SEARCH ... QUERIES <matrix> \| <dataset>.<col> [KEY <col>]` → `(query_id, rank, score, row_id, ...)` | `BatchVectorSearchExec`, `dsl/executor/query.rs::search_plan` |
 | P7 (report) | `SHOW MEMORY [<dataset>]`: estimated bytes per dataset, index, tensor | `Index::memory_bytes`, `dsl/executor/show.rs` |
 
-### Medium impact — done in this tier's PR
+### Medium impact — merged (#137)
 
 | Item | What |
 |---|---|
@@ -33,7 +33,7 @@ One PR per tier, each from `main` after the previous one is merged; one release 
 | P5 | `SPEC_COSINE` / `SPEC_COSINE_MOD` on peak lists; needs a variable-length matrix column first (`Matrix(2, N)` columns require one fixed `N` today) |
 | P7 (copies) | Stop indexes keeping their own copies of every vector (IVF/HNSW hold 1–2 extra copies plus per-vector metadata); binary index snapshots instead of pretty-printed JSON |
 
-### Large impact
+### Large impact — done in this tier's PR
 
 | Item | What |
 |---|---|
@@ -46,6 +46,12 @@ Measured (P7 copies): HNSW at 200,000 × 128 now builds in 64 s (was 419 s) with
 (was 0.905) and 3.6 ms per query (was 8.3 ms), holding one copy of the vectors (was two plus
 per-vector metadata). Validation: `TANIMOTO` equals RDKit exactly; `SPEC_COSINE(_MOD)` equals
 matchms to 1e-12 on 900 pairs; `PREFILTER` equals a brute-force window + exact ranking.
+
+Large tier, measured: filtered HNSW (`PREFILTER ... APPROX`) returned the exact top-10 on a
+6,000-row test with half the rows passing (recall 1.000); quantized HNSW recall@10 against the
+exact f32 answer is F16 1.000 / I8 0.990 (4,000 × 64); sparse results are bit-identical to dense;
+quantized rows save exactly 2 (F16) or 3 (I8) bytes per element. One more pre-existing bug fixed:
+`WHERE true` matched nothing.
 
 Bugs found along the way and fixed in the medium tier: UPDATE/DELETE index and zone-map
 staleness; arithmetic in WHERE comparisons matching nothing; f32 literals next to DOUBLE;

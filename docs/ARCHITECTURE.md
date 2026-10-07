@@ -865,6 +865,37 @@ f64 when it sits beside a `Float64` operand (`lower_pair`/`lower_beside`
 in `dsl/executor/query.rs`); elsewhere it stays an f32 `Float`, so existing
 `Float` comparisons are unchanged.
 
+### Large-Tier Additions: Filtered HNSW, Sparse and Quantized Vectors, Mapped Snapshots
+
+- **Filtered HNSW** (`SEARCH ... PREFILTER <pred> APPROX`): `BatchVectorSearchExec`
+  evaluates the predicate per query to a pass mask, then calls
+  `HnswIndex::search_filtered`, whose layer-0 walk (`search_layer_filtered`) traverses every
+  node but only admits passing ones to the result heap. It goes exact (scan of the passing
+  rows) when at most `4 * max(k, ef_search)` rows pass, when there's no graph, or when the walk
+  returns fewer than `min(k, passing)` rows -- so the `PREFILTER` contract (k rows whenever k
+  pass) holds either way.
+- **`SparseVector`** (`core/sparse.rs`): `Value::SparseVector(SparseVec)` with validated
+  strictly increasing `u32` indices. Dot products merge in index order and skip zeros, which is
+  the dense loop's exact arithmetic, so results are bit-identical to the dense equivalent
+  (`NORMALIZE` divides, like the dense path, rather than multiplying by a reciprocal). Arrow:
+  `Struct{indices: List<UInt32>, values: List<Float32>}` with `SparseVector:<dim>` metadata.
+  `FlatVectors` refuses sparse values, so no vector index can be built on such a column;
+  `SEARCH ... PREFILTER` ranks it exactly.
+- **Quantized vectors** (`core/quant.rs`): `Value::QVector(QuantVec)` /
+  `ValueType::QVector(d, F16|I8)`. Values are quantized once when they enter the column
+  (`coerce_bitvector_inserts`, `CAST`, Arrow load) and dequantized in exactly one place for
+  expressions: the `Column` arm of `physical::evaluate_expression` (type inference reports
+  such a column as `Vector(d)` inside expressions). `FlatVectors` stores F16 bits or I8 bytes
+  plus per-vector scales and computes dots with per-encoding kernels in the same element
+  order, so index scores equal `COSINE_SIM` on the column. Arrow:
+  `Struct{scale: Float32, values: FixedSizeList<Float16|Int8, d>}`.
+- **Mapped snapshots**: `hnsw_index_graphs.bin` v2 (`LNLHNS2`) pads before each `u32` array
+  so it starts 4-byte aligned. The graph's link arrays are `U32Buf` -- `Owned(Vec<u32>)` or
+  `Mapped { Arc<Mmap>, offset, len }`, read as a `&[u32]` in place on little-endian hosts and
+  copied on first write. `decode_snapshots_mapped` validates every array exactly like the
+  owned path. Snapshot files are written to a temporary file and renamed over the old one
+  (`storage::write_replacing`), so a mapped file is never modified in place.
+
 ### Bit Vectors and Peak Lists
 
 `Value::BitVector(BitVec)` (`core/bitvec.rs`): `u64` words, bits past the
@@ -1241,6 +1272,7 @@ Engine configuration via `linal.toml`:
 [storage]
 data_dir = "./data"
 default_db = "default"
+mmap_index_snapshots = false   # memory-map saved HNSW graphs on LOAD DATASET (opt-in)
 
 [wal]                          # optional; the whole section defaults to off
 enabled = false
@@ -1253,6 +1285,10 @@ backend = "cpu"                # "cpu" | "gpu" (experimental, needs the gpu-wgpu
 
 - **`storage.data_dir`**: root directory for persistence. Each database is a subdirectory.
 - **`storage.default_db`**: default database name.
+- **`storage.mmap_index_snapshots`**: when `true`, `LOAD DATASET` memory-maps a saved HNSW
+  graph (`hnsw_index_graphs.bin`) instead of reading it into the heap (see "Vector Index
+  Storage and HNSW"). Off by default. The file must not be edited while mapped; on Windows a
+  mapped file can't be replaced, so re-saving that dataset fails until it's unloaded.
 - **`wal.*`**: the write-ahead log (see Storage Layer → "Write-ahead log", and "Scaling &
   Deployment" → "Durability and restarts").
 - **`compute.backend`**: the per-database compute backend (see "Execution Model" → "Backend

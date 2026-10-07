@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — scientific retrieval, large-impact tier (CASMI 2026 proposal)
+
+Third and last tier (`CASMI_WORKLOADS_PLAN.md`).
+
+- **Filtered HNSW: `SEARCH ... PREFILTER <pred> APPROX`.** Ranks the rows passing a pre-filter
+  through the HNSW graph (only passing rows enter the results). Opt-in; plain `PREFILTER` stays
+  exact. Falls back to the exact ranking when few rows pass or the walk finds fewer than `k`, so
+  `k` rows still come back whenever `k` pass.
+- **`SparseVector(dim)` (P2).** Nonzero entries only; dense-literal `INSERT`,
+  `SPARSE(dim, [indices], [values])`, `CAST` to/from `VECTOR(n)`. `COSINE_SIM`, `DOT`, `L2_NORM`,
+  `NORMALIZE`, `VEC_SCALE` give bit-identical results to the dense equivalent. Vector indexes
+  refuse the column with a clear message; `SEARCH ... PREFILTER` searches it exactly. Python:
+  `linaldb.sparse_array()`.
+- **Quantized vectors: `Vector(d, F16)` / `Vector(d, I8)` (P7).** Opt-in in the column type;
+  values are quantized once on entry and stored quantized in rows and indexes (2 bytes / 1 byte
+  plus a scale per element). Expressions and indexes see the stored values, so scores stay
+  consistent. HNSW recall@10 against the exact `f32` answer (4,000 × 64): F16 1.000, I8 0.990.
+  Python: `load_numpy(..., quantize="F16"|"I8")`.
+- **Memory-mapped HNSW snapshots (P7).** `[storage] mmap_index_snapshots = true` makes `LOAD
+  DATASET` map `hnsw_index_graphs.bin` instead of copying it (format v2 aligns the arrays; v1
+  still reads). `SHOW MEMORY` reports the mapped bytes. Snapshot files are now replaced
+  atomically on save.
+
+### Fixed — found while building the large tier
+
+- **`WHERE true` (and `PREFILTER true`) matched no rows.** A literal boolean predicate fell
+  through the predicate evaluator. New case in `tests/where_arithmetic_test.rs`.
+
 ### Added — scientific retrieval, medium-impact tier (CASMI 2026 proposal)
 
 Second of three tiers (`CASMI_WORKLOADS_PLAN.md`).

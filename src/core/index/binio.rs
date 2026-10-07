@@ -48,7 +48,7 @@ impl Writer {
     /// in place as `&[u32]`.
     pub fn u32s_aligned(&mut self, v: &[u32]) {
         self.u64(v.len() as u64);
-        while self.buf.len() % 4 != 0 {
+        while !self.buf.len().is_multiple_of(4) {
             self.buf.push(0);
         }
         for x in v {
@@ -119,7 +119,7 @@ impl<'a> Reader<'a> {
     /// over it.
     pub fn u32s_aligned_range(&mut self) -> Result<(usize, usize), String> {
         let n = self.u64()? as usize;
-        while self.pos % 4 != 0 {
+        while !self.pos.is_multiple_of(4) {
             self.take(1)?;
         }
         let start = self.pos;
@@ -130,8 +130,10 @@ impl<'a> Reader<'a> {
     pub fn u32s_aligned(&mut self) -> Result<Vec<u32>, String> {
         let (start, n) = self.u32s_aligned_range()?;
         Ok(self.buf[start..start + 4 * n]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect())
     }
     pub fn finish(&self) -> Result<(), String> {
