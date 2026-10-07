@@ -170,6 +170,45 @@ impl PhysicalPlan for IndexScanExec {
     }
 }
 
+/// Range scan through a `SORTED` index: the rows whose `column` satisfies
+/// every `(op, value)` constraint, in row order. The planner wraps it in a
+/// `FilterExec` with the full predicate, so this only has to narrow.
+#[derive(Debug)]
+pub struct SortedRangeScanExec {
+    pub dataset_name: String,
+    pub schema: Arc<Schema>,
+    pub column: String,
+    pub constraints: Vec<(String, crate::core::value::Value)>,
+}
+
+impl PhysicalPlan for SortedRangeScanExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        let dataset = db.get_dataset(&self.dataset_name)?;
+        let index = dataset
+            .get_index(&self.column)
+            .and_then(|i| {
+                i.as_any()
+                    .downcast_ref::<crate::core::index::sorted::SortedIndex>()
+            })
+            .ok_or_else(|| {
+                EngineError::InvalidOp(format!(
+                    "SORTED index not found on column '{}'",
+                    self.column
+                ))
+            })?;
+        let row_ids = index.range(&self.constraints);
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for row in dataset.get_rows_by_ids(&row_ids) {
+            rows.push(evaluate_lazy_columns_in_row(dataset, &row)?);
+        }
+        Ok(rows)
+    }
+}
+
 /// Vector Search Executor
 #[derive(Debug)]
 pub struct VectorSearchExec {
@@ -227,15 +266,22 @@ impl PhysicalPlan for VectorSearchExec {
     }
 }
 
-/// Top-k vector search for many queries at once (`SEARCH ... QUERIES`).
-/// Every query runs the same `Index::search` a single-query `SEARCH` would,
-/// in parallel; rows come out grouped by query in input order, then by rank.
+/// Top-k vector search for many queries at once (`SEARCH ... QUERIES`), and
+/// any `SEARCH ... PREFILTER`. Without a prefilter, every query runs the
+/// same `Index::search` a single-query `SEARCH` would, in parallel. With
+/// one, each query's top-k is an exact cosine ranking over the rows that
+/// pass the predicate (narrowed first through a SORTED index when the
+/// predicate has a range it can answer), so `k` rows come back whenever `k`
+/// rows pass. Rows come out grouped by query in input order, then by rank;
+/// ties keep row order.
 pub struct BatchVectorSearchExec {
     pub dataset_name: String,
     pub column: String,
-    pub queries: Arc<Vec<(crate::core::value::Value, Vec<f32>)>>,
+    pub queries: Arc<crate::query::logical::QueryBatch>,
     pub k: usize,
     pub schema: Arc<Schema>,
+    pub prefilter: Option<Arc<crate::query::logical::Prefilter>>,
+    pub rows_only: bool,
     /// Same role as `VectorSearchExec::resolved_index_type`: for `EXPLAIN`.
     pub resolved_index_type: Option<String>,
 }
@@ -243,25 +289,31 @@ pub struct BatchVectorSearchExec {
 // Hand-written so `EXPLAIN` prints the query count, not every query vector.
 impl std::fmt::Debug for BatchVectorSearchExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let prefilter = self.prefilter.as_ref().map(|p| match &p.sorted_range {
+            Some((column, _)) => format!(
+                "exact over rows passing PREFILTER, narrowed by SORTED index on {}",
+                column
+            ),
+            None => "exact over rows passing PREFILTER, full scan".to_string(),
+        });
         f.debug_struct("BatchVectorSearchExec")
             .field("dataset_name", &self.dataset_name)
             .field("column", &self.column)
-            .field("queries", &self.queries.len())
+            .field("queries", &self.queries.0.len())
             .field("k", &self.k)
             .field("resolved_index_type", &self.resolved_index_type)
+            .field("prefilter", &prefilter)
             .finish()
     }
 }
 
-impl PhysicalPlan for BatchVectorSearchExec {
-    fn schema(&self) -> Arc<Schema> {
-        self.schema.clone()
-    }
-
-    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+impl BatchVectorSearchExec {
+    fn index_results(
+        &self,
+        dataset: &crate::core::dataset_legacy::Dataset,
+    ) -> Result<Vec<Vec<(usize, f32)>>, EngineError> {
         use rayon::prelude::*;
 
-        let dataset = db.get_dataset(&self.dataset_name)?;
         let index = dataset.get_index(&self.column).ok_or_else(|| {
             EngineError::InvalidOp(format!(
                 "Vector index not found on column '{}'",
@@ -277,9 +329,8 @@ impl PhysicalPlan for BatchVectorSearchExec {
                 self.column
             )));
         }
-
-        let results: Vec<Vec<(usize, f32)>> = self
-            .queries
+        self.queries
+            .0
             .par_iter()
             .map(|(_, v)| {
                 let id = crate::core::tensor::TensorId::new();
@@ -292,26 +343,178 @@ impl PhysicalPlan for BatchVectorSearchExec {
                 index.search(&query, self.k)
             })
             .collect::<Result<_, String>>()
-            .map_err(EngineError::InvalidOp)?;
+            .map_err(EngineError::InvalidOp)
+    }
+
+    fn prefiltered_results(
+        &self,
+        dataset: &crate::core::dataset_legacy::Dataset,
+        pf: &crate::query::logical::Prefilter,
+    ) -> Result<Vec<Vec<(usize, f32)>>, EngineError> {
+        use crate::core::index::flat::{cosine_with_norms, l2_norm};
+        use crate::core::value::Value;
+        use rayon::prelude::*;
+
+        let col_idx = dataset
+            .schema
+            .get_field_index(&self.column)
+            .ok_or_else(|| EngineError::InvalidOp(format!("column '{}' not found", self.column)))?;
+        let width = dataset.schema.fields.len();
+        let sorted = pf.sorted_range.as_ref().and_then(|(column, bounds)| {
+            let index = dataset.get_index(column)?;
+            let index = index
+                .as_any()
+                .downcast_ref::<crate::core::index::sorted::SortedIndex>()?;
+            Some((index, bounds))
+        });
+        // Only the columns the predicate reads are copied into each
+        // candidate's evaluation row.
+        let mut referenced = Vec::new();
+        collect_columns(&pf.predicate, &mut referenced);
+        let copy_all = referenced.iter().any(|c| c == "\0all");
+        let needed: Vec<bool> = (0..width)
+            .map(|i| copy_all || referenced.contains(&dataset.schema.fields[i].name))
+            .collect();
+        let has_lazy = !dataset.lazy_expressions.is_empty();
+
+        self.queries
+            .0
+            .par_iter()
+            .enumerate()
+            .map(|(qi, (_, query))| {
+                let qvals: &[Value] = pf.query_values.get(qi).map_or(&[], |v| v.as_slice());
+                let mut eval_values = vec![Value::Null; width];
+                eval_values.extend_from_slice(qvals);
+                let mut eval_row = Tuple {
+                    schema: pf.combined_schema.clone(),
+                    values: eval_values,
+                };
+
+                let candidates: Vec<usize> = match &sorted {
+                    Some((index, bounds)) => {
+                        let mut constraints = Vec::with_capacity(bounds.len());
+                        for (op, bound) in bounds.iter() {
+                            let v = evaluate_expression(bound, &eval_row);
+                            if v.is_null() {
+                                return Ok(Vec::new()); // NULL bound: nothing passes
+                            }
+                            constraints.push((op.clone(), v));
+                        }
+                        index.range(&constraints)
+                    }
+                    None => (0..dataset.rows.len()).collect(),
+                };
+
+                let query_norm = l2_norm(query);
+                let mut scored = Vec::new();
+                for id in candidates {
+                    let stored = &dataset.rows[id];
+                    let evaluated;
+                    let row = if has_lazy {
+                        evaluated = evaluate_lazy_columns_in_row(dataset, stored)
+                            .map_err(|e| e.to_string())?;
+                        &evaluated
+                    } else {
+                        stored
+                    };
+                    for (i, keep) in needed.iter().enumerate() {
+                        if *keep {
+                            eval_row.values[i] = row.values[i].clone();
+                        }
+                    }
+                    if !crate::query::planner::evaluate_predicate(&pf.predicate, &eval_row) {
+                        continue;
+                    }
+                    match &row.values[col_idx] {
+                        Value::Vector(v) => {
+                            if v.len() != query.len() {
+                                return Err(format!(
+                                    "SEARCH: row {} has a {}-dimensional vector, the query has {}",
+                                    id,
+                                    v.len(),
+                                    query.len()
+                                ));
+                            }
+                            scored.push((id, cosine_with_norms(query, query_norm, v, l2_norm(v))));
+                        }
+                        Value::Null => {}
+                        other => {
+                            return Err(format!(
+                                "SEARCH: column '{}' row {} is {:?}, not a Vector",
+                                self.column,
+                                id,
+                                other.value_type()
+                            ))
+                        }
+                    }
+                }
+                scored.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.0.cmp(&b.0))
+                });
+                scored.truncate(self.k);
+                Ok(scored)
+            })
+            .collect::<Result<_, String>>()
+            .map_err(EngineError::InvalidOp)
+    }
+}
+
+/// Every column name `expr` reads.
+fn collect_columns(expr: &crate::query::logical::Expr, out: &mut Vec<String>) {
+    use crate::query::logical::Expr;
+    match expr {
+        Expr::Column(c) => out.push(c.clone()),
+        Expr::Literal(_) => {}
+        Expr::BinaryExpr { left, right, .. } | Expr::And(left, right) | Expr::Or(left, right) => {
+            collect_columns(left, out);
+            collect_columns(right, out);
+        }
+        other => {
+            // Anything else: fall back to copying every column, which is
+            // always correct (just slower).
+            let _ = other;
+            out.push("\0all".to_string());
+        }
+    }
+}
+
+impl PhysicalPlan for BatchVectorSearchExec {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    fn execute(&self, db: &TensorDb) -> Result<Vec<Tuple>, EngineError> {
+        let dataset = db.get_dataset(&self.dataset_name)?;
+        let results = match &self.prefilter {
+            Some(pf) => self.prefiltered_results(dataset, pf)?,
+            None => self.index_results(dataset)?,
+        };
 
         let mut out = Vec::new();
-        for ((query_id, _), hits) in self.queries.iter().zip(results) {
+        for ((query_id, _), hits) in self.queries.0.iter().zip(results) {
             for (rank, (row_id, score)) in hits.into_iter().enumerate() {
                 let row = dataset.rows.get(row_id).ok_or_else(|| {
                     EngineError::InvalidOp(format!(
-                        "SEARCH QUERIES: index returned row {} but '{}' has {} rows",
+                        "SEARCH: index returned row {} but '{}' has {} rows",
                         row_id,
                         self.dataset_name,
                         dataset.rows.len()
                     ))
                 })?;
                 let row = evaluate_lazy_columns_in_row(dataset, row)?;
-                let mut values = Vec::with_capacity(4 + row.values.len());
-                values.push(query_id.clone());
-                values.push(crate::core::value::Value::Int(rank as i64 + 1));
-                values.push(crate::core::value::Value::Float(score));
-                values.push(crate::core::value::Value::Int(row_id as i64));
-                values.extend(row.values);
+                let values = if self.rows_only {
+                    row.values
+                } else {
+                    let mut values = Vec::with_capacity(4 + row.values.len());
+                    values.push(query_id.clone());
+                    values.push(crate::core::value::Value::Int(rank as i64 + 1));
+                    values.push(crate::core::value::Value::Float(score));
+                    values.push(crate::core::value::Value::Int(row_id as i64));
+                    values.extend(row.values);
+                    values
+                };
                 out.push(Tuple::new(self.schema.clone(), values).map_err(EngineError::InvalidOp)?);
             }
         }

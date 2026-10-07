@@ -16,6 +16,9 @@ pub enum IndexType {
     /// HNSW`. Only accelerates top-k search (`VectorSearchExec`), not exact
     /// threshold predicates -- see `HnswIndex`'s doc comment.
     Hnsw,
+    /// Ordered scalar values for range lookups (`sorted::SortedIndex`),
+    /// opted into via `CREATE SORTED INDEX`.
+    Sorted,
 }
 
 /// A persistable record of "column X has an index of type Y", independent of
@@ -100,6 +103,7 @@ pub fn new_index(index_type: IndexType) -> Box<dyn Index> {
         IndexType::Hash => Box::new(hash::HashIndex::new()),
         IndexType::Vector => Box::new(vector::VectorIndex::new()),
         IndexType::Hnsw => Box::new(hnsw::HnswIndex::new()),
+        IndexType::Sorted => Box::new(sorted::SortedIndex::new()),
     }
 }
 
@@ -114,4 +118,5 @@ pub(crate) mod binio;
 pub(crate) mod flat;
 pub mod hash;
 pub mod hnsw;
+pub mod sorted;
 pub mod vector;

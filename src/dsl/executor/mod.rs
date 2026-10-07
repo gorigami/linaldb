@@ -423,7 +423,18 @@ pub fn execute_statement(
 
         // ── Index ───────────────────────────────────────────────────────────
         Statement::CreateIndex(s) => match s.kind {
-            IndexKindAst::Default | IndexKindAst::Hash | IndexKindAst::BTree => {
+            IndexKindAst::Sorted => {
+                db.create_sorted_index(&s.dataset, &s.column)
+                    .map_err(|e| DslError::Engine {
+                        line: line_no,
+                        source: e,
+                    })?;
+                Ok(DslOutput::Message(format!(
+                    "Created SORTED index on {}({})",
+                    s.dataset, s.column
+                )))
+            }
+            IndexKindAst::Default | IndexKindAst::Hash => {
                 db.create_index(&s.dataset, &s.column)
                     .map_err(|e| DslError::Engine {
                         line: line_no,

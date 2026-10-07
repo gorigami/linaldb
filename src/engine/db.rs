@@ -1403,6 +1403,21 @@ impl TensorDb {
             .create_vector_index(dataset_name, column_name)
     }
 
+    /// `CREATE SORTED INDEX` -- see `core::index::sorted::SortedIndex`.
+    pub fn create_sorted_index(
+        &mut self,
+        dataset_name: &str,
+        column_name: &str,
+    ) -> Result<(), EngineError> {
+        let dataset = self.get_dataset_mut(dataset_name)?;
+        dataset
+            .create_index(
+                column_name.to_string(),
+                crate::core::index::new_index(crate::core::index::IndexType::Sorted),
+            )
+            .map_err(EngineError::InvalidOp)
+    }
+
     /// Restores a vector index from a previously persisted clustering
     /// snapshot instead of recomputing k-means -- see `DatabaseInstance`'s
     /// impl and `core::index::vector::VectorIndex::restore_from_snapshot`.
@@ -3397,6 +3412,7 @@ impl DatabaseInstance {
                         crate::core::index::IndexType::Hash => "HASH",
                         crate::core::index::IndexType::Vector => "VECTOR",
                         crate::core::index::IndexType::Hnsw => "VECTOR (HNSW)",
+                        crate::core::index::IndexType::Sorted => "SORTED",
                     };
                     result.push((name.clone(), col.clone(), type_str.to_string()));
                 }

@@ -685,8 +685,9 @@ pub struct CreateIndexStmt {
 #[derive(Debug, Clone)]
 pub enum IndexKindAst {
     Default,
-    BTree,
     Hash,
+    /// `CREATE SORTED INDEX` -- ordered values for range lookups
+    Sorted,
     Vector,
     /// `CREATE VECTOR INDEX ... USING HNSW`
     VectorHnsw,
@@ -735,6 +736,12 @@ pub struct SearchStmt {
     /// would need the vector index itself to understand predicates) --
     /// documented as a real limitation rather than silently claiming more.
     pub filter: Option<Expr>,
+    /// Optional `PREFILTER <predicate>` (modern syntax only): applied
+    /// *before* ranking, so the top-k is exact over the rows that pass and
+    /// `k` rows come back whenever `k` pass. In a `QUERIES <dataset>.<col>`
+    /// batch, `<dataset>.<column>` in the predicate is that query's own
+    /// value (e.g. a per-query mass window).
+    pub prefilter: Option<Expr>,
     /// Optional output dataset name (defaults to `"search_results"`).
     pub target: Option<String>,
 }

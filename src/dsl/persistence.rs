@@ -412,6 +412,9 @@ fn load_dataset_core(
     for def in &index_defs {
         let result = match def.index_type {
             crate::core::index::IndexType::Hash => db.create_index(dataset_name, &def.column),
+            crate::core::index::IndexType::Sorted => {
+                db.create_sorted_index(dataset_name, &def.column)
+            }
             crate::core::index::IndexType::Vector => {
                 let from_snapshot = vector_snapshots.get(&def.column).and_then(|persisted| {
                     let values = db

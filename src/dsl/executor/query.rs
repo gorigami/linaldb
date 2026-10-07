@@ -162,108 +162,140 @@ pub(super) fn search_plan(
     };
     let source_ds = db.get_dataset(&s.dataset).map_err(engine_err)?;
     let schema = source_ds.schema.clone();
-    let query_tensor = match s.query {
-        SearchQuery::TensorRef(ref name) => db.get(name).map_err(engine_err)?.clone(),
-        SearchQuery::Inline(ref values) => {
-            use crate::core::tensor::{TensorId, TensorMetadata};
-            let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-            let n = vals_f32.len();
-            let id = TensorId::new();
-            let meta = TensorMetadata::new(id, None);
-            crate::core::tensor::Tensor::new(
-                id,
-                crate::core::tensor::Shape::new(vec![n]),
-                vals_f32,
-                meta,
-            )
-            .map_err(|e| DslError::Parse {
-                line: line_no,
-                msg: e,
-            })?
+    let single_query = |db: &TensorDb| -> Result<crate::core::tensor::Tensor, DslError> {
+        Ok(match s.query {
+            SearchQuery::TensorRef(ref name) => db.get(name).map_err(engine_err)?.clone(),
+            SearchQuery::Inline(ref values) => {
+                use crate::core::tensor::{TensorId, TensorMetadata};
+                let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                let n = vals_f32.len();
+                let id = TensorId::new();
+                let meta = TensorMetadata::new(id, None);
+                crate::core::tensor::Tensor::new(
+                    id,
+                    crate::core::tensor::Shape::new(vec![n]),
+                    vals_f32,
+                    meta,
+                )
+                .map_err(|e| DslError::Parse {
+                    line: line_no,
+                    msg: e,
+                })?
+            }
+            SearchQuery::Batch { .. } => unreachable!("handled by the batch path"),
+        })
+    };
+
+    let is_batch = matches!(s.query, SearchQuery::Batch { .. });
+    if !is_batch && s.prefilter.is_none() {
+        let plan = LogicalPlan::VectorSearch {
+            input: Box::new(LogicalPlan::Scan {
+                dataset_name: s.dataset.clone(),
+                schema: schema.clone(),
+            }),
+            column: s.column.clone(),
+            query: single_query(db)?,
+            k: s.top_k,
+        };
+        return Ok((plan, schema));
+    }
+
+    // Batch queries, and any PREFILTER search (a single query runs as a
+    // batch of one, projected back to the dataset's columns below).
+    let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
+        Some(ValueType::Vector(d)) => *d,
+        Some(other) => {
+            return Err(invalid(format!(
+                "SEARCH: column '{}' is {:?}, not a Vector",
+                s.column, other
+            )))
         }
+        None => {
+            return Err(invalid(format!(
+                "SEARCH: column '{}' not found in dataset '{}'",
+                s.column, s.dataset
+            )))
+        }
+    };
+    let batch = match s.query {
         SearchQuery::Batch {
             ref source,
             ref column,
             ref key,
         } => {
-            let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
-                Some(ValueType::Vector(d)) => *d,
-                Some(other) => {
-                    return Err(invalid(format!(
-                        "SEARCH: column '{}' is {:?}, not a Vector",
-                        s.column, other
-                    )))
-                }
-                None => {
-                    return Err(invalid(format!(
-                        "SEARCH: column '{}' not found in dataset '{}'",
-                        s.column, s.dataset
-                    )))
-                }
-            };
-            let (queries, key_type) =
-                resolve_batch_queries(db, source, column.as_deref(), key.as_deref())
-                    .map_err(invalid)?;
-            for (i, (_, v)) in queries.iter().enumerate() {
-                if target_dim != 0 && v.len() != target_dim {
-                    return Err(invalid(format!(
-                        "SEARCH QUERIES: query {} has dimension {}, but '{}' is Vector({})",
-                        i,
-                        v.len(),
-                        s.column,
-                        target_dim
-                    )));
-                }
-            }
-            let mut fields = vec![
-                crate::core::tuple::Field::new("query_id", key_type),
-                crate::core::tuple::Field::new("rank", ValueType::Int),
-                crate::core::tuple::Field::new("score", ValueType::Float),
-                crate::core::tuple::Field::new("row_id", ValueType::Int),
-            ];
-            for f in &schema.fields {
-                if fields.iter().any(|g| g.name == f.name) {
-                    return Err(invalid(format!(
-                        "SEARCH QUERIES: dataset '{}' has a column named '{}', which collides with the batch result column of the same name -- rename it first",
-                        s.dataset, f.name
-                    )));
-                }
-                let mut field = f.clone();
-                field.is_lazy = false;
-                fields.push(field);
-            }
-            let out_schema = Arc::new(crate::core::tuple::Schema::new(fields));
-            return Ok((
-                LogicalPlan::BatchVectorSearch {
-                    dataset_name: s.dataset.clone(),
-                    column: s.column.clone(),
-                    queries: Arc::new(queries),
-                    k: s.top_k,
-                    schema: out_schema.clone(),
-                },
-                out_schema,
-            ));
+            resolve_batch_queries(db, source, column.as_deref(), key.as_deref()).map_err(invalid)?
         }
+        _ => BatchQueries {
+            queries: vec![(Value::Int(0), single_query(db)?.to_logical_vec())],
+            key_type: ValueType::Int,
+            source: None,
+        },
     };
-    let plan = LogicalPlan::VectorSearch {
-        input: Box::new(LogicalPlan::Scan {
-            dataset_name: s.dataset.clone(),
-            schema: schema.clone(),
-        }),
+    for (i, (_, v)) in batch.queries.iter().enumerate() {
+        if target_dim != 0 && v.len() != target_dim {
+            return Err(invalid(format!(
+                "SEARCH: query {} has dimension {}, but '{}' is Vector({})",
+                i,
+                v.len(),
+                s.column,
+                target_dim
+            )));
+        }
+    }
+    // A single prefiltered query returns the same shape as plain SEARCH
+    // (the dataset's own rows); a batch adds the per-hit columns in front.
+    let mut fields = if is_batch {
+        vec![
+            crate::core::tuple::Field::new("query_id", batch.key_type.clone()),
+            crate::core::tuple::Field::new("rank", ValueType::Int),
+            crate::core::tuple::Field::new("score", ValueType::Float),
+            crate::core::tuple::Field::new("row_id", ValueType::Int),
+        ]
+    } else {
+        Vec::new()
+    };
+    for f in &schema.fields {
+        if fields.iter().any(|g| g.name == f.name) {
+            return Err(invalid(format!(
+                "SEARCH QUERIES: dataset '{}' has a column named '{}', which collides with the batch result column of the same name -- rename it first",
+                s.dataset, f.name
+            )));
+        }
+        let mut field = f.clone();
+        field.is_lazy = false;
+        fields.push(field);
+    }
+    let out_schema = Arc::new(crate::core::tuple::Schema::new(fields));
+    let prefilter = match &s.prefilter {
+        Some(expr) => Some(Arc::new(
+            build_prefilter(db, expr, &s.dataset, &schema, &batch).map_err(invalid)?,
+        )),
+        None => None,
+    };
+    let plan = LogicalPlan::BatchVectorSearch {
+        dataset_name: s.dataset.clone(),
         column: s.column.clone(),
-        query: query_tensor,
+        queries: Arc::new(crate::query::logical::QueryBatch(batch.queries)),
         k: s.top_k,
+        schema: out_schema.clone(),
+        prefilter,
+        rows_only: !is_batch,
     };
-    Ok((plan, schema))
+    Ok((plan, out_schema))
 }
 
-/// `SEARCH ... QUERIES`'s resolved queries, `(query_id, vector)`, plus the
-/// `query_id` column's type.
-type BatchQueries = (Vec<(Value, Vec<f32>)>, ValueType);
+/// `SEARCH ... QUERIES`'s resolved queries, `(query_id, vector)`, the
+/// `query_id` column's type, and -- for a dataset source -- its name,
+/// schema and every query row's values (for `PREFILTER`).
+struct BatchQueries {
+    queries: Vec<(Value, Vec<f32>)>,
+    key_type: ValueType,
+    source: Option<(String, Arc<crate::core::tuple::Schema>, Vec<Vec<Value>>)>,
+}
 
-/// Resolves `SEARCH ... QUERIES`'s source into `(query_id, vector)` pairs
-/// plus the `query_id` column's type: rows of a 2-D tensor (ids `0..n`), or
-/// a dataset's vector column (ids from its `KEY` column, else `0..n`).
+/// Resolves `SEARCH ... QUERIES`'s source: rows of a 2-D tensor (ids
+/// `0..n`), or a dataset's vector column (ids from its `KEY` column, else
+/// `0..n`).
 fn resolve_batch_queries(
     db: &TensorDb,
     source: &str,
@@ -284,7 +316,11 @@ fn resolve_batch_queries(
         let queries = (0..dims[0])
             .map(|i| (Value::Int(i as i64), data[i * d..(i + 1) * d].to_vec()))
             .collect();
-        return Ok((queries, ValueType::Int));
+        return Ok(BatchQueries {
+            queries,
+            key_type: ValueType::Int,
+            source: None,
+        });
     };
     let ds = db.get_dataset(source).map_err(|e| e.to_string())?;
     let col_idx = ds.schema.get_field_index(column).ok_or_else(|| {
@@ -307,6 +343,7 @@ fn resolve_batch_queries(
         None => ValueType::Int,
     };
     let mut queries = Vec::with_capacity(ds.rows.len());
+    let mut rows = Vec::with_capacity(ds.rows.len());
     for (i, row) in ds.rows.iter().enumerate() {
         let row = crate::query::physical::evaluate_lazy_columns_in_row(ds, row)
             .map_err(|e| e.to_string())?;
@@ -327,8 +364,159 @@ fn resolve_batch_queries(
             None => Value::Int(i as i64),
         };
         queries.push((id, v));
+        rows.push(row.values);
     }
-    Ok((queries, key_type))
+    Ok(BatchQueries {
+        queries,
+        key_type,
+        source: Some((source.to_string(), ds.schema.clone(), rows)),
+    })
+}
+
+/// Lowers a `PREFILTER` predicate. `<query dataset>.<column>` becomes the
+/// query column `QUERY_COLUMN_PREFIX + column`, evaluated per query; every
+/// other name must be a column of the searched dataset.
+fn build_prefilter(
+    db: &TensorDb,
+    expr: &Expr,
+    dataset: &str,
+    schema: &crate::core::tuple::Schema,
+    batch: &BatchQueries,
+) -> Result<crate::query::logical::Prefilter, String> {
+    use crate::query::logical::QUERY_COLUMN_PREFIX;
+
+    let query_source = batch.source.as_ref();
+    let unknown = std::cell::RefCell::new(Vec::new());
+    let rewritten = map_expr(expr, &|e| match (e, query_source) {
+        (Expr::Field { base, field }, Some((qname, qschema, _))) => match base.as_ref() {
+            Expr::Ref(b) if b == qname => {
+                if qschema.get_field_index(field).is_none() {
+                    unknown.borrow_mut().push(format!("{}.{}", qname, field));
+                }
+                Some(Expr::Ref(format!("{}{}", QUERY_COLUMN_PREFIX, field)))
+            }
+            _ => None,
+        },
+        _ => None,
+    });
+    if let Some(name) = unknown.into_inner().first() {
+        return Err(format!("PREFILTER: unknown query column '{}'", name));
+    }
+
+    let mut fields: Vec<crate::core::tuple::Field> = schema
+        .fields
+        .iter()
+        .map(|f| {
+            let mut f = f.clone();
+            f.is_lazy = false;
+            f
+        })
+        .collect();
+    let mut query_values = Vec::new();
+    if let Some((_, qschema, rows)) = query_source {
+        for f in &qschema.fields {
+            let mut f = f.clone();
+            f.name = format!("{}{}", QUERY_COLUMN_PREFIX, f.name);
+            f.is_lazy = false;
+            fields.push(f.nullable());
+        }
+        query_values = rows.clone();
+    }
+    let combined_schema = Arc::new(crate::core::tuple::Schema::new(fields));
+    let predicate = dsl_expr_to_logical_expr(
+        &rewritten,
+        &combined_schema,
+        &std::collections::HashSet::new(),
+    );
+    let mut referenced = Vec::new();
+    collect_referenced_columns(&predicate, &mut referenced);
+    for name in &referenced {
+        if combined_schema.get_field_index(name).is_none() {
+            return Err(format!(
+                "PREFILTER: unknown column '{}' in dataset '{}'",
+                name, dataset
+            ));
+        }
+    }
+
+    let sorted_range = sorted_prefilter_range(db, dataset, &predicate);
+    Ok(crate::query::logical::Prefilter {
+        predicate,
+        combined_schema,
+        query_values,
+        sorted_range,
+    })
+}
+
+/// The first conjunct of a `PREFILTER` predicate that the SORTED index on
+/// one of `dataset`'s columns can answer, with bounds that use only
+/// constants and query columns (so they're known per query).
+fn sorted_prefilter_range(
+    db: &TensorDb,
+    dataset: &str,
+    predicate: &LogicalExpr,
+) -> Option<(String, Vec<(String, LogicalExpr)>)> {
+    use crate::query::logical::QUERY_COLUMN_PREFIX;
+
+    let ds = db.get_dataset(dataset).ok()?;
+    let has_sorted = |c: &str| {
+        ds.get_index(c)
+            .is_some_and(|i| i.index_type() == crate::core::index::IndexType::Sorted)
+    };
+    let query_only = |e: &LogicalExpr| {
+        let mut cols = Vec::new();
+        collect_referenced_columns(e, &mut cols);
+        cols.iter().all(|c| c.starts_with(QUERY_COLUMN_PREFIX))
+    };
+    let flip = |op: &str| {
+        match op {
+            "<" => ">",
+            "<=" => ">=",
+            ">" => "<",
+            ">=" => "<=",
+            other => other,
+        }
+        .to_string()
+    };
+
+    let mut conjuncts = vec![predicate];
+    let mut i = 0;
+    while i < conjuncts.len() {
+        if let LogicalExpr::And(l, r) = conjuncts[i] {
+            conjuncts[i] = l;
+            conjuncts.push(r);
+        } else {
+            i += 1;
+        }
+    }
+    conjuncts.into_iter().find_map(|c| match c {
+        LogicalExpr::Between { expr, low, high } => match expr.as_ref() {
+            LogicalExpr::Column(col) if has_sorted(col) && query_only(low) && query_only(high) => {
+                Some((
+                    col.clone(),
+                    vec![
+                        (">=".to_string(), (**low).clone()),
+                        ("<=".to_string(), (**high).clone()),
+                    ],
+                ))
+            }
+            _ => None,
+        },
+        LogicalExpr::BinaryExpr { left, op, right }
+            if matches!(op.as_str(), "<" | "<=" | ">" | ">=" | "=") =>
+        {
+            match (left.as_ref(), right.as_ref()) {
+                (LogicalExpr::Column(col), other) if has_sorted(col) && query_only(other) => {
+                    Some((col.clone(), vec![(op.clone(), other.clone())]))
+                }
+                (other, LogicalExpr::Column(col)) if has_sorted(col) && query_only(other) => {
+                    Some((col.clone(), vec![(flip(op), other.clone())]))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    })
 }
 
 /// A `SEARCH` result returned inline (no `INTO`).
@@ -1658,9 +1846,21 @@ pub(super) fn agg_func_to_logical(
 /// into `CallExpr`'s own variants for a shape this rewrite never needs to
 /// reach.
 fn rewrite_ref_names(expr: &Expr, rename: &std::collections::HashMap<String, String>) -> Expr {
+    map_expr(expr, &|e| match e {
+        Expr::Ref(name) => rename.get(name).map(|n| Expr::Ref(n.clone())),
+        _ => None,
+    })
+}
+
+/// Rebuilds `expr` bottom-up, except that any node for which `f` returns
+/// `Some(replacement)` is replaced whole (its children aren't visited).
+fn map_expr(expr: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
+    if let Some(replacement) = f(expr) {
+        return replacement;
+    }
     match expr {
-        Expr::Ref(name) => Expr::Ref(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
-        Expr::Int(_)
+        Expr::Ref(_)
+        | Expr::Int(_)
         | Expr::Scalar(_)
         | Expr::StringLit(_)
         | Expr::Bool(_)
@@ -1671,31 +1871,25 @@ fn rewrite_ref_names(expr: &Expr, rename: &std::collections::HashMap<String, Str
         | Expr::Index { .. } => expr.clone(),
         Expr::Infix { op, lhs, rhs } => Expr::Infix {
             op: *op,
-            lhs: Box::new(rewrite_ref_names(lhs, rename)),
-            rhs: Box::new(rewrite_ref_names(rhs, rename)),
+            lhs: Box::new(map_expr(lhs, f)),
+            rhs: Box::new(map_expr(rhs, f)),
         },
-        Expr::And(l, r) => Expr::And(
-            Box::new(rewrite_ref_names(l, rename)),
-            Box::new(rewrite_ref_names(r, rename)),
-        ),
-        Expr::Or(l, r) => Expr::Or(
-            Box::new(rewrite_ref_names(l, rename)),
-            Box::new(rewrite_ref_names(r, rename)),
-        ),
-        Expr::Not(e) => Expr::Not(Box::new(rewrite_ref_names(e, rename))),
-        Expr::IsNull(e) => Expr::IsNull(Box::new(rewrite_ref_names(e, rename))),
-        Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(rewrite_ref_names(e, rename))),
+        Expr::And(l, r) => Expr::And(Box::new(map_expr(l, f)), Box::new(map_expr(r, f))),
+        Expr::Or(l, r) => Expr::Or(Box::new(map_expr(l, f)), Box::new(map_expr(r, f))),
+        Expr::Not(e) => Expr::Not(Box::new(map_expr(e, f))),
+        Expr::IsNull(e) => Expr::IsNull(Box::new(map_expr(e, f))),
+        Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(map_expr(e, f))),
         Expr::In { expr, list } => Expr::In {
-            expr: Box::new(rewrite_ref_names(expr, rename)),
-            list: list.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+            expr: Box::new(map_expr(expr, f)),
+            list: list.iter().map(|e| map_expr(e, f)).collect(),
         },
         Expr::Between { expr, low, high } => Expr::Between {
-            expr: Box::new(rewrite_ref_names(expr, rename)),
-            low: Box::new(rewrite_ref_names(low, rename)),
-            high: Box::new(rewrite_ref_names(high, rename)),
+            expr: Box::new(map_expr(expr, f)),
+            low: Box::new(map_expr(low, f)),
+            high: Box::new(map_expr(high, f)),
         },
         Expr::Field { base, field } => Expr::Field {
-            base: Box::new(rewrite_ref_names(base, rename)),
+            base: Box::new(map_expr(base, f)),
             field: field.clone(),
         },
         Expr::Case {
@@ -1703,35 +1897,26 @@ fn rewrite_ref_names(expr: &Expr, rename: &std::collections::HashMap<String, Str
             branches,
             else_expr,
         } => Expr::Case {
-            operand: operand
-                .as_ref()
-                .map(|e| Box::new(rewrite_ref_names(e, rename))),
+            operand: operand.as_ref().map(|e| Box::new(map_expr(e, f))),
             branches: branches
                 .iter()
-                .map(|(c, r)| (rewrite_ref_names(c, rename), rewrite_ref_names(r, rename)))
+                .map(|(c, r)| (map_expr(c, f), map_expr(r, f)))
                 .collect(),
-            else_expr: else_expr
-                .as_ref()
-                .map(|e| Box::new(rewrite_ref_names(e, rename))),
+            else_expr: else_expr.as_ref().map(|e| Box::new(map_expr(e, f))),
         },
-        Expr::Coalesce(args) => {
-            Expr::Coalesce(args.iter().map(|e| rewrite_ref_names(e, rename)).collect())
-        }
-        Expr::Nullif(a, b) => Expr::Nullif(
-            Box::new(rewrite_ref_names(a, rename)),
-            Box::new(rewrite_ref_names(b, rename)),
-        ),
+        Expr::Coalesce(args) => Expr::Coalesce(args.iter().map(|e| map_expr(e, f)).collect()),
+        Expr::Nullif(a, b) => Expr::Nullif(Box::new(map_expr(a, f)), Box::new(map_expr(b, f))),
         Expr::ScalarFn { func, args } => Expr::ScalarFn {
             func: *func,
-            args: args.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+            args: args.iter().map(|e| map_expr(e, f)).collect(),
         },
         Expr::Cast { expr, to } => Expr::Cast {
-            expr: Box::new(rewrite_ref_names(expr, rename)),
+            expr: Box::new(map_expr(expr, f)),
             to: *to,
         },
         Expr::VectorFn { func, args } => Expr::VectorFn {
             func: *func,
-            args: args.iter().map(|e| rewrite_ref_names(e, rename)).collect(),
+            args: args.iter().map(|e| map_expr(e, f)).collect(),
         },
     }
 }

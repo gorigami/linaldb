@@ -201,9 +201,15 @@ pub enum LogicalPlan {
     BatchVectorSearch {
         dataset_name: String,
         column: String,
-        queries: Arc<Vec<(crate::core::value::Value, Vec<f32>)>>,
+        queries: Arc<QueryBatch>,
         k: usize,
         schema: Arc<Schema>,
+        /// `PREFILTER`: when set, each query's top-k is an exact ranking
+        /// over the rows passing the predicate, instead of an index search.
+        prefilter: Option<Arc<Prefilter>>,
+        /// Emit only the dataset's columns (a single-query `SEARCH ...
+        /// PREFILTER`, which keeps plain `SEARCH`'s output shape).
+        rows_only: bool,
     },
     /// Sort rows by one or more columns
     Sort {
@@ -390,6 +396,48 @@ impl LogicalPlan {
                 Arc::new(Schema::new(fields))
             }
         }
+    }
+}
+
+/// Name prefix for a query's own columns inside a `PREFILTER` predicate
+/// (`q.mass` becomes the column `"\0q.mass"`): a NUL can't appear in a real
+/// column name, so these never collide with the searched dataset's columns.
+pub const QUERY_COLUMN_PREFIX: &str = "\0q.";
+
+/// A batch search's `(query_id, vector)` pairs. `Debug` prints only the
+/// count, so `EXPLAIN` stays readable for thousands of queries.
+#[derive(Clone)]
+pub struct QueryBatch(pub Vec<(Value, Vec<f32>)>);
+
+impl std::fmt::Debug for QueryBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} queries", self.0.len())
+    }
+}
+
+/// A `SEARCH ... PREFILTER` predicate, ready to evaluate per (query, row).
+#[derive(Clone)]
+pub struct Prefilter {
+    /// Over `combined_schema`: the searched dataset's columns followed by
+    /// the query columns (`QUERY_COLUMN_PREFIX` + name).
+    pub predicate: Expr,
+    pub combined_schema: Arc<Schema>,
+    /// Per query (aligned with the search's queries), the values of the
+    /// query columns; empty when queries don't come from a dataset.
+    pub query_values: Vec<Vec<Value>>,
+    /// A conjunct the SORTED index on `column` can answer, with bounds that
+    /// depend only on the query: `(column, [(op, bound expression)])`.
+    pub sorted_range: Option<(String, Vec<(String, Expr)>)>,
+}
+
+// Leaves out the per-query values and the combined schema, which can be
+// large; `EXPLAIN` only needs the predicate and how it's narrowed.
+impl std::fmt::Debug for Prefilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prefilter")
+            .field("predicate", &self.predicate)
+            .field("sorted_range", &self.sorted_range)
+            .finish()
     }
 }
 

@@ -4,7 +4,7 @@ use crate::query::logical::{Expr, LogicalPlan};
 use crate::query::physical::{
     AggregateExec, BatchVectorSearchExec, CosineFilterExec, DistinctExec, FilterExec, HashJoinExec,
     IndexScanExec, LimitExec, PartitionPrunedScanExec, PhysicalPlan, ProjectionExec, SeqScanExec,
-    SimilarityJoinExec, SortExec, UnionExec, ValuesExec, VectorSearchExec,
+    SimilarityJoinExec, SortExec, SortedRangeScanExec, UnionExec, ValuesExec, VectorSearchExec,
 };
 use std::sync::Arc;
 
@@ -168,6 +168,8 @@ impl<'a> Planner<'a> {
                 queries,
                 k,
                 schema,
+                prefilter,
+                rows_only,
             } => {
                 let resolved_index_type = self
                     .db
@@ -181,6 +183,8 @@ impl<'a> Planner<'a> {
                     queries: queries.clone(),
                     k: *k,
                     schema: schema.clone(),
+                    prefilter: prefilter.clone(),
+                    rows_only: *rows_only,
                     resolved_index_type,
                 }))
             }
@@ -378,7 +382,44 @@ impl<'a> Planner<'a> {
             }
         }
 
+        // Pattern 4: a range (`<`, `<=`, `>`, `>=`, `=`, `BETWEEN`) on a
+        // column with a SORTED index, alone or as any conjunct of a top-level
+        // AND -> SortedRangeScanExec narrows by binary search, and the whole
+        // predicate is still applied on top, so the result is exact.
+        if let Some((column, constraints)) = self.match_sorted_range(dataset_name, predicate) {
+            let scan = Box::new(SortedRangeScanExec {
+                dataset_name: dataset_name.to_string(),
+                schema: Arc::new(schema.clone()),
+                column,
+                constraints,
+            });
+            let full = predicate.clone();
+            return Some(Box::new(FilterExec {
+                input: scan,
+                predicate: Box::new(move |row: &crate::core::tuple::Tuple| {
+                    evaluate_expr(&full, row)
+                }),
+            }));
+        }
+
         None
+    }
+
+    /// The first conjunct of `predicate` (or `predicate` itself) that is a
+    /// range on a column with a SORTED index, as that column plus its
+    /// `(op, literal)` constraints.
+    pub(crate) fn match_sorted_range(
+        &self,
+        dataset_name: &str,
+        predicate: &Expr,
+    ) -> Option<(String, Vec<(String, crate::core::value::Value)>)> {
+        let dataset = self.db.get_dataset(dataset_name).ok()?;
+        flatten_and(predicate).into_iter().find_map(|conjunct| {
+            let (column, constraints) = sorted_range_constraints(conjunct)?;
+            let index = dataset.get_index(&column)?;
+            (index.index_type() == crate::core::index::IndexType::Sorted)
+                .then_some((column, constraints))
+        })
     }
 
     /// Recognizes `COSINE_SIM(col, query_vec) <op> threshold` (`>`/`>=`) against
@@ -530,6 +571,24 @@ fn extract_range_constraints(
         }
         _ => None,
     }
+}
+
+/// `extract_range_constraints`, plus `col = literal` (either order): the
+/// shapes a SORTED index can answer.
+pub(crate) fn sorted_range_constraints(
+    predicate: &Expr,
+) -> Option<(String, Vec<(String, crate::core::value::Value)>)> {
+    if let Expr::BinaryExpr { left, op, right } = predicate {
+        if op == "=" {
+            return match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(c), Expr::Literal(v)) | (Expr::Literal(v), Expr::Column(c)) => {
+                    Some((c.clone(), vec![("=".to_string(), v.clone())]))
+                }
+                _ => None,
+            };
+        }
+    }
+    extract_range_constraints(predicate)
 }
 
 /// Flattens a (possibly nested, left-associative) `AND` tree into its
@@ -736,6 +795,13 @@ fn eval_value(expr: &Expr, row: &crate::core::tuple::Tuple) -> Option<crate::cor
         | Expr::Nullif(_, _)
         | Expr::VecLiteral(_)
         | Expr::VectorFn { .. } => Some(evaluate_expression(expr, row)),
+        // Arithmetic operands (`WHERE price * qty > 100`, `mass BETWEEN
+        // q.mass - 0.01 AND ...`). These used to fall through to `None`,
+        // which made every comparison against them false: the WHERE
+        // silently matched no rows.
+        Expr::BinaryExpr { op, .. } if matches!(op.as_str(), "+" | "-" | "*" | "/") => {
+            Some(evaluate_expression(expr, row))
+        }
         _ => None,
     }
 }

@@ -588,6 +588,20 @@ impl Parser {
                     kind,
                 }))
             }
+            // `CREATE SORTED INDEX [<name>] ON <dataset>(<column>)` -- SORTED
+            // is contextual, only meaningful right before INDEX.
+            Some(Token::Ident(s))
+                if s == "SORTED" && matches!(self.peek_at(1), Some(Token::Index)) =>
+            {
+                self.advance();
+                self.advance();
+                let (dataset, column, kind) = self.parse_index_target(IndexKindAst::Sorted)?;
+                Ok(Statement::CreateIndex(CreateIndexStmt {
+                    dataset,
+                    column,
+                    kind,
+                }))
+            }
             Some(Token::Vector) => {
                 self.advance();
                 self.eat(&Token::Index)?;
@@ -613,7 +627,7 @@ impl Parser {
                     kind,
                 }))
             }
-            _ => Err(self.unexpected("DATABASE or INDEX after CREATE")),
+            _ => Err(self.unexpected("DATABASE, INDEX, SORTED INDEX or VECTOR INDEX after CREATE")),
         }
     }
 
