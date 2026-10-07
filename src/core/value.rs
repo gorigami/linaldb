@@ -41,6 +41,9 @@ pub enum Value {
     /// Sparse vector (`SparseVector(dim)` column): nonzero entries only --
     /// see `core::sparse`.
     SparseVector(crate::core::sparse::SparseVec),
+    /// Quantized vector (`Vector(d, F16)` / `Vector(d, I8)` column) -- see
+    /// `core::quant`. Expressions read it dequantized.
+    QVector(crate::core::quant::QuantVec),
     Null,
 }
 
@@ -81,6 +84,7 @@ impl PartialEq for Value {
             }
             (Value::BitVector(a), Value::BitVector(b)) => a == b,
             (Value::SparseVector(a), Value::SparseVector(b)) => a == b,
+            (Value::QVector(a), Value::QVector(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -121,6 +125,7 @@ impl std::hash::Hash for Value {
             }
             Value::BitVector(b) => b.hash(state),
             Value::SparseVector(s) => s.hash(state),
+            Value::QVector(q) => q.hash(state),
             Value::Null => {}
         }
     }
@@ -141,6 +146,8 @@ pub enum ValueType {
     BitVector(usize),
     /// `SparseVector(dim)`.
     SparseVector(usize),
+    /// `Vector(d, F16)` / `Vector(d, I8)`.
+    QVector(usize, crate::core::quant::Quantization),
     Null,
 }
 
@@ -164,6 +171,7 @@ impl Value {
             Value::Complex(_) => ValueType::Complex,
             Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::SparseVector(s) => ValueType::SparseVector(s.dim()),
+            Value::QVector(q) => ValueType::QVector(q.len(), q.encoding()),
             Value::Null => ValueType::Null,
         }
     }
@@ -185,6 +193,7 @@ impl Value {
                         .map(|r| r.capacity() * std::mem::size_of::<f32>())
                         .sum::<usize>()
             }
+            Value::QVector(q) => q.heap_bytes(),
             _ => 0,
         };
         std::mem::size_of::<Value>() + heap
@@ -282,6 +291,9 @@ impl Value {
         if let (Value::SparseVector(a), Value::SparseVector(b)) = (self, other) {
             return Some(a == b);
         }
+        if let (Value::QVector(a), Value::QVector(b)) = (self, other) {
+            return Some(a == b);
+        }
         if matches!(self, Value::Complex(_)) || matches!(other, Value::Complex(_)) {
             return match (self.as_complex(), other.as_complex()) {
                 (Some(a), Some(b)) => Some(a == b),
@@ -341,6 +353,7 @@ impl Value {
             (Value::Complex(_), ValueType::Complex) => true,
             (Value::BitVector(b), ValueType::BitVector(n)) => b.len() == *n,
             (Value::SparseVector(s), ValueType::SparseVector(n)) => s.dim() == *n,
+            (Value::QVector(q), ValueType::QVector(d, e)) => q.len() == *d && q.encoding() == *e,
             (Value::Null, _) => true, // Null matches any type if nullable
             _ => false,
         }
@@ -413,6 +426,7 @@ impl fmt::Display for Value {
             Value::Complex(v) => write!(f, "{}", format_complex(*v)),
             Value::BitVector(b) => write!(f, "{}", b),
             Value::SparseVector(s) => write!(f, "{}", s),
+            Value::QVector(q) => write!(f, "{}", Value::Vector(q.dequantize())),
             Value::Null => write!(f, "NULL"),
         }
     }
@@ -443,6 +457,7 @@ impl fmt::Display for ValueType {
             ValueType::Complex => write!(f, "COMPLEX"),
             ValueType::BitVector(n) => write!(f, "BITVECTOR[{}]", n),
             ValueType::SparseVector(n) => write!(f, "SPARSEVECTOR[{}]", n),
+            ValueType::QVector(d, q) => write!(f, "VECTOR[{}, {}]", d, q),
             ValueType::Null => write!(f, "NULL"),
         }
     }

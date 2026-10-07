@@ -229,6 +229,10 @@ pub fn execute_statement(
                         ValueType::BitVector(n) => {
                             Value::BitVector(crate::core::bitvec::BitVec::zeros(*n))
                         }
+                        ValueType::QVector(d, e) => Value::QVector(
+                            crate::core::quant::QuantVec::quantize(&vec![0.0; *d], *e)
+                                .expect("zeros always quantize"),
+                        ),
                         ValueType::SparseVector(n) => Value::SparseVector(
                             crate::core::sparse::SparseVec::from_dense(&vec![0.0; *n]),
                         ),
@@ -652,6 +656,20 @@ fn coerce_bitvector_inserts(
         .into_iter()
         .zip(&schema.fields)
         .map(|(v, f)| {
+            if let (ValueType::QVector(dim, enc), Value::Vector(x)) = (&f.value_type, &v) {
+                if x.len() != *dim {
+                    return Err(format!(
+                        "column '{}' is Vector({}, {}), got a vector of length {}",
+                        f.name,
+                        dim,
+                        enc,
+                        x.len()
+                    ));
+                }
+                return crate::core::quant::QuantVec::quantize(x, *enc)
+                    .map(Value::QVector)
+                    .map_err(|e| format!("column '{}': {}", f.name, e));
+            }
             if let (ValueType::SparseVector(dim), Value::Vector(x)) = (&f.value_type, &v) {
                 if x.len() != *dim {
                     return Err(format!(
@@ -709,6 +727,7 @@ pub(super) fn col_type_to_value_type(ct: &ColType) -> ValueType {
         ColType::Matrix(r, c) => ValueType::Matrix(*r, *c),
         ColType::BitVector(n) => ValueType::BitVector(*n),
         ColType::SparseVector(n) => ValueType::SparseVector(*n),
+        ColType::QVector(n, e) => ValueType::QVector(*n, *e),
         ColType::Tensor(dims) => match dims.as_slice() {
             [d] => ValueType::Vector(*d),
             [r, c] => ValueType::Matrix(*r, *c),

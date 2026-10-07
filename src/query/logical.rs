@@ -113,6 +113,7 @@ pub enum CastTarget {
     Text,
     Bool,
     Vector(usize),
+    QVector(usize, crate::core::quant::Quantization),
     Matrix(usize, usize),
     BitVector(Option<usize>),
     SparseVector(usize),
@@ -459,10 +460,13 @@ impl std::fmt::Debug for Prefilter {
 pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core::value::ValueType {
     use crate::core::value::ValueType;
     match expr {
-        Expr::Column(name) => schema
-            .get_field(name)
-            .map(|f| f.value_type.clone())
-            .unwrap_or(ValueType::Null),
+        // A quantized column reads as a plain vector in expressions (see
+        // `physical::evaluate_expression`'s Column arm).
+        Expr::Column(name) => match schema.get_field(name).map(|f| f.value_type.clone()) {
+            Some(ValueType::QVector(d, _)) => ValueType::Vector(d),
+            Some(t) => t,
+            None => ValueType::Null,
+        },
         Expr::Literal(val) => val.value_type(),
         Expr::BinaryExpr { left, right, .. } => {
             let l = infer_expr_type_full(left, schema);
@@ -583,6 +587,7 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             CastTarget::Double => ValueType::Float64,
             CastTarget::Text | CastTarget::Bool => ValueType::String,
             CastTarget::Vector(n) => ValueType::Vector(*n),
+            CastTarget::QVector(n, e) => ValueType::QVector(*n, *e),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
             CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
             CastTarget::SparseVector(n) => ValueType::SparseVector(*n),

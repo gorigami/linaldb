@@ -312,6 +312,7 @@ class Db:
         column: str = "embedding",
         columns: dict | None = None,
         bit_columns: dict | None = None,
+        quantize: str | None = None,
         origin: str = "numpy",
     ) -> int:
         """Create dataset `name` from a 2-D `float32` NumPy array of shape
@@ -320,6 +321,8 @@ class Db:
         `n`, placed before the vector column, in dict order). Values are
         loaded bit-exact; a `float64` array is rejected rather than rounded
         silently -- cast it with `.astype(numpy.float32)` first.
+        `quantize="F16"` or `"I8"` stores the vector column as `Vector(d, F16)`
+        / `Vector(d, I8)` (quantized once, on load; see the DSL reference).
         `bit_columns` adds `BitVector` columns (e.g. fingerprints): a dict of
         name -> 2-D boolean (or 0/1) array of shape `(n, nbits)`; bit `j` of
         row `i` is `array[i, j]`. Returns the number of rows loaded. See
@@ -372,6 +375,11 @@ class Db:
         fields = []
         for col_name, arr in zip(names, arrays):
             field = pa.field(col_name, arr.type)
+            if col_name == column and quantize:
+                enc = quantize.upper()
+                if enc not in ("F16", "I8"):
+                    raise LinalError(f"load_numpy: quantize must be 'F16' or 'I8', got {quantize!r}")
+                field = field.with_metadata({"linal.logical_value_type": f"QVector:{d},{enc}"})
             if col_name in (bit_columns or {}):
                 nbits = np.asarray(bit_columns[col_name]).shape[1]
                 field = field.with_metadata({"linal.logical_value_type": f"BitVector:{nbits}"})

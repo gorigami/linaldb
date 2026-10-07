@@ -37,6 +37,7 @@ fn format_table_cell(v: &Value) -> String {
             m.len(),
             m.first().map(|r| r.len()).unwrap_or(0)
         ),
+        Value::QVector(q) => format_table_cell(&Value::Vector(q.dequantize())),
         Value::SparseVector(s) if s.nnz() > 6 => {
             let head: Vec<String> = s
                 .indices()

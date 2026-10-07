@@ -467,6 +467,18 @@ impl BatchVectorSearchExec {
                             }
                             scored.push((id, cosine_with_norms(query, query_norm, v, l2_norm(v))));
                         }
+                        Value::QVector(qv) => {
+                            let v = qv.dequantize();
+                            if v.len() != query.len() {
+                                return Err(format!(
+                                    "SEARCH: row {} has a {}-dimensional vector, the query has {}",
+                                    id,
+                                    v.len(),
+                                    query.len()
+                                ));
+                            }
+                            scored.push((id, cosine_with_norms(query, query_norm, &v, l2_norm(&v))));
+                        }
                         Value::SparseVector(sv) => {
                             if sv.dim() != query.len() {
                                 return Err(format!(
@@ -1620,7 +1632,13 @@ pub fn evaluate_expression(
 ) -> crate::core::value::Value {
     use crate::core::value::Value;
     match expr {
-        crate::query::logical::Expr::Column(name) => row.get(name).cloned().unwrap_or(Value::Null),
+        // The one place a quantized column is turned back into f32 for
+        // expressions; projections of the bare column keep the stored value.
+        crate::query::logical::Expr::Column(name) => match row.get(name) {
+            Some(Value::QVector(q)) => Value::Vector(q.dequantize()),
+            Some(v) => v.clone(),
+            None => Value::Null,
+        },
         crate::query::logical::Expr::Literal(val) => val.clone(),
         crate::query::logical::Expr::And(l, r) => {
             match (evaluate_expression(l, row), evaluate_expression(r, row)) {
@@ -1999,6 +2017,22 @@ pub fn evaluate_expression(
                             v.chunks(*c).map(|chunk| chunk.to_vec()).collect();
                         Value::Matrix(rows)
                     }
+                    _ => Value::Null,
+                },
+                CastTarget::QVector(n, e) => match val {
+                    Value::Vector(v) if v.len() == *n => {
+                        match crate::core::quant::QuantVec::quantize(&v, *e) {
+                            Ok(q) => Value::QVector(q),
+                            Err(err) => {
+                                crate::query::row_error::record(format!(
+                                    "CAST AS VECTOR({}, {}): {}",
+                                    n, e, err
+                                ));
+                                Value::Null
+                            }
+                        }
+                    }
+                    Value::QVector(q) if q.len() == *n && q.encoding() == *e => Value::QVector(q),
                     _ => Value::Null,
                 },
                 CastTarget::SparseVector(n) => match val {

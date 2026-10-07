@@ -353,3 +353,20 @@ def test_sparse_vectors_load_and_match_dense(db):
         )
     with pytest.raises(LinalError, match="SparseVector:<dim>"):
         db.load_arrow("nometa", pa.table({"s": linaldb.sparse_array([([1], [1.0])], 10)[0]}))
+
+
+# --- Quantized vectors (CASMI large tier) -----------------------------------
+
+
+@pytest.mark.parametrize("enc,tol", [("F16", 1e-3), ("I8", 1e-2)])
+def test_load_numpy_quantized(db, enc, tol):
+    np = pytest.importorskip("numpy")
+
+    vecs = np.random.default_rng(2).standard_normal((50, 32)).astype(np.float32)
+    db.load_numpy("q", vecs, column="e", columns={"id": np.arange(50)}, quantize=enc)
+    assert db.execute("SELECT * FROM q WHERE id = 0").rows[0][1] is not None
+    got = np.array([r[1] for r in db.execute("SELECT id, e FROM q ORDER BY id").rows], dtype=np.float32)
+    scale = np.abs(vecs).max(axis=1, keepdims=True)
+    assert np.all(np.abs(got - vecs) <= tol * scale + 1e-6)
+    with pytest.raises(LinalError, match="quantize must be"):
+        db.load_numpy("bad", vecs, quantize="F8")

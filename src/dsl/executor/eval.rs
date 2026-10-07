@@ -737,6 +737,7 @@ pub fn expr_to_string(expr: &Expr) -> String {
                 CastTarget::Text => "TEXT".to_string(),
                 CastTarget::Bool => "BOOL".to_string(),
                 CastTarget::Vector(n) => format!("VECTOR({})", n),
+                CastTarget::QVector(n, e) => format!("VECTOR({}, {})", n, e),
                 CastTarget::Matrix(r, c) => format!("MATRIX({}, {})", r, c),
                 CastTarget::BitVector(Some(n)) => format!("BITVECTOR({})", n),
                 CastTarget::BitVector(None) => "BITVECTOR".to_string(),

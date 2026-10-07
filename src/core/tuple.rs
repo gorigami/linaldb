@@ -59,6 +59,7 @@ impl Field {
             (ValueType::SparseVector(expected), ValueType::SparseVector(actual)) => {
                 expected == &actual
             }
+            (ValueType::QVector(ed, ee), ValueType::QVector(ad, ae)) => ed == &ad && ee == &ae,
             (ValueType::Null, ValueType::Null) => self.nullable,
             _ => false,
         }

@@ -2590,6 +2590,7 @@ dependencies = [
  "comfy-table",
  "criterion",
  "faer",
+ "half",
  "hdf5-metno",
  "indicatif",
  "logos",

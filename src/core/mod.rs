@@ -7,6 +7,7 @@ pub mod dataset_legacy;
 pub mod index;
 pub mod linalg;
 pub mod provenance;
+pub mod quant;
 pub mod signal;
 pub mod sparse;
 pub mod spectral;

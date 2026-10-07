@@ -216,6 +216,7 @@ pub(super) fn search_plan(
     let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
         Some(ValueType::Vector(d)) => *d,
         Some(ValueType::SparseVector(d)) => *d,
+        Some(ValueType::QVector(d, _)) => *d,
         Some(other) => {
             return Err(invalid(format!(
                 "SEARCH: column '{}' is {:?}, not a Vector",
@@ -362,6 +363,7 @@ fn resolve_batch_queries(
         let v = match &row.values[col_idx] {
             Value::Vector(v) => v.clone(),
             Value::SparseVector(sv) => sv.to_dense(),
+            Value::QVector(q) => q.dequantize(),
             other => {
                 return Err(format!(
                     "SEARCH QUERIES: row {} of '{}.{}' is {:?}, not a Vector",
@@ -1228,6 +1230,7 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             CastTarget::Text => ValueType::String,
             CastTarget::Bool => ValueType::Bool,
             CastTarget::Vector(n) => ValueType::Vector(*n),
+            CastTarget::QVector(n, e) => ValueType::QVector(*n, *e),
             CastTarget::Matrix(r, c) => ValueType::Matrix(*r, *c),
             CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
             CastTarget::SparseVector(n) => ValueType::SparseVector(*n),
@@ -1747,6 +1750,7 @@ pub(super) fn execute_add_computed_column(
             Value::Vector(v) => ValueType::Vector(v.len()),
             Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::SparseVector(sv) => ValueType::SparseVector(sv.dim()),
+            Value::QVector(q) => ValueType::QVector(q.len(), q.encoding()),
             Value::Matrix(m) => {
                 let r = m.len();
                 let c = m.first().map_or(0, |row| row.len());
@@ -1802,6 +1806,7 @@ pub(super) fn execute_add_computed_column(
             Value::Vector(v) => ValueType::Vector(v.len()),
             Value::BitVector(b) => ValueType::BitVector(b.len()),
             Value::SparseVector(sv) => ValueType::SparseVector(sv.dim()),
+            Value::QVector(q) => ValueType::QVector(q.len(), q.encoding()),
             Value::Matrix(m) => ValueType::Matrix(m.len(), m.first().map_or(0, |r| r.len())),
             Value::Complex(_) => ValueType::Complex,
             Value::Null => ValueType::Null,
@@ -2325,6 +2330,7 @@ pub(super) fn dsl_expr_to_logical_expr(
                 CastTarget::Text => LCast::Text,
                 CastTarget::Bool => LCast::Bool,
                 CastTarget::Vector(n) => LCast::Vector(*n),
+                CastTarget::QVector(n, e) => LCast::QVector(*n, *e),
                 CastTarget::Matrix(r, c) => LCast::Matrix(*r, *c),
                 CastTarget::BitVector(n) => LCast::BitVector(*n),
                 CastTarget::SparseVector(n) => LCast::SparseVector(*n),

@@ -782,6 +782,8 @@ pub enum ColType {
     BitVector(usize),
     /// `SparseVector(dim)` — nonzero entries only.
     SparseVector(usize),
+    /// `Vector(n, F16)` / `Vector(n, I8)` — quantized storage.
+    QVector(usize, crate::core::quant::Quantization),
 }
 
 /// Tensor kind as expressed in the DSL. Decoupled from `engine::TensorKind`.
@@ -945,6 +947,8 @@ pub enum CastTarget {
     Bool,
     /// `CAST(expr AS VECTOR(n))` — reshape/flatten to a Vector of length `n`.
     Vector(usize),
+    /// `CAST(expr AS VECTOR(n, F16|I8))` — quantize a length-`n` vector.
+    QVector(usize, crate::core::quant::Quantization),
     /// `CAST(expr AS MATRIX(r, c))` — reshape/flatten to a Matrix of shape `r x c`.
     Matrix(usize, usize),
     /// `CAST(expr AS BITVECTOR[(n)])` — from a `'0'`/`'1'` string or a 0/1

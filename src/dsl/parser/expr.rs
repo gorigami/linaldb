@@ -519,8 +519,18 @@ impl Parser {
                                 self.advance();
                                 self.eat(&Token::LParen)?;
                                 let n = self.eat_usize()?;
+                                let target = if self.at(&Token::Comma) {
+                                    self.advance();
+                                    let enc = self.eat_ident()?;
+                                    CastTarget::QVector(
+                                        n,
+                                        enc.parse().map_err(|e: String| self.error(e))?,
+                                    )
+                                } else {
+                                    CastTarget::Vector(n)
+                                };
                                 self.eat(&Token::RParen)?;
-                                CastTarget::Vector(n)
+                                target
                             }
                             Some(Token::Matrix) => {
                                 self.advance();

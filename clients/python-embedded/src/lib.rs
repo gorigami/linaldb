@@ -46,6 +46,11 @@ fn value_to_py(py: Python<'_>, value: &Value) -> PyObject {
             .unbind(),
         // The bit string, e.g. "0110...": what RDKit's
         // `DataStructs.CreateFromBitString` takes.
+        // The stored (quantized) values, as floats.
+        Value::QVector(q) => {
+            let items: Vec<f64> = q.dequantize().iter().map(|x| *x as f64).collect();
+            PyList::new(py, items).unwrap().into_any().unbind()
+        }
         Value::SparseVector(s) => {
             let dict = PyDict::new(py);
             dict.set_item("dim", s.dim()).unwrap();

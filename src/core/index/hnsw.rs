@@ -332,7 +332,8 @@ fn plan_insert(
     ef_construction: usize,
 ) -> Vec<Vec<u32>> {
     let level = graph.levels[q];
-    let query = store.vector(q);
+    let query = store.values(q);
+    let query = &query[..];
     let query_norm = store.norm(q);
     let mut per_layer: Vec<Vec<Cand>> = vec![Vec::new(); level as usize + 1];
 
