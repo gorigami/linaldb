@@ -88,15 +88,18 @@ pub trait Index: Send + Sync + Debug {
         Ok(())
     }
 
-    /// Exports whatever expensive-to-recompute derived state `build()`
-    /// produces, as opaque JSON, so `SAVE DATASET` can persist it and
-    /// `LOAD DATASET` can restore it without recomputing (e.g.
-    /// `VectorIndex`'s k-means clusters -- the actual cost `build()`
-    /// pays). `None` by default: most index types (e.g. `HashIndex`) have
-    /// no derived state worth persisting, since `add()` alone already
-    /// gives them everything `build()` would.
-    fn export_snapshot(&self) -> Option<serde_json::Value> {
-        None
+    /// The concrete index, for code that needs a type-specific API (e.g.
+    /// `SAVE DATASET` taking a `VectorIndex`/`HnswIndex` snapshot).
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// A new, empty index of `index_type` -- used to rebuild a column's index
+/// from scratch after its rows changed (`Dataset::rebuild_after_mutation`).
+pub fn new_index(index_type: IndexType) -> Box<dyn Index> {
+    match index_type {
+        IndexType::Hash => Box::new(hash::HashIndex::new()),
+        IndexType::Vector => Box::new(vector::VectorIndex::new()),
+        IndexType::Hnsw => Box::new(hnsw::HnswIndex::new()),
     }
 }
 
@@ -107,6 +110,8 @@ impl Clone for Box<dyn Index> {
 }
 
 // Re-export specific implementations
+pub(crate) mod binio;
+pub(crate) mod flat;
 pub mod hash;
 pub mod hnsw;
 pub mod vector;

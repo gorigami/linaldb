@@ -268,6 +268,33 @@ impl Dataset {
         }
     }
 
+    /// Brings everything derived from `rows` back in sync after rows were
+    /// changed or removed in place (`UPDATE`, `DELETE`): metadata stats, the
+    /// per-partition zone maps, and indexes. `changed_columns` limits the
+    /// index rebuild to indexes on those columns (an `UPDATE` keeps row
+    /// positions); `None` rebuilds every index (a `DELETE` shifts row ids,
+    /// which every index stores). Each rebuilt index gets a fresh `build()`,
+    /// so an IVF clustering or HNSW graph is recomputed.
+    pub fn rebuild_after_mutation(
+        &mut self,
+        changed_columns: Option<&[String]>,
+    ) -> Result<(), String> {
+        self.refresh_stats();
+        let mut columns: Vec<String> = self
+            .indices
+            .keys()
+            .filter(|c| changed_columns.is_none_or(|changed| changed.contains(c)))
+            .cloned()
+            .collect();
+        columns.sort();
+        for column in columns {
+            let index_type = self.indices[&column].index_type();
+            self.indices.remove(&column);
+            self.create_index(column, crate::core::index::new_index(index_type))?;
+        }
+        Ok(())
+    }
+
     /// Approximate bytes held by this dataset's rows (not its indices --
     /// see `Index::memory_bytes`). Used by `SHOW MEMORY`.
     pub fn estimated_rows_bytes(&self) -> usize {

@@ -82,8 +82,14 @@ fn reports_datasets_indexes_and_tensors() {
 
     let hnsw = r.iter().find(|x| x.0 == "index" && x.2 == "e").unwrap();
     assert_eq!(hnsw.3, "Hnsw");
-    // Two copies of every vector (index list + graph points) plus the graph.
-    assert!(hnsw.5 > 2 * vector_bytes, "{:?}", hnsw);
+    // One copy of every vector (the index's flat store) plus the graph's
+    // neighbor lists -- not the 2+ copies the pre-0.1.92 index kept.
+    assert!(hnsw.5 > vector_bytes, "{:?}", hnsw);
+    assert!(
+        hnsw.5 < 2 * vector_bytes + n as i64 * 64 * 4 * 2,
+        "{:?}",
+        hnsw
+    );
 
     let hash = r.iter().find(|x| x.0 == "index" && x.2 == "tag").unwrap();
     assert_eq!(hash.3, "Hash");

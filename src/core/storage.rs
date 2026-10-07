@@ -135,14 +135,30 @@ impl ParquetStorage {
         format!("{}/datasets/{}/indexes.json", self.base_path, name)
     }
 
+    /// Binary vector-index snapshot (`vector::encode_snapshots`).
     fn vector_index_clusters_path(&self, name: &str) -> String {
+        format!(
+            "{}/datasets/{}/vector_index_clusters.bin",
+            self.base_path, name
+        )
+    }
+
+    /// The JSON snapshot versions before 0.1.92 wrote; still read.
+    fn legacy_vector_index_clusters_path(&self, name: &str) -> String {
         format!(
             "{}/datasets/{}/vector_index_clusters.json",
             self.base_path, name
         )
     }
 
+    /// Binary HNSW graph snapshot (`hnsw::encode_snapshots`).
     fn hnsw_index_graphs_path(&self, name: &str) -> String {
+        format!("{}/datasets/{}/hnsw_index_graphs.bin", self.base_path, name)
+    }
+
+    /// The JSON graph versions before 0.1.92 wrote (an `instant-distance`
+    /// graph, which today's HNSW can't use); removed on the next save.
+    fn legacy_hnsw_index_graphs_path(&self, name: &str) -> String {
         format!(
             "{}/datasets/{}/hnsw_index_graphs.json",
             self.base_path, name
@@ -151,11 +167,11 @@ impl ParquetStorage {
 
     /// Persist each vector-indexed column's clustering (`VectorIndex::
     /// snapshot`) plus the content hash it was computed from, so `LOAD
-    /// DATASET` can restore the clustering without recomputing k-means --
-    /// closes the "full rebuild + blocking k-means on every ... LOAD
-    /// DATASET" gap `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`'s audit flagged.
-    /// Overwrites unconditionally (including with an empty map), same
-    /// policy as `save_index_definitions`.
+    /// DATASET` can restore the clustering without recomputing k-means.
+    /// Binary (`vector_index_clusters.bin`, layout in
+    /// `vector::encode_snapshots`). Overwrites unconditionally (including
+    /// with an empty map), same policy as `save_index_definitions`, and
+    /// removes a pre-binary `.json` snapshot so it can't go stale.
     pub fn save_vector_index_snapshots(
         &self,
         name: &str,
@@ -165,21 +181,18 @@ impl ParquetStorage {
         >,
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
-        let path = self.vector_index_clusters_path(name);
-        let json = serde_json::to_string_pretty(snapshots).map_err(|e| {
-            StorageError::Serialization(format!(
-                "Failed to serialize vector index snapshots: {}",
-                e
-            ))
-        })?;
-        fs::write(path, json)?;
+        let bytes = crate::core::index::vector::encode_snapshots(snapshots);
+        fs::write(self.vector_index_clusters_path(name), bytes)?;
+        let legacy = self.legacy_vector_index_clusters_path(name);
+        if Path::new(&legacy).exists() {
+            fs::remove_file(legacy)?;
+        }
         Ok(())
     }
 
-    /// Loads previously persisted vector index snapshots. Returns an empty
-    /// map (not an error) if none were ever saved -- datasets written
-    /// before this feature existed, or with no vector index large enough
-    /// to have clustered, simply have no such file.
+    /// Loads previously persisted vector index snapshots: the binary file,
+    /// else a pre-binary `.json` one. Returns an empty map (not an error)
+    /// if none were ever saved.
     pub fn load_vector_index_snapshots(
         &self,
         name: &str,
@@ -188,41 +201,46 @@ impl ParquetStorage {
         StorageError,
     > {
         let path = self.vector_index_clusters_path(name);
-        if !Path::new(&path).exists() {
+        if Path::new(&path).exists() {
+            let bytes = fs::read(path)?;
+            return crate::core::index::vector::decode_snapshots(&bytes).map_err(|e| {
+                StorageError::Serialization(format!("Failed to read vector index snapshots: {}", e))
+            });
+        }
+        let legacy = self.legacy_vector_index_clusters_path(name);
+        if !Path::new(&legacy).exists() {
             return Ok(std::collections::HashMap::new());
         }
-        let json = fs::read_to_string(path)?;
-        let snapshots = serde_json::from_str(&json).map_err(|e| {
+        let json = fs::read_to_string(legacy)?;
+        serde_json::from_str(&json).map_err(|e| {
             StorageError::Serialization(format!(
                 "Failed to deserialize vector index snapshots: {}",
                 e
             ))
-        })?;
-        Ok(snapshots)
+        })
     }
 
     /// Same persistence contract as `save_vector_index_snapshots`, for
-    /// HNSW-backed vector indices (`CREATE VECTOR INDEX ... USING HNSW`,
-    /// `core::index::hnsw::HnswIndex`) -- a separate file/column-keyed map
-    /// since the two index types' snapshot shapes are unrelated (a full
-    /// serialized graph vs. IVF cluster assignments) and a column can only
-    /// ever have one or the other, never both.
+    /// HNSW indexes (`hnsw_index_graphs.bin`, layout in
+    /// `hnsw::encode_snapshots`). A column has one or the other, never both.
     pub fn save_hnsw_index_snapshots(
         &self,
         name: &str,
         snapshots: &std::collections::HashMap<String, crate::core::index::hnsw::PersistedHnswIndex>,
     ) -> Result<(), StorageError> {
         self.ensure_directories(Some(name))?;
-        let path = self.hnsw_index_graphs_path(name);
-        let json = serde_json::to_string_pretty(snapshots).map_err(|e| {
-            StorageError::Serialization(format!("Failed to serialize HNSW index snapshots: {}", e))
-        })?;
-        fs::write(path, json)?;
+        let bytes = crate::core::index::hnsw::encode_snapshots(snapshots);
+        fs::write(self.hnsw_index_graphs_path(name), bytes)?;
+        let legacy = self.legacy_hnsw_index_graphs_path(name);
+        if Path::new(&legacy).exists() {
+            fs::remove_file(legacy)?;
+        }
         Ok(())
     }
 
-    /// Loads previously persisted HNSW index snapshots. Returns an empty
-    /// map (not an error) if none were ever saved.
+    /// Loads previously persisted HNSW graphs. Returns an empty map (not an
+    /// error) if none were saved -- including when only a pre-binary
+    /// `.json` graph exists: `LOAD DATASET` then rebuilds the index.
     pub fn load_hnsw_index_snapshots(
         &self,
         name: &str,
@@ -234,14 +252,10 @@ impl ParquetStorage {
         if !Path::new(&path).exists() {
             return Ok(std::collections::HashMap::new());
         }
-        let json = fs::read_to_string(path)?;
-        let snapshots = serde_json::from_str(&json).map_err(|e| {
-            StorageError::Serialization(format!(
-                "Failed to deserialize HNSW index snapshots: {}",
-                e
-            ))
-        })?;
-        Ok(snapshots)
+        let bytes = fs::read(path)?;
+        crate::core::index::hnsw::decode_snapshots(&bytes).map_err(|e| {
+            StorageError::Serialization(format!("Failed to read HNSW index snapshots: {}", e))
+        })
     }
 
     /// Persist which columns have indices (and of what type) so `LOAD

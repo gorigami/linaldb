@@ -146,11 +146,12 @@ fn save_dataset_core(
         if index.index_type() != crate::core::index::IndexType::Vector {
             continue;
         }
-        let Some(snapshot_json) = index.export_snapshot() else {
+        let Some(snapshot) = index
+            .as_any()
+            .downcast_ref::<crate::core::index::vector::VectorIndex>()
+            .and_then(|i| i.snapshot())
+        else {
             continue; // too few vectors to have clustered -- nothing to persist
-        };
-        let Ok(snapshot) = serde_json::from_value(snapshot_json) else {
-            continue;
         };
         let Ok(values) = dataset.get_column(column) else {
             continue;
@@ -179,11 +180,12 @@ fn save_dataset_core(
         if index.index_type() != crate::core::index::IndexType::Hnsw {
             continue;
         }
-        let Some(snapshot_json) = index.export_snapshot() else {
+        let Some(snapshot) = index
+            .as_any()
+            .downcast_ref::<crate::core::index::hnsw::HnswIndex>()
+            .and_then(|i| i.snapshot())
+        else {
             continue; // too few vectors to have built a graph -- nothing to persist
-        };
-        let Ok(snapshot) = serde_json::from_value(snapshot_json) else {
-            continue;
         };
         let Ok(values) = dataset.get_column(column) else {
             continue;

@@ -53,6 +53,10 @@ impl Index for HashIndex {
         Ok(self.map.get(&key).cloned().unwrap_or_default())
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn memory_bytes(&self) -> usize {
         self.map.capacity() * std::mem::size_of::<(String, Vec<usize>)>()
             + self

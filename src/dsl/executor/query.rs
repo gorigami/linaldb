@@ -2148,55 +2148,128 @@ pub(super) fn execute_update(
     s: UpdateStmt,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
-    // Build a filter predicate (if any) using the same physical evaluator.
-    // Single dataset, no JOIN -- an empty right-table set/schema makes any
-    // `Expr::Field` qualifier resolve to its bare name, as before.
-    let predicate: Option<RowPredicate> = s.filter.as_ref().map(|f| -> RowPredicate {
-        let logical = dsl_expr_to_logical_expr(
-            f,
-            &crate::core::tuple::Schema::new(vec![]),
-            &std::collections::HashSet::new(),
-        );
-        Box::new(move |row| {
-            use crate::query::planner::evaluate_predicate;
-            evaluate_predicate(&logical, row)
-        })
-    });
+    let invalid = |msg: String| DslError::Engine {
+        line: line_no,
+        source: crate::engine::EngineError::InvalidOp(msg),
+    };
+    let schema = db
+        .get_dataset(&s.dataset)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?
+        .schema
+        .clone();
 
+    // Single dataset, no JOIN -- an empty right-table set makes any
+    // `Expr::Field` qualifier resolve to its bare name.
+    let no_right_tables = std::collections::HashSet::new();
+    let predicate = s
+        .filter
+        .as_ref()
+        .map(|f| dsl_expr_to_logical_expr(f, &schema, &no_right_tables));
+    // Assignments go through the same evaluator as SELECT/WHERE, so every
+    // expression form works (vector literals, functions, CAST, ...).
+    let mut assignments = Vec::with_capacity(s.assignments.len());
+    for (col_name, expr) in &s.assignments {
+        let idx = schema.get_field_index(col_name).ok_or_else(|| {
+            invalid(format!(
+                "UPDATE: unknown column '{}' in '{}'",
+                col_name, s.dataset
+            ))
+        })?;
+        assignments.push((
+            idx,
+            dsl_expr_to_logical_expr(expr, &schema, &no_right_tables),
+        ));
+    }
+
+    // Compute and type-check every new value before changing anything, so
+    // a bad assignment leaves the dataset untouched.
+    let ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+        line: line_no,
+        source: e,
+    })?;
+    let mut changes: Vec<(usize, Vec<(usize, Value)>)> = Vec::new();
+    for (row_idx, row) in ds.rows.iter().enumerate() {
+        if let Some(pred) = &predicate {
+            if !crate::query::planner::evaluate_predicate(pred, row) {
+                continue;
+            }
+        }
+        let mut new_values = Vec::with_capacity(assignments.len());
+        for (col_idx, expr) in &assignments {
+            let field = &schema.fields[*col_idx];
+            let value = crate::query::physical::evaluate_expression(expr, row);
+            let value = coerce_for_field(value, field)
+                .map_err(|e| invalid(format!("UPDATE '{}' row {}: {}", s.dataset, row_idx, e)))?;
+            new_values.push((*col_idx, value));
+        }
+        changes.push((row_idx, new_values));
+    }
+
+    let updated = changes.len();
+    let changed_columns: Vec<String> = assignments
+        .iter()
+        .map(|(i, _)| schema.fields[*i].name.clone())
+        .collect();
     let ds = db
         .get_dataset_mut(&s.dataset)
         .map_err(|e| DslError::Engine {
             line: line_no,
             source: e,
         })?;
-
-    let field_names: Vec<String> = ds.schema.fields.iter().map(|f| f.name.clone()).collect();
-    let mut updated = 0usize;
-
-    for row in ds.rows.iter_mut() {
-        if let Some(ref pred) = predicate {
-            if !pred(row) {
-                continue;
-            }
+    for (row_idx, new_values) in changes {
+        for (col_idx, value) in new_values {
+            ds.rows[row_idx].values[col_idx] = value;
         }
-        for (col_name, expr) in &s.assignments {
-            let env: std::collections::HashMap<&str, &Value> = field_names
-                .iter()
-                .zip(row.values.iter())
-                .map(|(k, v)| (k.as_str(), v))
-                .collect();
-            let new_val = eval_row_expr(expr, &env);
-            if let Some(idx) = field_names.iter().position(|n| n == col_name) {
-                row.values[idx] = new_val;
-            }
-        }
-        updated += 1;
+    }
+    if updated > 0 {
+        ds.rebuild_after_mutation(Some(&changed_columns))
+            .map_err(invalid)?;
     }
 
     Ok(DslOutput::Message(format!(
         "Updated {} row(s) in '{}'",
         updated, s.dataset
     )))
+}
+
+/// Fits an `UPDATE`'s computed value to its column's type: numeric values
+/// widen or narrow between `Int`/`Float`/`Float64` the way `INSERT`'s
+/// literals do (a non-integral number into an `Int` column is an error,
+/// never truncated), `NULL` needs a nullable column, and anything else must
+/// already match.
+fn coerce_for_field(value: Value, field: &crate::core::tuple::Field) -> Result<Value, String> {
+    let coerced = match (&field.value_type, value) {
+        (_, Value::Null) => Value::Null,
+        (ValueType::Float, Value::Int(i)) => Value::Float(i as f32),
+        (ValueType::Float, Value::Float64(f)) => Value::Float(f as f32),
+        (ValueType::Float64, Value::Int(i)) => Value::Float64(i as f64),
+        (ValueType::Float64, Value::Float(f)) => Value::Float64(f as f64),
+        (ValueType::Int, Value::Float(f)) if f.fract() == 0.0 && f.is_finite() => {
+            Value::Int(f as i64)
+        }
+        (ValueType::Int, Value::Float64(f)) if f.fract() == 0.0 && f.is_finite() => {
+            Value::Int(f as i64)
+        }
+        (_, v) => v,
+    };
+    if field.is_compatible(&coerced) {
+        Ok(coerced)
+    } else if coerced.is_null() {
+        Err(format!(
+            "column '{}' is not nullable, but the new value is NULL",
+            field.name
+        ))
+    } else {
+        Err(format!(
+            "column '{}' is {:?}, but the new value is {:?}",
+            field.name,
+            field.value_type,
+            coerced.value_type()
+        ))
+    }
 }
 
 // ─── DELETE ───────────────────────────────────────────────────────────────────
@@ -2233,6 +2306,14 @@ pub(super) fn execute_delete(
         None => ds.rows.clear(),
     }
     let deleted = before - ds.rows.len();
+    if deleted > 0 {
+        // Row ids shifted: every index, zone map and stat is stale.
+        ds.rebuild_after_mutation(None)
+            .map_err(|e| DslError::Engine {
+                line: line_no,
+                source: crate::engine::EngineError::InvalidOp(e),
+            })?;
+    }
 
     Ok(DslOutput::Message(format!(
         "Deleted {} row(s) from '{}'",

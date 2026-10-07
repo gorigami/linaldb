@@ -329,7 +329,7 @@ fn cosine_threshold_query_is_exact_on_a_clustered_vector_index() {
 
 /// SCIENTIFIC_ENGINE_EXPANSION_PLAN.md Phase 2: index persistence. Once a
 /// vector index is large enough to actually cluster, SAVE DATASET should
-/// persist that clustering (`vector_index_clusters.json`) and LOAD DATASET
+/// persist that clustering (`vector_index_clusters.bin`) and LOAD DATASET
 /// should restore it directly -- no k-means recomputation -- rather than
 /// rebuilding from scratch every time.
 #[test]
@@ -361,15 +361,17 @@ fn vector_index_clustering_survives_save_and_load_without_rebuilding() {
     script.push_str("SAVE DATASET snap_vecs\n");
     linal::dsl::execute_script(&mut db, &script).expect("setup+save script failed");
 
-    let snapshot_path = "./data/default/datasets/snap_vecs/vector_index_clusters.json";
+    let snapshot_path = "./data/default/datasets/snap_vecs/vector_index_clusters.bin";
     assert!(
         std::path::Path::new(snapshot_path).exists(),
-        "expected SAVE DATASET to write a vector_index_clusters.json"
+        "expected SAVE DATASET to write a vector_index_clusters.bin"
     );
-    let raw = std::fs::read_to_string(snapshot_path).unwrap();
-    assert!(
-        raw.contains("\"clustered_count\": 120"),
-        "expected the persisted snapshot to reflect all 120 clustered vectors, got: {raw}"
+    let raw = std::fs::read(snapshot_path).unwrap();
+    let snapshots = linal::core::index::vector::decode_snapshots(&raw).unwrap();
+    assert_eq!(
+        snapshots["embedding"].snapshot.clustered_count(),
+        120,
+        "expected the persisted snapshot to reflect all 120 clustered vectors"
     );
 
     // Fresh engine, simulating a process restart -- must restore from the
@@ -436,11 +438,15 @@ fn stale_vector_index_snapshot_is_rejected_and_falls_back_to_rebuild() {
     linal::dsl::execute_script(&mut db, &script).expect("setup+save script failed");
     // Corrupt the persisted content hash in place, simulating drift between
     // the snapshot and the actual column data.
-    let snapshot_path = "./data/default/datasets/stale_vecs/vector_index_clusters.json";
-    let raw = std::fs::read_to_string(snapshot_path).unwrap();
-    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    value["embedding"]["content_hash"] = serde_json::Value::String("stale-hash".to_string());
-    std::fs::write(snapshot_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let snapshot_path = "./data/default/datasets/stale_vecs/vector_index_clusters.bin";
+    let raw = std::fs::read(snapshot_path).unwrap();
+    let mut snapshots = linal::core::index::vector::decode_snapshots(&raw).unwrap();
+    snapshots.get_mut("embedding").unwrap().content_hash = "stale-hash".to_string();
+    std::fs::write(
+        snapshot_path,
+        linal::core::index::vector::encode_snapshots(&snapshots),
+    )
+    .unwrap();
 
     let mut db2 = TensorDb::new();
     let output = linal::dsl::execute_line(&mut db2, "LOAD DATASET stale_vecs", 1)
@@ -690,4 +696,93 @@ fn hnsw_index_snapshot_survives_save_and_load() {
     }
 
     let _ = std::fs::remove_dir_all("./data/default/datasets/hnsw_persist");
+}
+
+/// A dataset saved before the binary snapshot format (0.1.92) has a
+/// `vector_index_clusters.json`; LOAD DATASET still restores from it, and
+/// the next SAVE replaces it with the binary file.
+#[test]
+fn legacy_json_vector_index_snapshot_is_still_restored() {
+    let _ = std::fs::remove_dir_all("./data/default/datasets/legacy_vecs");
+    let mut db = TensorDb::new();
+    let mut script = String::from("DATASET legacy_vecs COLUMNS (id: Int, embedding: Vector(3))\n");
+    for i in 0..90 {
+        let a = i as f32;
+        script.push_str(&format!(
+            "INSERT INTO legacy_vecs VALUES ({}, [{}, {}, {}])\n",
+            i,
+            a.sin(),
+            a.cos(),
+            (a * 0.3).sin()
+        ));
+    }
+    script.push_str("CREATE VECTOR INDEX ON legacy_vecs(embedding)\n");
+    script.push_str("SAVE DATASET legacy_vecs\n");
+    linal::dsl::execute_script(&mut db, &script).expect("setup+save script failed");
+
+    // Rewrite the binary snapshot as the pre-0.1.92 JSON file.
+    let dir = "./data/default/datasets/legacy_vecs";
+    let bin = format!("{dir}/vector_index_clusters.bin");
+    let snapshots =
+        linal::core::index::vector::decode_snapshots(&std::fs::read(&bin).unwrap()).unwrap();
+    std::fs::write(
+        format!("{dir}/vector_index_clusters.json"),
+        serde_json::to_string_pretty(&snapshots).unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(&bin).unwrap();
+
+    let mut db2 = TensorDb::new();
+    let output = linal::dsl::execute_line(&mut db2, "LOAD DATASET legacy_vecs", 1)
+        .expect("load failed")
+        .to_string();
+    assert!(output.contains("from snapshot: embedding"), "{output}");
+
+    linal::dsl::execute_line(&mut db2, "SAVE DATASET legacy_vecs", 2).unwrap();
+    assert!(std::path::Path::new(&bin).exists());
+    assert!(!std::path::Path::new(&format!("{dir}/vector_index_clusters.json")).exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// HNSW graphs persist as `hnsw_index_graphs.bin` and restore without a
+/// rebuild; searches give the same answer before and after.
+#[test]
+fn hnsw_graph_survives_save_and_load_in_binary_form() {
+    let _ = std::fs::remove_dir_all("./data/default/datasets/hnsw_bin");
+    let mut db = TensorDb::new();
+    let mut script = String::from("DATASET hnsw_bin COLUMNS (id: Int, embedding: Vector(4))\n");
+    for i in 0..200 {
+        let a = i as f32 * 0.37;
+        script.push_str(&format!(
+            "INSERT INTO hnsw_bin VALUES ({}, [{}, {}, {}, {}])\n",
+            i,
+            a.sin(),
+            a.cos(),
+            (a * 0.5).sin(),
+            (a * 0.7).cos()
+        ));
+    }
+    script.push_str("CREATE VECTOR INDEX ON hnsw_bin(embedding) USING HNSW\n");
+    script.push_str("SAVE DATASET hnsw_bin\n");
+    linal::dsl::execute_script(&mut db, &script).expect("setup+save script failed");
+    let query = "SEARCH hnsw_bin ON embedding QUERY [0.3, 0.9, 0.1, 0.5] LIMIT 5";
+    let before = linal::dsl::execute_line(&mut db, query, 1)
+        .unwrap()
+        .to_string();
+
+    let dir = "./data/default/datasets/hnsw_bin";
+    let raw = std::fs::read(format!("{dir}/hnsw_index_graphs.bin")).unwrap();
+    assert_eq!(&raw[..8], b"LNLHNS1\0");
+    assert!(!std::path::Path::new(&format!("{dir}/hnsw_index_graphs.json")).exists());
+
+    let mut db2 = TensorDb::new();
+    let output = linal::dsl::execute_line(&mut db2, "LOAD DATASET hnsw_bin", 1)
+        .unwrap()
+        .to_string();
+    assert!(output.contains("from snapshot: embedding"), "{output}");
+    let after = linal::dsl::execute_line(&mut db2, query, 2)
+        .unwrap()
+        .to_string();
+    assert_eq!(before, after);
+    let _ = std::fs::remove_dir_all(dir);
 }

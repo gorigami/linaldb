@@ -1,3 +1,4 @@
+use super::flat::{cosine_with_norms, l2_norm, FlatVectors};
 use super::{Index, IndexType};
 use crate::core::tensor::Tensor;
 use crate::core::value::Value;
@@ -10,11 +11,12 @@ const MIN_VECTORS_TO_CLUSTER: usize = 64;
 const MAX_CLUSTERS: usize = 256;
 const KMEANS_ITERATIONS: usize = 10;
 
-/// One IVF (inverted-file) bucket: a centroid plus the indices (into
-/// `VectorIndex::vectors`) of the vectors assigned to it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One IVF (inverted-file) bucket: a centroid plus the positions (into
+/// `VectorIndex::store`) of the vectors assigned to it.
+#[derive(Debug, Clone)]
 struct Cluster {
-    centroid: Tensor,
+    centroid: Vec<f32>,
+    centroid_norm: f32,
     members: Vec<usize>,
     /// The minimum cosine similarity between the centroid and any of its
     /// members -- i.e. cos(max angular radius of the cluster). Combined with
@@ -40,95 +42,76 @@ struct Cluster {
 /// "unclustered tail" that both search paths always scan in full, so
 /// correctness never depends on `build()` having (re-)run recently, only
 /// performance does.
-#[derive(Debug)]
+///
+/// Vectors are held once, contiguously, in a `FlatVectors` store with their
+/// norms precomputed; scores are bit-identical to `COSINE_SIM`'s.
+#[derive(Debug, Clone, Default)]
 pub struct VectorIndex {
-    /// All vectors ever added, in insertion order.
-    vectors: Vec<(usize, Tensor)>,
+    store: FlatVectors,
     /// Built by the last `build()` call; empty if never built or too few
     /// vectors to bother.
     clusters: Vec<Cluster>,
-    /// `vectors[..clustered_count]` are represented in `clusters`.
-    /// `vectors[clustered_count..]` is the unclustered tail.
+    /// `store[..clustered_count]` are represented in `clusters`.
+    /// `store[clustered_count..]` is the unclustered tail.
     clustered_count: usize,
-}
-
-impl Default for VectorIndex {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl VectorIndex {
     pub fn new() -> Self {
-        Self {
-            vectors: Vec::new(),
-            clusters: Vec::new(),
-            clustered_count: 0,
-        }
-    }
-
-    /// Calculate cosine similarity between two tensors
-    fn cosine_similarity(t1: &Tensor, t2: &Tensor) -> Result<f32, String> {
-        if t1.shape != t2.shape {
-            return Err(format!("Shape mismatch: {:?} vs {:?}", t1.shape, t2.shape));
-        }
-
-        if t1.data.len() != t2.data.len() {
-            return Err("Data length mismatch".to_string());
-        }
-
-        let dot_product: f32 = t1.data.iter().zip(t2.data.iter()).map(|(a, b)| a * b).sum();
-        let norm_t1: f32 = t1.data.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_t2: f32 = t2.data.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-        if norm_t1 == 0.0 || norm_t2 == 0.0 {
-            return Ok(0.0); // Handle zero vectors
-        }
-
-        Ok(dot_product / (norm_t1 * norm_t2))
+        Self::default()
     }
 
     /// Run k-means (spherical: assignment and centroid quality are both
     /// judged by cosine similarity, matching this index's search metric) over
-    /// `self.vectors[0..n]` and return the resulting clusters.
-    fn kmeans(vectors: &[(usize, Tensor)]) -> Result<Vec<Cluster>, String> {
-        let n = vectors.len();
-        let dim = vectors[0].1.data.len();
+    /// every vector in `store` and return the resulting clusters.
+    fn kmeans(store: &FlatVectors) -> Vec<Cluster> {
+        use rayon::prelude::*;
+
+        let n = store.len();
+        let dim = store.dim();
         let num_clusters = ((n as f64).sqrt().round() as usize).clamp(2, MAX_CLUSTERS.min(n / 2));
 
         // Deterministic seeding: evenly-spaced picks from the input, so
         // results are reproducible (matters for LOAD DATASET rebuilding an
         // equivalent clustering from the same rows) without needing an RNG.
-        let mut centroids: Vec<Tensor> = (0..num_clusters)
-            .map(|i| vectors[i * n / num_clusters].1.clone())
+        let mut centroids: Vec<Vec<f32>> = (0..num_clusters)
+            .map(|i| store.vector(i * n / num_clusters).to_vec())
             .collect();
+        let mut centroid_norms: Vec<f32> = centroids.iter().map(|c| l2_norm(c)).collect();
 
         let mut assignment: Vec<usize> = vec![0; n];
 
-        for _ in 0..KMEANS_ITERATIONS {
-            let mut changed = false;
-            for (i, (_, v)) in vectors.iter().enumerate() {
-                let mut best = 0usize;
-                let mut best_sim = f32::MIN;
-                for (c_idx, c) in centroids.iter().enumerate() {
-                    let sim = Self::cosine_similarity(v, c)?;
-                    if sim > best_sim {
-                        best_sim = sim;
-                        best = c_idx;
+        for iteration in 0..KMEANS_ITERATIONS {
+            // Assignment is independent per vector: parallel, and
+            // deterministic (first best centroid wins, as before).
+            let new_assignment: Vec<usize> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let mut best = 0usize;
+                    let mut best_sim = f32::MIN;
+                    for (c_idx, c) in centroids.iter().enumerate() {
+                        let sim = cosine_with_norms(
+                            store.vector(i),
+                            store.norm(i),
+                            c,
+                            centroid_norms[c_idx],
+                        );
+                        if sim > best_sim {
+                            best_sim = sim;
+                            best = c_idx;
+                        }
                     }
-                }
-                if assignment[i] != best {
-                    changed = true;
-                }
-                assignment[i] = best;
-            }
+                    best
+                })
+                .collect();
+            let changed = iteration == 0 || new_assignment != assignment;
+            assignment = new_assignment;
 
             let mut sums = vec![vec![0f32; dim]; num_clusters];
             let mut counts = vec![0usize; num_clusters];
-            for (i, (_, v)) in vectors.iter().enumerate() {
-                let c = assignment[i];
+            for (i, &c) in assignment.iter().enumerate() {
                 counts[c] += 1;
-                for (d, val) in v.data.iter().enumerate() {
+                for (d, val) in store.vector(i).iter().enumerate() {
                     sums[c][d] += val;
                 }
             }
@@ -136,15 +119,11 @@ impl VectorIndex {
                 if counts[c_idx] == 0 {
                     continue; // keep previous centroid if the cluster went empty
                 }
-                let mean: Vec<f32> = sums[c_idx]
+                centroids[c_idx] = sums[c_idx]
                     .iter()
                     .map(|s| s / counts[c_idx] as f32)
                     .collect();
-                let id = crate::core::tensor::TensorId::new();
-                let meta = crate::core::tensor::TensorMetadata::new(id, None);
-                centroids[c_idx] =
-                    Tensor::new(id, crate::core::tensor::Shape::new(vec![dim]), mean, meta)
-                        .map_err(|e| e.to_string())?;
+                centroid_norms[c_idx] = l2_norm(&centroids[c_idx]);
             }
 
             if !changed {
@@ -159,21 +138,27 @@ impl VectorIndex {
 
         centroids
             .into_iter()
+            .zip(centroid_norms)
             .zip(members_per_cluster)
             .filter(|(_, members)| !members.is_empty())
-            .map(|(centroid, members)| {
-                let mut min_sim = f32::MAX;
-                for &idx in &members {
-                    let sim = Self::cosine_similarity(&vectors[idx].1, &centroid)?;
-                    if sim < min_sim {
-                        min_sim = sim;
-                    }
-                }
-                Ok(Cluster {
+            .map(|((centroid, centroid_norm), members)| {
+                let min_sim = members
+                    .iter()
+                    .map(|&idx| {
+                        cosine_with_norms(
+                            store.vector(idx),
+                            store.norm(idx),
+                            &centroid,
+                            centroid_norm,
+                        )
+                    })
+                    .fold(f32::MAX, f32::min);
+                Cluster {
                     centroid,
+                    centroid_norm,
                     members,
                     min_member_similarity: min_sim.clamp(-1.0, 1.0),
-                })
+                }
             })
             .collect()
     }
@@ -182,12 +167,14 @@ impl VectorIndex {
     /// derived from the cluster's centroid similarity and angular radius via
     /// the spherical triangle inequality. If this bound doesn't pass the
     /// threshold, no member can either.
-    fn cluster_upper_bound(cluster: &Cluster, query: &Tensor) -> Result<f32, String> {
-        let centroid_sim = Self::cosine_similarity(query, &cluster.centroid)?.clamp(-1.0, 1.0);
+    fn cluster_upper_bound(cluster: &Cluster, query: &[f32], query_norm: f32) -> f32 {
+        let centroid_sim =
+            cosine_with_norms(query, query_norm, &cluster.centroid, cluster.centroid_norm)
+                .clamp(-1.0, 1.0);
         let angle_to_centroid = centroid_sim.acos();
         let radius_angle = cluster.min_member_similarity.acos();
         let best_possible_angle = (angle_to_centroid - radius_angle).max(0.0);
-        Ok(best_possible_angle.cos())
+        best_possible_angle.cos()
     }
 
     /// Exports the clustering `build()` last computed, for `SAVE DATASET`
@@ -199,30 +186,53 @@ impl VectorIndex {
         }
         Some(VectorIndexSnapshot {
             clustered_count: self.clustered_count,
-            clusters: self.clusters.clone(),
+            clusters: self
+                .clusters
+                .iter()
+                .map(|c| SnapshotCluster {
+                    centroid: c.centroid.clone(),
+                    members: c.members.iter().map(|&m| m as u32).collect(),
+                    min_member_similarity: c.min_member_similarity,
+                })
+                .collect(),
         })
     }
 
     /// Restores a previously exported clustering without recomputing
-    /// k-means -- the entire point of persisting it (`build()`'s k-means
-    /// pass is exactly the "full rebuild + blocking k-means on every ...
-    /// LOAD DATASET" cost `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md`'s audit
-    /// flagged). Only valid when `self.vectors` was populated via `add()`
-    /// in the exact same order as when the snapshot was taken -- `members`
-    /// are indices *into* `self.vectors`, not row IDs, so a reordering
-    /// would silently point clusters at the wrong vectors. The caller is
-    /// responsible for confirming that via `content_hash` before calling
-    /// this (not re-checked here); `LOAD DATASET` re-inserts rows in their
-    /// saved order, so this always holds there.
+    /// k-means. Only valid when the store was populated via `add()` in the
+    /// exact same order as when the snapshot was taken -- `members` are
+    /// positions in the store, not row IDs, so a reordering would silently
+    /// point clusters at the wrong vectors. The caller confirms that via
+    /// `content_hash` before calling this; `LOAD DATASET` re-inserts rows
+    /// in their saved order, so it always holds there. Member positions and
+    /// centroid dimensions are still bounds-checked here.
     pub fn restore_from_snapshot(&mut self, snapshot: VectorIndexSnapshot) -> Result<(), String> {
-        if snapshot.clustered_count > self.vectors.len() {
+        if snapshot.clustered_count > self.store.len() {
             return Err(format!(
                 "vector index snapshot expects at least {} vectors, only {} were added",
                 snapshot.clustered_count,
-                self.vectors.len()
+                self.store.len()
             ));
         }
-        self.clusters = snapshot.clusters;
+        let mut clusters = Vec::with_capacity(snapshot.clusters.len());
+        for c in snapshot.clusters {
+            if c.centroid.len() != self.store.dim() {
+                return Err("vector index snapshot has the wrong dimension".to_string());
+            }
+            if c.members
+                .iter()
+                .any(|&m| m as usize >= snapshot.clustered_count)
+            {
+                return Err("vector index snapshot has an out-of-range member".to_string());
+            }
+            clusters.push(Cluster {
+                centroid_norm: l2_norm(&c.centroid),
+                centroid: c.centroid,
+                members: c.members.into_iter().map(|m| m as usize).collect(),
+                min_member_similarity: c.min_member_similarity,
+            });
+        }
+        self.clusters = clusters;
         self.clustered_count = snapshot.clustered_count;
         Ok(())
     }
@@ -230,11 +240,11 @@ impl VectorIndex {
     /// Content hash of a vector column's values, in row order -- lets
     /// `LOAD DATASET` detect a persisted clustering snapshot that no
     /// longer matches the data it was built from (e.g. `data.parquet`
-    /// edited independently of `vector_index_clusters.json`) and fall
-    /// back to a full rebuild instead of silently restoring a stale
-    /// clustering. Non-`Vector` values are skipped rather than erroring --
-    /// a genuine vector-indexed column should never contain any, but this
-    /// is a hash, not a validator.
+    /// edited independently of the snapshot) and fall back to a full
+    /// rebuild instead of silently restoring a stale clustering.
+    /// Non-`Vector` values are skipped rather than erroring -- a genuine
+    /// vector-indexed column should never contain any, but this is a hash,
+    /// not a validator.
     pub fn content_hash(values: &[Value]) -> String {
         let mut bytes = Vec::new();
         for v in values {
@@ -248,50 +258,141 @@ impl VectorIndex {
     }
 }
 
+/// One cluster as persisted: centroid, member positions, radius.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotCluster {
+    #[serde(deserialize_with = "legacy::centroid")]
+    centroid: Vec<f32>,
+    #[serde(deserialize_with = "legacy::members")]
+    members: Vec<u32>,
+    min_member_similarity: f32,
+}
+
 /// `VectorIndex::snapshot`'s persistable output: everything `build()`
 /// computes, minus the vectors themselves (those come back for free by
-/// re-`add()`-ing the freshly loaded rows, in the same order, which is
-/// what makes `members`'s indices-into-`vectors` still valid on restore).
+/// re-`add()`-ing the freshly loaded rows, in the same order).
+///
+/// Written by `SAVE DATASET` in the binary `vector_index_clusters.bin`
+/// (`encode_snapshots`). The serde derive only exists to keep reading the
+/// `vector_index_clusters.json` older versions wrote.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorIndexSnapshot {
     clustered_count: usize,
-    clusters: Vec<Cluster>,
+    clusters: Vec<SnapshotCluster>,
 }
 
-/// What `SAVE DATASET` actually writes to disk per vector-indexed column
-/// (`datasets/<name>/vector_index_clusters.json`, keyed by column name):
-/// the snapshot plus the content hash it was computed from, so `LOAD
-/// DATASET` can tell a still-valid snapshot from a stale one before
-/// trusting it.
+impl VectorIndexSnapshot {
+    /// How many vectors (from the start of the column) the clustering covers.
+    pub fn clustered_count(&self) -> usize {
+        self.clustered_count
+    }
+}
+
+/// What `SAVE DATASET` writes per vector-indexed column: the snapshot plus
+/// the content hash it was computed from, so `LOAD DATASET` can tell a
+/// still-valid snapshot from a stale one before trusting it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedVectorIndex {
     pub content_hash: String,
     pub snapshot: VectorIndexSnapshot,
 }
 
+const IVF_MAGIC: &[u8; 8] = b"LNLIVF1\0";
+
+/// Binary layout of `vector_index_clusters.bin` (little-endian): magic
+/// `LNLIVF1\0`, u32 column count, then per column (sorted by name): column
+/// name and content hash (u32 length + UTF-8 each), u64 clustered count,
+/// u32 cluster count, and per cluster: f32 radius (min member similarity),
+/// the centroid (u64 length + f32s), the member positions (u64 length +
+/// u32s).
+pub fn encode_snapshots(
+    snapshots: &std::collections::HashMap<String, PersistedVectorIndex>,
+) -> Vec<u8> {
+    let mut w = super::binio::Writer::new(IVF_MAGIC);
+    let mut columns: Vec<&String> = snapshots.keys().collect();
+    columns.sort();
+    w.u32(columns.len() as u32);
+    for column in columns {
+        let p = &snapshots[column];
+        w.str(column);
+        w.str(&p.content_hash);
+        w.u64(p.snapshot.clustered_count as u64);
+        w.u32(p.snapshot.clusters.len() as u32);
+        for c in &p.snapshot.clusters {
+            w.f32(c.min_member_similarity);
+            w.f32s(&c.centroid);
+            w.u32s(&c.members);
+        }
+    }
+    w.into_bytes()
+}
+
+pub fn decode_snapshots(
+    bytes: &[u8],
+) -> Result<std::collections::HashMap<String, PersistedVectorIndex>, String> {
+    let mut r = super::binio::Reader::new(bytes, IVF_MAGIC)?;
+    let mut out = std::collections::HashMap::new();
+    for _ in 0..r.u32()? {
+        let column = r.str()?;
+        let content_hash = r.str()?;
+        let clustered_count = r.u64()? as usize;
+        let n = r.u32()?;
+        let mut clusters = Vec::new();
+        for _ in 0..n {
+            let min_member_similarity = r.f32()?;
+            let centroid = r.f32s()?;
+            let members = r.u32s()?;
+            clusters.push(SnapshotCluster {
+                centroid,
+                members,
+                min_member_similarity,
+            });
+        }
+        out.insert(
+            column,
+            PersistedVectorIndex {
+                content_hash,
+                snapshot: VectorIndexSnapshot {
+                    clustered_count,
+                    clusters,
+                },
+            },
+        );
+    }
+    r.finish()?;
+    Ok(out)
+}
+
+/// Reading `vector_index_clusters.json` from before the binary format,
+/// where each centroid was a whole serialized `Tensor`.
+mod legacy {
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Centroid {
+        Plain(Vec<f32>),
+        Tensor(crate::core::tensor::Tensor),
+    }
+
+    pub fn centroid<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f32>, D::Error> {
+        Ok(match Centroid::deserialize(d)? {
+            Centroid::Plain(v) => v,
+            Centroid::Tensor(t) => t.to_logical_vec(),
+        })
+    }
+
+    pub fn members<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u32>, D::Error> {
+        let v = Vec::<usize>::deserialize(d)?;
+        v.into_iter()
+            .map(|m| u32::try_from(m).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
 impl Index for VectorIndex {
     fn add(&mut self, row_id: usize, value: &Value) -> Result<(), String> {
-        match value {
-            Value::Vector(data) => {
-                // Convert Vec<f32> to Tensor (MVP: Shape is inferred as [len])
-                use crate::core::tensor::{Shape, Tensor, TensorId, TensorMetadata};
-                let id = TensorId::new();
-                let metadata = TensorMetadata::new(id, None);
-                let tensor = Tensor::new(id, Shape::new(vec![data.len()]), data.clone(), metadata)
-                    .map_err(|e| e.to_string())?;
-
-                self.vectors.push((row_id, tensor));
-                Ok(())
-            }
-            Value::Bool(_) => Err("Cannot index Boolean as Vector".to_string()),
-            Value::Int(_) => Err("Cannot index Int as Vector".to_string()),
-            Value::String(_) => Err("Cannot index String as Vector".to_string()),
-            Value::Null => Ok(()),
-            Value::Float(_) => Err("Cannot index Float as Vector".to_string()),
-            Value::Float64(_) => Err("Cannot index Double as Vector".to_string()),
-            Value::Matrix(_) => Err("Cannot index Matrix as Vector".to_string()),
-            Value::Complex(_) => Err("Cannot index Complex as Vector".to_string()),
-        }
+        self.store.add_value(row_id, value)
     }
 
     fn lookup(&self, _value: &Value) -> Result<Vec<usize>, String> {
@@ -299,33 +400,29 @@ impl Index for VectorIndex {
     }
 
     fn memory_bytes(&self) -> usize {
-        // Each entry is a full copy of the row's vector, wrapped in a Tensor.
-        let vectors = self.vectors.capacity() * std::mem::size_of::<(usize, Tensor)>()
-            + self
-                .vectors
-                .iter()
-                .map(|(_, t)| t.data.capacity() * std::mem::size_of::<f32>())
-                .sum::<usize>();
         let clusters = self
             .clusters
             .iter()
             .map(|c| {
                 std::mem::size_of::<Cluster>()
-                    + c.centroid.data.capacity() * std::mem::size_of::<f32>()
+                    + c.centroid.capacity() * std::mem::size_of::<f32>()
                     + c.members.capacity() * std::mem::size_of::<usize>()
             })
             .sum::<usize>();
-        vectors + clusters
+        self.store.memory_bytes() + clusters
     }
 
     fn search(&self, query: &Tensor, k: usize) -> Result<Vec<(usize, f32)>, String> {
+        let query = super::binio::query_values(query);
+        self.store.check_query(&query)?;
+        let query_norm = l2_norm(&query);
+
         // Unclustered tail is always a candidate: it holds every vector
         // added since the last build(), which we have no cluster info for.
-        let mut candidate_indices: Vec<usize> =
-            (self.clustered_count..self.vectors.len()).collect();
+        let mut candidates: Vec<usize> = (self.clustered_count..self.store.len()).collect();
 
         if self.clusters.is_empty() {
-            candidate_indices = (0..self.vectors.len()).collect();
+            candidates = (0..self.store.len()).collect();
         } else {
             // Rank clusters by centroid similarity to the query, then probe
             // (fully scan) only the nearest few -- this is the approximate
@@ -337,26 +434,22 @@ impl Index for VectorIndex {
                 .clusters
                 .iter()
                 .enumerate()
-                .map(|(ci, c)| Self::cosine_similarity(query, &c.centroid).map(|s| (ci, s)))
-                .collect::<Result<_, String>>()?;
+                .map(|(ci, c)| {
+                    (
+                        ci,
+                        cosine_with_norms(&query, query_norm, &c.centroid, c.centroid_norm),
+                    )
+                })
+                .collect();
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             let nprobe = (self.clusters.len() / 4).max(1);
             for &(ci, _) in ranked.iter().take(nprobe) {
-                candidate_indices.extend_from_slice(&self.clusters[ci].members);
+                candidates.extend_from_slice(&self.clusters[ci].members);
             }
         }
 
-        let mut scores: Vec<(usize, f32)> = candidate_indices
-            .into_iter()
-            .map(|idx| {
-                let (row_id, v) = &self.vectors[idx];
-                Self::cosine_similarity(query, v).map(|s| (*row_id, s))
-            })
-            .collect::<Result<_, String>>()?;
-
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scores.into_iter().take(k).collect())
+        Ok(self.store.top_k(candidates.into_iter(), &query, k))
     }
 
     fn search_threshold(
@@ -365,6 +458,9 @@ impl Index for VectorIndex {
         threshold: f32,
         strict: bool,
     ) -> Result<Vec<(usize, f32)>, String> {
+        let query = super::binio::query_values(query);
+        self.store.check_query(&query)?;
+        let query_norm = l2_norm(&query);
         let passes = |s: f32| {
             if strict {
                 s > threshold
@@ -374,27 +470,24 @@ impl Index for VectorIndex {
         };
 
         // Unclustered tail: no bound available, always scan.
-        let mut candidate_indices: Vec<usize> =
-            (self.clustered_count..self.vectors.len()).collect();
+        let mut candidates: Vec<usize> = (self.clustered_count..self.store.len()).collect();
 
         if self.clusters.is_empty() {
-            candidate_indices = (0..self.vectors.len()).collect();
+            candidates = (0..self.store.len()).collect();
         } else {
             for cluster in &self.clusters {
-                let upper_bound = Self::cluster_upper_bound(cluster, query)?;
-                if passes(upper_bound) {
-                    candidate_indices.extend_from_slice(&cluster.members);
+                if passes(Self::cluster_upper_bound(cluster, &query, query_norm)) {
+                    candidates.extend_from_slice(&cluster.members);
                 }
                 // else: proven no member of this cluster can pass -- skip it entirely.
             }
         }
 
-        let mut results = Vec::with_capacity(candidate_indices.len());
-        for idx in candidate_indices {
-            let (row_id, v) = &self.vectors[idx];
-            let sim = Self::cosine_similarity(query, v)?;
+        let mut results = Vec::with_capacity(candidates.len());
+        for i in candidates {
+            let sim = self.store.cosine(i, &query, query_norm);
             if passes(sim) {
-                results.push((*row_id, sim));
+                results.push((self.store.row_id(i), sim));
             }
         }
         Ok(results)
@@ -405,15 +498,15 @@ impl Index for VectorIndex {
     }
 
     fn box_clone(&self) -> Box<dyn Index> {
-        Box::new(Self {
-            vectors: self.vectors.clone(),
-            clusters: self.clusters.clone(),
-            clustered_count: self.clustered_count,
-        })
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn build(&mut self) -> Result<(), String> {
-        let n = self.vectors.len();
+        let n = self.store.len();
         self.clusters.clear();
         self.clustered_count = 0;
 
@@ -425,13 +518,9 @@ impl Index for VectorIndex {
             return Ok(());
         }
 
-        self.clusters = Self::kmeans(&self.vectors)?;
+        self.clusters = Self::kmeans(&self.store);
         self.clustered_count = n;
         Ok(())
-    }
-
-    fn export_snapshot(&self) -> Option<serde_json::Value> {
-        serde_json::to_value(self.snapshot()?).ok()
     }
 }
 
