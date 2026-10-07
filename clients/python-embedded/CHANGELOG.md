@@ -6,27 +6,33 @@ engine's own changelog.
 
 ## [Unreleased]
 
-- **Sparse vectors:** `linaldb.sparse_array(rows, dim)` builds a `SparseVector(dim)` column for
-  `load_arrow()`; values come back as `{"dim", "indices", "values"}`.
-- **Quantized vectors:** `load_numpy(..., quantize="F16" | "I8")` stores the vector column as
-  `Vector(d, F16|I8)`; values come back as the stored floats.
-- Engine: `SEARCH ... PREFILTER ... APPROX` (filtered HNSW), opt-in memory-mapped HNSW
-  snapshots, and a fix for `WHERE true` matching nothing. See the root `CHANGELOG.md`.
+## [0.1.17] - 2026-10-07
 
-- **`Db.load_numpy(name, vectors, *, column="embedding", columns=None, origin="numpy")`** and
-  **`Db.load_arrow(name, data, *, origin="arrow")`**: create a dataset straight from a 2-D
-  `float32` NumPy array (plus optional scalar columns) or a pyarrow `Table`/`RecordBatch`, with
-  no file and no DSL parsing. Bit-exact; a `float64` array, NaN/infinite values, unsupported
-  Arrow types and existing names raise `LinalError`. Recorded in `EXPLAIN LINEAGE`.
-- Engine additions reachable through `execute()`: `ARG_MAX`/`ARG_MIN`/`RRF` aggregates, batch
-  `SEARCH ... QUERIES`, and `SHOW MEMORY`. See the root `CHANGELOG.md`.
-- **`BitVector` fingerprints:** `load_numpy(..., bit_columns={"fp": bool_array})`,
-  `linaldb.bitvector_array()`; values come back as bit strings. `TANIMOTO` etc. match RDKit.
-- **Spectra:** `linaldb.peaks_array([(mz, intensities), ...])` builds a `Matrix(2, *)` column for
-  `load_arrow()`; `SPEC_COSINE`/`SPEC_COSINE_MOD` match matchms.
-- Engine: `CREATE SORTED INDEX`, `SEARCH ... PREFILTER` with per-query mass windows, a faster
-  and more accurate HNSW index, and four bug fixes (UPDATE/DELETE index staleness, arithmetic in
-  WHERE, f32 literals beside DOUBLE, `schema.json` Complex type). See the root `CHANGELOG.md`.
+Picks up the root engine's `v0.1.92`, linked directly in via the `linal` path dependency: all
+three tiers of the CASMI 2026 scientific-retrieval plan (`CASMI_WORKLOADS_PLAN.md`). What reaches
+Python:
+
+- **Load from memory.** `Db.load_numpy(name, vectors, *, column="embedding", columns=None,
+  origin="numpy")` and `Db.load_arrow(name, data, *, origin="arrow")` create a dataset straight
+  from a 2-D `float32` NumPy array (plus optional scalar columns) or a pyarrow
+  `Table`/`RecordBatch`, with no file and no DSL parsing. Bit-exact; a `float64` array,
+  NaN/infinite values, unsupported Arrow types and existing names raise `LinalError`; recorded
+  in `EXPLAIN LINEAGE`.
+- **Sparse vectors.** `linaldb.sparse_array(rows, dim)` builds a `SparseVector(dim)` column for
+  `load_arrow()`; values come back as `{"dim", "indices", "values"}`. Results are bit-identical
+  to the dense equivalent.
+- **Quantized vectors.** `load_numpy(..., quantize="F16" | "I8")` stores the vector column as
+  `Vector(d, F16|I8)`; values come back as the stored floats.
+- **`BitVector` fingerprints.** `load_numpy(..., bit_columns={"fp": bool_array})`,
+  `linaldb.bitvector_array()`; values come back as bit strings. `TANIMOTO` matches RDKit exactly.
+- **Spectra.** `linaldb.peaks_array([(mz, intensities), ...])` builds a `Matrix(2, *)` column for
+  `load_arrow()`; `SPEC_COSINE`/`SPEC_COSINE_MOD` match matchms to 1e-12.
+- **Engine additions reachable through `execute()`:** `ARG_MAX`/`ARG_MIN`/`RRF` aggregates, batch
+  `SEARCH ... QUERIES`, `SHOW MEMORY`, `CREATE SORTED INDEX`, `SEARCH ... PREFILTER` (exact, with
+  per-query mass windows, and `APPROX` filtered HNSW), opt-in memory-mapped HNSW snapshots.
+- **Bug fixes:** UPDATE/DELETE index and zone-map staleness, arithmetic in `WHERE`, f32 literals
+  beside `DOUBLE`, `schema.json` reporting Complex as String, and `WHERE true` matching nothing.
+  See the root `CHANGELOG.md` for the full detail.
 
 ## [0.1.16] - 2026-09-25
 
