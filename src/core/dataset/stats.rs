@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Statistics for a dataset, including row counts and column-level summaries.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DatasetStats {
     pub row_count: u64,
-    /// stats per column name
-    pub columns: HashMap<String, ColumnStats>,
+    /// stats per column name, in name order (a `BTreeMap`, so `stats.json`
+    /// is byte-identical for identical data; it was a `HashMap` before
+    /// v0.1.93, whose order changed run to run)
+    pub columns: BTreeMap<String, ColumnStats>,
 }
 
 /// Statistics for a single column.
@@ -25,7 +27,7 @@ impl DatasetStats {
     pub fn new(row_count: u64) -> Self {
         Self {
             row_count,
-            columns: HashMap::new(),
+            columns: BTreeMap::new(),
         }
     }
 

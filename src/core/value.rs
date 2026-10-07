@@ -131,6 +131,20 @@ impl std::hash::Hash for Value {
     }
 }
 
+impl ValueType {
+    /// The type as `SHOW SCHEMA` lists it: the existing names, except the
+    /// two whose internal form isn't the DSL's -- a variable-width matrix
+    /// (`Matrix(2, *)`, stored as 0 columns) and a quantized vector
+    /// (`Vector(1000, F16)`).
+    pub fn schema_name(&self) -> String {
+        match self {
+            ValueType::Matrix(r, 0) => format!("Matrix({}, *)", r),
+            ValueType::QVector(d, q) => format!("Vector({}, {})", d, q),
+            other => format!("{:?}", other),
+        }
+    }
+}
+
 /// Type descriptor for values
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ValueType {
@@ -453,6 +467,7 @@ impl fmt::Display for ValueType {
             ValueType::String => write!(f, "STRING"),
             ValueType::Bool => write!(f, "BOOL"),
             ValueType::Vector(dim) => write!(f, "VECTOR[{}]", dim),
+            ValueType::Matrix(r, 0) => write!(f, "MATRIX[{}, *]", r),
             ValueType::Matrix(r, c) => write!(f, "MATRIX[{}, {}]", r, c),
             ValueType::Complex => write!(f, "COMPLEX"),
             ValueType::BitVector(n) => write!(f, "BITVECTOR[{}]", n),

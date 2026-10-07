@@ -768,6 +768,9 @@ both the baked-in and deferred paths.
      key (first row wins ties). `RRF(rank, k)` (`AggregateFunction::Rrf(k)`)
      sums `1/(k + rank)` in an `f64` accumulator.
 3. **HAVING**: Filter groups after aggregation
+4. **Empty input**: with `GROUP BY`, no rows; without it (a global aggregate), one row --
+   `COUNT` 0, every other aggregate `NULL` -- which is why non-`COUNT` aggregate columns are
+   nullable in `LogicalPlan::Aggregate`'s schema.
 
 ### Batch Vector Search
 
@@ -780,7 +783,10 @@ indexed column, and builds the output schema (`query_id`, `rank`, `score`,
 `row_id`, then the dataset's columns). Execution runs each query's
 `Index::search` in parallel (Rayon) and emits rows grouped by query in input
 order. A `FILTER` is a `FilterExec` over that output, so it sees the result
-columns too.
+columns too. Equal scores are ordered by row id on every path (`FlatVectors::top_k` and the
+HNSW merge), so the index type never changes which of two duplicate vectors comes first.
+`SEARCH ... INTO` records a `SEARCH` provenance step (`record_search_provenance` in
+`dsl/executor/mod.rs`) with the searched dataset and the queries' source as inputs.
 
 ### Memory Accounting
 

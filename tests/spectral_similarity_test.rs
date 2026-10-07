@@ -148,7 +148,7 @@ fn variable_width_spectra_round_trip_through_parquet() {
         .iter()
         .map(|f| f.value_type.to_string())
         .collect();
-    assert_eq!(types[2], "MATRIX[2, 0]");
+    assert_eq!(types[2], "MATRIX[2, *]");
 }
 
 #[test]

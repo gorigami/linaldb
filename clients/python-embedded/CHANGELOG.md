@@ -6,6 +6,17 @@ engine's own changelog.
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-07
+
+Picks up the root engine's `v0.1.93`: five fixes found by `linal-hub` on 0.1.17.
+
+- `SELECT COUNT(*) ... WHERE <nothing matches>` returns one row with `0` (it returned no rows);
+  other aggregates are `None` there.
+- `SEARCH ... INTO` results have lineage back to the searched dataset and the queries.
+- Exact score ties (duplicate vectors) come back in row order whatever the index type.
+- `Dataset.stats()` / `stats.json` have a stable, name-ordered column order.
+- `SHOW SCHEMA` prints `Matrix(2, *)` and `Vector(d, F16)` instead of internal names.
+
 ## [0.1.17] - 2026-10-07
 
 Picks up the root engine's `v0.1.92`, linked directly in via the `linal` path dependency: all

@@ -155,10 +155,12 @@ fn test_avg_empty_dataset() {
 
     execute_script(&mut db, script).expect("Setup failed");
 
-    // AVG on empty dataset should return 0 rows (empty result set)
+    // AVG over no rows: one row, NULL (SQL semantics since v0.1.93; it used
+    // to return no rows).
     let query = r#"DATASET result FROM empty SELECT AVG(value)"#;
     execute_line(&mut db, query, 0).expect("AVG query should succeed");
 
     let result = db.get_dataset("result").expect("Result dataset not found");
-    assert_eq!(result.len(), 0, "Empty aggregation should return 0 rows");
+    assert_eq!(result.len(), 1, "a global aggregate always returns one row");
+    assert_eq!(result.rows[0].values[0], Value::Null);
 }

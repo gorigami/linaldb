@@ -272,7 +272,7 @@ pub(crate) fn execute_show_shared(
                     output.push_str(&format!(
                         "{:<20} {:<20} {:<10}\n",
                         field.name,
-                        format!("{:?}", field.value_type),
+                        field.value_type.schema_name(),
                         field.nullable
                     ));
                 }

@@ -96,9 +96,10 @@ pub struct DatasetMetadata {
     pub updated_at: DateTime<Utc>,
     pub version: u32,
     pub row_count: usize,
-    pub column_stats: HashMap<String, ColumnStats>,
+    /// Name-ordered (`BTreeMap`) so serialized metadata is deterministic.
+    pub column_stats: std::collections::BTreeMap<String, ColumnStats>,
     pub schema: Schema,
-    pub extra: HashMap<String, String>,
+    pub extra: std::collections::BTreeMap<String, String>,
 }
 
 impl DatasetMetadata {
@@ -110,9 +111,9 @@ impl DatasetMetadata {
             updated_at: now,
             version: 1,
             row_count: 0,
-            column_stats: HashMap::new(),
+            column_stats: std::collections::BTreeMap::new(),
             schema,
-            extra: HashMap::new(),
+            extra: std::collections::BTreeMap::new(),
         }
     }
 
