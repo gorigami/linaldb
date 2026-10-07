@@ -4,6 +4,16 @@ All notable changes to the `linaldb` Python native bindings will
 be documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [Unreleased]
+
+- **`Db.load_numpy(name, vectors, *, column="embedding", columns=None, origin="numpy")`** and
+  **`Db.load_arrow(name, data, *, origin="arrow")`**: create a dataset straight from a 2-D
+  `float32` NumPy array (plus optional scalar columns) or a pyarrow `Table`/`RecordBatch`, with
+  no file and no DSL parsing. Bit-exact; a `float64` array, NaN/infinite values, unsupported
+  Arrow types and existing names raise `LinalError`. Recorded in `EXPLAIN LINEAGE`.
+- Engine additions reachable through `execute()`: `ARG_MAX`/`ARG_MIN`/`RRF` aggregates, batch
+  `SEARCH ... QUERIES`, and `SHOW MEMORY`. See the root `CHANGELOG.md`.
+
 ## [0.1.16] - 2026-09-25
 
 Picks up the root engine's `v0.1.91`. No Python-side code change.

@@ -641,7 +641,7 @@ fn logical_vector_or_matrix_type(field: &ArrowField) -> Option<ValueType> {
 /// ever emit Float32; CSV import produces Int64/Float64/Utf8/Boolean), and
 /// `load_dataset` will surface a clean `StorageError` rather than silently
 /// corrupt data if it ever is.
-fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
+pub(crate) fn arrow_schema_to_tuple_schema(arrow_schema: &ArrowSchema) -> Schema {
     let fields = arrow_schema
         .fields()
         .iter()

@@ -119,19 +119,51 @@ pub(crate) fn run_search(
     s: &SearchStmt,
     line_no: usize,
 ) -> Result<(Arc<crate::core::tuple::Schema>, Vec<Tuple>), DslError> {
-    let source_ds = db.get_dataset(&s.dataset).map_err(|e| DslError::Engine {
+    let (mut plan, filter_schema) = search_plan(db, s, line_no)?;
+    if let Some(filter_expr) = &s.filter {
+        plan = LogicalPlan::Filter {
+            input: Box::new(plan),
+            predicate: dsl_expr_to_logical_expr(
+                filter_expr,
+                &filter_schema,
+                &std::collections::HashSet::new(),
+            ),
+        };
+    }
+    let planner = Planner::new(db);
+    let physical_plan = planner
+        .create_physical_plan(&plan)
+        .map_err(|e| DslError::Engine {
+            line: line_no,
+            source: e,
+        })?;
+    let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
         line: line_no,
         source: e,
     })?;
+    Ok((physical_plan.schema(), result_rows))
+}
+
+/// Builds a `SEARCH` statement's logical plan, without its `FILTER` -- shared
+/// by execution and `EXPLAIN`. Also returns the schema the `FILTER`
+/// predicate is resolved against (the search's own output schema).
+pub(super) fn search_plan(
+    db: &TensorDb,
+    s: &SearchStmt,
+    line_no: usize,
+) -> Result<(LogicalPlan, Arc<crate::core::tuple::Schema>), DslError> {
+    let engine_err = |e| DslError::Engine {
+        line: line_no,
+        source: e,
+    };
+    let invalid = |msg: String| DslError::Engine {
+        line: line_no,
+        source: crate::engine::EngineError::InvalidOp(msg),
+    };
+    let source_ds = db.get_dataset(&s.dataset).map_err(engine_err)?;
     let schema = source_ds.schema.clone();
     let query_tensor = match s.query {
-        SearchQuery::TensorRef(ref name) => db
-            .get(name)
-            .map_err(|e| DslError::Engine {
-                line: line_no,
-                source: e,
-            })?
-            .clone(),
+        SearchQuery::TensorRef(ref name) => db.get(name).map_err(engine_err)?.clone(),
         SearchQuery::Inline(ref values) => {
             use crate::core::tensor::{TensorId, TensorMetadata};
             let vals_f32: Vec<f32> = values.iter().map(|&v| v as f32).collect();
@@ -149,8 +181,71 @@ pub(crate) fn run_search(
                 msg: e,
             })?
         }
+        SearchQuery::Batch {
+            ref source,
+            ref column,
+            ref key,
+        } => {
+            let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
+                Some(ValueType::Vector(d)) => *d,
+                Some(other) => {
+                    return Err(invalid(format!(
+                        "SEARCH: column '{}' is {:?}, not a Vector",
+                        s.column, other
+                    )))
+                }
+                None => {
+                    return Err(invalid(format!(
+                        "SEARCH: column '{}' not found in dataset '{}'",
+                        s.column, s.dataset
+                    )))
+                }
+            };
+            let (queries, key_type) =
+                resolve_batch_queries(db, source, column.as_deref(), key.as_deref())
+                    .map_err(invalid)?;
+            for (i, (_, v)) in queries.iter().enumerate() {
+                if target_dim != 0 && v.len() != target_dim {
+                    return Err(invalid(format!(
+                        "SEARCH QUERIES: query {} has dimension {}, but '{}' is Vector({})",
+                        i,
+                        v.len(),
+                        s.column,
+                        target_dim
+                    )));
+                }
+            }
+            let mut fields = vec![
+                crate::core::tuple::Field::new("query_id", key_type),
+                crate::core::tuple::Field::new("rank", ValueType::Int),
+                crate::core::tuple::Field::new("score", ValueType::Float),
+                crate::core::tuple::Field::new("row_id", ValueType::Int),
+            ];
+            for f in &schema.fields {
+                if fields.iter().any(|g| g.name == f.name) {
+                    return Err(invalid(format!(
+                        "SEARCH QUERIES: dataset '{}' has a column named '{}', which collides with the batch result column of the same name -- rename it first",
+                        s.dataset, f.name
+                    )));
+                }
+                let mut field = f.clone();
+                field.is_lazy = false;
+                fields.push(field);
+            }
+            let out_schema = Arc::new(crate::core::tuple::Schema::new(fields));
+            return Ok((
+                LogicalPlan::BatchVectorSearch {
+                    dataset_name: s.dataset.clone(),
+                    column: s.column.clone(),
+                    queries: Arc::new(queries),
+                    k: s.top_k,
+                    schema: out_schema.clone(),
+                },
+                out_schema,
+            ));
+        }
     };
-    let mut plan = LogicalPlan::VectorSearch {
+    let plan = LogicalPlan::VectorSearch {
         input: Box::new(LogicalPlan::Scan {
             dataset_name: s.dataset.clone(),
             schema: schema.clone(),
@@ -159,28 +254,81 @@ pub(crate) fn run_search(
         query: query_tensor,
         k: s.top_k,
     };
-    if let Some(filter_expr) = &s.filter {
-        plan = LogicalPlan::Filter {
-            input: Box::new(plan),
-            predicate: dsl_expr_to_logical_expr(
-                filter_expr,
-                &schema,
-                &std::collections::HashSet::new(),
-            ),
-        };
-    }
-    let planner = Planner::new(db);
-    let physical_plan = planner
-        .create_physical_plan(&plan)
-        .map_err(|e| DslError::Engine {
-            line: line_no,
-            source: e,
-        })?;
-    let result_rows = physical_plan.execute(db).map_err(|e| DslError::Engine {
-        line: line_no,
-        source: e,
+    Ok((plan, schema))
+}
+
+/// `SEARCH ... QUERIES`'s resolved queries, `(query_id, vector)`, plus the
+/// `query_id` column's type.
+type BatchQueries = (Vec<(Value, Vec<f32>)>, ValueType);
+
+/// Resolves `SEARCH ... QUERIES`'s source into `(query_id, vector)` pairs
+/// plus the `query_id` column's type: rows of a 2-D tensor (ids `0..n`), or
+/// a dataset's vector column (ids from its `KEY` column, else `0..n`).
+fn resolve_batch_queries(
+    db: &TensorDb,
+    source: &str,
+    column: Option<&str>,
+    key: Option<&str>,
+) -> Result<BatchQueries, String> {
+    let Some(column) = column else {
+        let t = db.get(source).map_err(|e| e.to_string())?;
+        let dims = &t.shape.dims;
+        if dims.len() != 2 {
+            return Err(format!(
+                "SEARCH QUERIES: tensor '{}' has shape {:?}; a batch of queries must be a 2-D matrix (one query per row), or use QUERIES <dataset>.<column>",
+                source, dims
+            ));
+        }
+        let data = t.to_logical_vec();
+        let d = dims[1];
+        let queries = (0..dims[0])
+            .map(|i| (Value::Int(i as i64), data[i * d..(i + 1) * d].to_vec()))
+            .collect();
+        return Ok((queries, ValueType::Int));
+    };
+    let ds = db.get_dataset(source).map_err(|e| e.to_string())?;
+    let col_idx = ds.schema.get_field_index(column).ok_or_else(|| {
+        format!(
+            "SEARCH QUERIES: column '{}' not found in dataset '{}'",
+            column, source
+        )
     })?;
-    Ok((physical_plan.schema(), result_rows))
+    let key_idx = match key {
+        Some(k) => Some(ds.schema.get_field_index(k).ok_or_else(|| {
+            format!(
+                "SEARCH QUERIES: KEY column '{}' not found in dataset '{}'",
+                k, source
+            )
+        })?),
+        None => None,
+    };
+    let key_type = match key_idx {
+        Some(i) => ds.schema.fields[i].value_type.clone(),
+        None => ValueType::Int,
+    };
+    let mut queries = Vec::with_capacity(ds.rows.len());
+    for (i, row) in ds.rows.iter().enumerate() {
+        let row = crate::query::physical::evaluate_lazy_columns_in_row(ds, row)
+            .map_err(|e| e.to_string())?;
+        let v = match &row.values[col_idx] {
+            Value::Vector(v) => v.clone(),
+            other => {
+                return Err(format!(
+                    "SEARCH QUERIES: row {} of '{}.{}' is {:?}, not a Vector",
+                    i,
+                    source,
+                    column,
+                    other.value_type()
+                ))
+            }
+        };
+        let id = match key_idx {
+            Some(k) => row.values[k].clone(),
+            None => Value::Int(i as i64),
+        };
+        queries.push((id, v));
+    }
+    Ok((queries, key_type))
 }
 
 /// A `SEARCH` result returned inline (no `INTO`).
@@ -433,7 +581,9 @@ fn execute_select_in_scope(
                 .filter_map(|e| match e {
                     SelectExpr::Aggregate { func, expr, alias } => {
                         Some(LogicalExpr::AggregateExpr {
-                            func: agg_func_to_logical(func),
+                            func: agg_func_to_logical(func, |e| {
+                                dsl_expr_to_logical_expr(e, &pre_aggr_schema, &right_table_names)
+                            }),
                             expr: Box::new(dsl_expr_to_logical_expr(
                                 expr,
                                 &pre_aggr_schema,
@@ -520,7 +670,13 @@ fn execute_select_in_scope(
                     .filter_map(|e| match e {
                         SelectExpr::Aggregate { func, expr, alias } => {
                             Some(LogicalExpr::AggregateExpr {
-                                func: agg_func_to_logical(func),
+                                func: agg_func_to_logical(func, |e| {
+                                    dsl_expr_to_logical_expr(
+                                        e,
+                                        &pre_aggr_schema,
+                                        &right_table_names,
+                                    )
+                                }),
                                 expr: Box::new(dsl_expr_to_logical_expr(
                                     expr,
                                     &pre_aggr_schema,
@@ -1466,8 +1622,17 @@ pub(super) fn execute_add_computed_column(
 
 // ─── Shared logical plan helpers ──────────────────────────────────────────────
 
-pub(super) fn agg_func_to_logical(f: &AggFuncAst) -> AggregateFunction {
+/// Lowers an aggregate function name to its logical form. `ARG_MAX`/
+/// `ARG_MIN` carry a second (`by`) expression, lowered with the same
+/// `lower` the caller uses for the aggregated expression itself.
+pub(super) fn agg_func_to_logical(
+    f: &AggFuncAst,
+    lower: impl Fn(&Expr) -> LogicalExpr,
+) -> AggregateFunction {
     match f {
+        AggFuncAst::ArgMax(by) => AggregateFunction::ArgMax(Box::new(lower(by))),
+        AggFuncAst::ArgMin(by) => AggregateFunction::ArgMin(Box::new(lower(by))),
+        AggFuncAst::Rrf(k) => AggregateFunction::Rrf(*k),
         AggFuncAst::Sum => AggregateFunction::Sum,
         AggFuncAst::Avg => AggregateFunction::Avg,
         AggFuncAst::Count => AggregateFunction::Count,
@@ -1599,7 +1764,12 @@ fn collect_referenced_columns(expr: &LogicalExpr, out: &mut Vec<String>) {
             collect_referenced_columns(low, out);
             collect_referenced_columns(high, out);
         }
-        LogicalExpr::AggregateExpr { expr, .. } => collect_referenced_columns(expr, out),
+        LogicalExpr::AggregateExpr { expr, func, .. } => {
+            collect_referenced_columns(expr, out);
+            if let AggregateFunction::ArgMax(by) | AggregateFunction::ArgMin(by) = func {
+                collect_referenced_columns(by, out);
+            }
+        }
         LogicalExpr::Case {
             operand,
             branches,

@@ -268,6 +268,20 @@ impl Dataset {
         }
     }
 
+    /// Approximate bytes held by this dataset's rows (not its indices --
+    /// see `Index::memory_bytes`). Used by `SHOW MEMORY`.
+    pub fn estimated_rows_bytes(&self) -> usize {
+        self.rows.capacity() * std::mem::size_of::<Tuple>()
+            + self
+                .rows
+                .iter()
+                .map(|r| {
+                    (r.values.capacity() - r.values.len()) * std::mem::size_of::<Value>()
+                        + r.values.iter().map(Value::estimated_bytes).sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+
     /// Retrieve specific rows by their IDs (indices in the rows vector)
     /// Used for optimized query execution via indices
     pub fn get_rows_by_ids(&self, row_ids: &[usize]) -> Vec<Tuple> {

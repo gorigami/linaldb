@@ -53,6 +53,15 @@ impl Index for HashIndex {
         Ok(self.map.get(&key).cloned().unwrap_or_default())
     }
 
+    fn memory_bytes(&self) -> usize {
+        self.map.capacity() * std::mem::size_of::<(String, Vec<usize>)>()
+            + self
+                .map
+                .iter()
+                .map(|(k, v)| k.capacity() + v.capacity() * std::mem::size_of::<usize>())
+                .sum::<usize>()
+    }
+
     fn search(&self, _query: &Tensor, _k: usize) -> Result<Vec<(usize, f32)>, String> {
         Err("HashIndex does not support vector similarity search".to_string())
     }

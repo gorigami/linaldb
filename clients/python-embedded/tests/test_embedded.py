@@ -103,3 +103,80 @@ def test_dataset_dir_matches_data_dir_and_active_db(db, tmp_path):
 def test_dataset_missing_raises_linal_error(db):
     with pytest.raises(LinalError):
         db.dataset("never_saved").schema()
+
+
+# --- In-memory loading: Db.load_numpy / Db.load_arrow (CASMI P1) ---------
+
+
+def test_load_numpy_round_trip_is_bit_exact(db):
+    np = pytest.importorskip("numpy")
+
+    rng = np.random.default_rng(0)
+    vecs = rng.standard_normal((50, 16)).astype(np.float32)
+    vecs[0, 0] = np.float32(1e-40)  # subnormal
+    vecs[1, 1] = -0.0
+    ids = np.arange(50, dtype=np.int64)
+    mass = rng.uniform(100, 900, 50)  # float64 -> Float64 column
+
+    n = db.load_numpy("spec", vecs, column="e", columns={"id": ids, "mass": mass})
+    assert n == 50
+
+    result = db.execute("SELECT * FROM spec ORDER BY id")
+    assert result.columns == ["id", "mass", "e"]
+    got = np.array([row[2] for row in result.rows], dtype=np.float32)
+    assert got.tobytes() == vecs.tobytes()
+    assert [row[1] for row in result.rows] == mass.tolist()
+
+
+def test_load_numpy_rejects_bad_input(db):
+    np = pytest.importorskip("numpy")
+
+    with pytest.raises(LinalError, match="float32"):
+        db.load_numpy("a", np.zeros((2, 3)))  # float64
+    with pytest.raises(LinalError, match="2-D"):
+        db.load_numpy("a", np.zeros(3, dtype=np.float32))
+    with pytest.raises(LinalError, match="expected \\(2,\\)"):
+        db.load_numpy("a", np.zeros((2, 3), dtype=np.float32), columns={"id": [1, 2, 3]})
+    bad = np.ones((2, 3), dtype=np.float32)
+    bad[1, 2] = np.nan
+    with pytest.raises(LinalError, match="row 1 is NaN"):
+        db.load_numpy("a", bad)
+    db.load_numpy("a", np.ones((2, 3), dtype=np.float32))
+    with pytest.raises(LinalError, match="already exists"):
+        db.load_numpy("a", np.ones((2, 3), dtype=np.float32))
+
+
+def test_load_arrow_table_and_search(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+
+    vecs = np.eye(4, dtype=np.float32)
+    table = pa.table(
+        {
+            "name": ["a", "b", "c", "d"],
+            "e": pa.FixedSizeListArray.from_arrays(pa.array(vecs.reshape(-1)), 4),
+        }
+    )
+    assert db.load_arrow("lib", table) == 4
+    db.execute("CREATE VECTOR INDEX ON lib(e)")
+    result = db.execute("SEARCH lib ON e QUERY [0.0, 0.0, 1.0, 0.0] LIMIT 1")
+    assert result.rows[0][0] == "c"
+
+
+def test_load_arrow_rejects_float64_vectors(db):
+    pa = pytest.importorskip("pyarrow")
+
+    table = pa.table(
+        {"e": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 2.0], type=pa.float64()), 2)}
+    )
+    with pytest.raises(LinalError, match="float32"):
+        db.load_arrow("x", table)
+
+
+def test_load_is_recorded_in_lineage(db):
+    np = pytest.importorskip("numpy")
+
+    db.load_numpy("spec", np.ones((3, 2), dtype=np.float32))
+    text = db.execute("EXPLAIN LINEAGE spec AS JSON")
+    assert "LOAD FROM MEMORY" in text
+    assert "numpy" in text

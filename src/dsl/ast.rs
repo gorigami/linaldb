@@ -486,7 +486,7 @@ pub enum SelectExpr {
 }
 
 /// Aggregate functions recognised in SELECT columns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum AggFuncAst {
     Sum,
     Avg,
@@ -504,6 +504,16 @@ pub enum AggFuncAst {
     /// computed by sorting the group's collected values. Not supported as
     /// a window function (`OVER`).
     Median,
+    /// `ARG_MAX(col, by)` -- the group's value of `col` on the row with the
+    /// largest `by`. Ties keep the first row in input order; rows whose
+    /// `by` is NULL are skipped. Not supported as a window function.
+    ArgMax(Box<Expr>),
+    /// `ARG_MIN(col, by)` -- same as `ArgMax`, for the smallest `by`.
+    ArgMin(Box<Expr>),
+    /// `RRF(rank[, k])` -- reciprocal rank fusion: the group's sum of
+    /// `1 / (k + rank)`, `k` defaulting to 60. Not supported as a window
+    /// function.
+    Rrf(f64),
 }
 
 /// The window function named in an `FFT`/`PSD` `WINDOW ... HANN|HAMMING`
@@ -545,6 +555,9 @@ pub enum ShowTarget {
     Pipelines,
     /// `SHOW BACKEND` -- the active database's compute backend
     Backend,
+    /// `SHOW MEMORY [<dataset>]` -- estimated bytes held by each dataset's
+    /// rows, each index, and each tensor in the active database
+    Memory(Option<String>),
 }
 
 /// What `EXPLAIN` should show a query plan for.
@@ -693,6 +706,16 @@ pub enum SearchQuery {
     TensorRef(String),
     /// `QUERY [v1, v2, …]` — inline vector literal.
     Inline(Vec<f64>),
+    /// `QUERIES <matrix>` or `QUERIES <dataset>.<column> [KEY <column>]` —
+    /// many query vectors in one statement: each row of a named Matrix
+    /// tensor, or each row's vector in a dataset column. Returns the top-k
+    /// per query, tagged with `query_id` (the `KEY` column's value, else the
+    /// 0-based query position), `rank` and `score`.
+    Batch {
+        source: String,
+        column: Option<String>,
+        key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]

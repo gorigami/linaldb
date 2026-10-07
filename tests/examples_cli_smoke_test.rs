@@ -150,3 +150,8 @@ fn test_example_test_matrix_math_runs_clean() {
 fn test_example_test_multiline_runs_clean() {
     assert_example_runs_clean("test_multiline");
 }
+
+#[test]
+fn test_example_spectral_retrieval_runs_clean() {
+    assert_example_runs_clean("spectral_retrieval");
+}

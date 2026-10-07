@@ -10,6 +10,7 @@ use super::error::EngineError;
 use super::operations::{BinaryOp, TensorKind, UnaryOp};
 use crate::engine::context::ExecutionContext;
 
+mod memory_load;
 mod snapshot;
 
 struct NameEntry {

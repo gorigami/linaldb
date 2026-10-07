@@ -58,6 +58,32 @@ equals()`-not-`compare()` semantics as the HTTP contract) — sorting or
 `ORDER BY` on a `Complex` column is a hard DSL-level error before it ever
 reaches this conversion layer.
 
+## 1b. Loading from memory — Python only
+
+`Db.load_numpy(name, vectors, *, column="embedding", columns=None, origin="numpy")` and
+`Db.load_arrow(name, data, *, origin="arrow")` create dataset `name` from in-memory data, with no
+file and no DSL parsing. Both return the number of rows loaded (`int`) and raise `LinalError` on
+any problem.
+
+- `load_numpy`: `vectors` must be a 2-D `numpy.float32` array `(n, d)` with `d > 0`; a `float64`
+  array is rejected, not rounded. It becomes one `Vector(d)` column named `column`. `columns` is
+  an optional dict of name → 1-D array of length `n`; those scalar columns come first, in dict
+  order. A name used for both is an error.
+- `load_arrow`: `data` is a `pyarrow.Table`, a `pyarrow.RecordBatch`, or anything
+  `pyarrow.table()` accepts. Type mapping: `int64`/`int32` → `Int`, `float32` → `Float`,
+  `float64` → `Float64`, `string`/`large_string` → `String`, `bool` → `Bool`,
+  `fixed_size_list<float32>` → `Vector(d)`, `fixed_size_list<fixed_size_list<float32>>` →
+  `Matrix(r, c)`. Arrow nulls become `Null` (the column is nullable).
+- Errors: any other Arrow type (named, with a hint for `float64` vectors and variable-length
+  lists), a `NaN` or infinite float anywhere (named with column and row), or a dataset `name`
+  that already exists.
+- Values are bit-exact (`-0.0` and subnormals included). The load is recorded for `EXPLAIN
+  LINEAGE` as `LOAD FROM MEMORY` with `origin` and the new dataset's content hash.
+- Raw layer: `Db._native.load_arrow_ipc(name, ipc_stream: bytes, origin: str) -> int` takes an
+  Arrow IPC stream; the two methods above serialize to it. Engine entry point:
+  `TensorDb::load_record_batch(name, &RecordBatch, origin)`.
+- The R binding has no equivalent yet.
+
 ## 2. Dataset export — no `/delivery`, direct filesystem reads
 
 There is no export endpoint to call: a saved dataset's package

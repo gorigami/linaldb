@@ -192,6 +192,87 @@ class Db:
             )
         return result.to_pandas()
 
+    def load_arrow(self, name: str, data, *, origin: str = "arrow") -> int:
+        """Create dataset `name` from in-memory Arrow data -- a
+        `pyarrow.Table`, a `pyarrow.RecordBatch`, or anything
+        `pyarrow.table()` accepts (e.g. an object exposing
+        `__arrow_c_stream__`). No file and no DSL parsing in between.
+
+        Column types map like the engine's own Parquet packages:
+        int64/int32 -> Int, float32 -> Float, float64 -> Float64,
+        string/large_string -> String, bool -> Bool,
+        fixed_size_list<float32> -> Vector(d), and
+        fixed_size_list<fixed_size_list<float32>> -> Matrix(r, c).
+        Any other type, NaN or infinite values, or an existing dataset
+        named `name` raise `LinalError`. The load is recorded in the
+        lineage log under `origin`. Returns the number of rows loaded.
+        """
+        import pyarrow as pa
+
+        if isinstance(data, pa.RecordBatch):
+            table = pa.Table.from_batches([data])
+        elif isinstance(data, pa.Table):
+            table = data
+        else:
+            table = pa.table(data)
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        return self._native.load_arrow_ipc(name, sink.getvalue().to_pybytes(), origin)
+
+    def load_numpy(
+        self,
+        name: str,
+        vectors,
+        *,
+        column: str = "embedding",
+        columns: dict | None = None,
+        origin: str = "numpy",
+    ) -> int:
+        """Create dataset `name` from a 2-D `float32` NumPy array of shape
+        `(n, d)`: one `Vector(d)` column named `column`, plus optional
+        scalar columns from `columns` (a dict of name -> 1-D array of length
+        `n`, placed before the vector column, in dict order). Values are
+        loaded bit-exact; a `float64` array is rejected rather than rounded
+        silently -- cast it with `.astype(numpy.float32)` first.
+        Returns the number of rows loaded. See `load_arrow()` for the type
+        mapping and errors.
+        """
+        import numpy as np
+        import pyarrow as pa
+
+        arr = np.asarray(vectors)
+        if arr.ndim != 2:
+            raise LinalError(
+                f"load_numpy expects a 2-D array of shape (n, d), got shape {arr.shape}"
+            )
+        if arr.dtype != np.float32:
+            raise LinalError(
+                f"load_numpy expects float32 vectors, got {arr.dtype} -- "
+                "cast explicitly with .astype(numpy.float32)"
+            )
+        n, d = arr.shape
+        if d == 0:
+            raise LinalError("load_numpy: vectors have dimension 0")
+        flat = pa.array(np.ascontiguousarray(arr).reshape(-1), type=pa.float32())
+        names, arrays = [], []
+        for col_name, values in (columns or {}).items():
+            values = np.asarray(values)
+            if values.ndim != 1 or len(values) != n:
+                raise LinalError(
+                    f"load_numpy: column '{col_name}' has shape {values.shape}, "
+                    f"expected ({n},) to match the {n} vectors"
+                )
+            names.append(col_name)
+            arrays.append(pa.array(values))
+        if column in names:
+            raise LinalError(
+                f"load_numpy: column '{column}' is both the vector column and a scalar column"
+            )
+        names.append(column)
+        arrays.append(pa.FixedSizeListArray.from_arrays(flat, d))
+        return self.load_arrow(name, pa.table(arrays, names=names), origin=origin)
+
     def dataset(self, name: str) -> Dataset:
         """A handle to a saved dataset's on-disk package —
         `.schema()`/`.stats()`/`.manifest()`/`.to_arrow()`/`.to_pandas()`.

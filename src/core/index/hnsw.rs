@@ -188,6 +188,34 @@ impl Index for HnswIndex {
         Err("HnswIndex does not support exact value lookup".to_string())
     }
 
+    fn memory_bytes(&self) -> usize {
+        let vectors = self.vectors.capacity() * std::mem::size_of::<(usize, Tensor)>()
+            + self
+                .vectors
+                .iter()
+                .map(|(_, t)| t.data.capacity() * std::mem::size_of::<f32>())
+                .sum::<usize>();
+        // instant-distance doesn't expose its sizes, so the graph is
+        // estimated from its layout (instant-distance 0.6, M = 32, u32 point
+        // ids): a second copy of each indexed vector, one row-id value, a
+        // layer-0 node of 2*M neighbor ids, and upper layers that hold about
+        // 1/(M-1) of the points with M neighbor ids each.
+        let graph = match &self.graph {
+            Some(_) => {
+                let n = self.indexed_count;
+                let dim = self.vectors.first().map_or(0, |(_, t)| t.data.len());
+                const M: usize = 32;
+                let id = std::mem::size_of::<u32>();
+                n * (std::mem::size_of::<Vec<f32>>() + dim * std::mem::size_of::<f32>())
+                    + n * std::mem::size_of::<usize>()
+                    + n * 2 * M * id
+                    + n.div_ceil(M - 1) * M * id
+            }
+            None => 0,
+        };
+        vectors + graph
+    }
+
     fn search(&self, query: &Tensor, k: usize) -> Result<Vec<(usize, f32)>, String> {
         let tail = &self.vectors[self.indexed_count.min(self.vectors.len())..];
         let mut results = Self::brute_force(tail, &query.data, k);

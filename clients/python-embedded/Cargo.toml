@@ -10,4 +10,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 linal = { path = "../.." }
+# Same version as the root crate, so `RecordBatch` is the type `TensorDb::load_record_batch` takes.
+arrow = { version = "53.3.0", default-features = false, features = ["ipc"] }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

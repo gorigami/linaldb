@@ -73,6 +73,10 @@ pub trait Index: Send + Sync + Debug {
     /// Get the type of this index
     fn index_type(&self) -> IndexType;
 
+    /// Approximate bytes this index holds in memory, including any copies
+    /// of the indexed vectors it keeps. Used by `SHOW MEMORY`.
+    fn memory_bytes(&self) -> usize;
+
     /// Clone the index box
     fn box_clone(&self) -> Box<dyn Index>;
 

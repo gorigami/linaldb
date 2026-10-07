@@ -58,6 +58,7 @@ linal run examples/<name>.lnl
 | `matrix_operations.lnl`, `test_matrix_math.lnl` | Tensor/matrix arithmetic |
 | `test_multiline.lnl` | Multi-line statement parsing (paren-balance continuation) |
 | `advanced_analytics.lnl` | Aggregations, computed columns, `GROUP BY`/`HAVING` |
+| `spectral_retrieval.lnl` | Batch top-k (`SEARCH ... QUERIES`), a JOIN back to each query's group, `ARG_MAX`/`RRF` to reduce many spectra to one answer per molecule, `SHOW MEMORY` |
 | `benchmark.lnl` | Rough in-memory vs. indexed vs. persisted workload comparison |
 | `export_import_csv.lnl` | Legacy `IMPORT CSV`, scientific `USE DATASET FROM`, `EXPORT CSV`, `RESET SESSION` |
 | `persistence_demo.lnl` | Dataset metadata, `SAVE`/`LOAD DATASET`, version history |
