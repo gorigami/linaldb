@@ -329,3 +329,138 @@ fn with_the_wal_a_load_survives_a_restart() {
         other => panic!("{:?}", other),
     }
 }
+
+// ── Peak lists from two list columns (CASMI_WORKLOADS_PLAN_2.md, P11) ───────
+
+fn f64_lists(rows: &[Option<Vec<f64>>]) -> ArrayRef {
+    Arc::new(ListArray::from_iter_primitive::<
+        arrow::datatypes::Float64Type,
+        _,
+        _,
+    >(rows.iter().map(|r| {
+        r.as_ref()
+            .map(|v| v.iter().map(|x| Some(*x)).collect::<Vec<_>>())
+    })))
+}
+
+fn peak_opts(cast_f64: bool, sort: bool) -> linal::engine::PeakLoad {
+    linal::engine::PeakLoad {
+        peaks: vec![linal::engine::PeakColumns {
+            name: "peaks".into(),
+            mz: "mzs".into(),
+            intensity: "ints".into(),
+        }],
+        cast_f64,
+        sort,
+    }
+}
+
+#[test]
+fn peaks_from_two_list_columns() {
+    let (_dir, mut db) = db();
+    let b = batch(vec![
+        ("id", Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef),
+        (
+            "mzs",
+            f64_lists(&[Some(vec![100.1, 200.2]), None, Some(vec![300.0, 150.0])]),
+        ),
+        (
+            "ints",
+            f64_lists(&[Some(vec![1.0, 0.5]), None, Some(vec![2.0, 1.0])]),
+        ),
+    ]);
+    // float64 needs the explicit cast; unsorted needs sort.
+    let e = db
+        .load_record_batch_with_peaks("p", &b, "test", &peak_opts(false, false))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("column 'mzs' holds float64") && e.contains("cast='f32'"),
+        "{}",
+        e
+    );
+    let e = db
+        .load_record_batch_with_peaks("p", &b, "test", &peak_opts(true, false))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("row 2 has m/z 150 after 300"), "{}", e);
+    db.load_record_batch_with_peaks("p", &b, "test", &peak_opts(true, true))
+        .unwrap();
+    let ds = db.get_dataset("p").unwrap();
+    let names: Vec<&str> = ds.schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["id", "peaks"]);
+    assert_eq!(
+        ds.rows[0].values[1],
+        Value::Matrix(vec![vec![100.1f64 as f32, 200.2f64 as f32], vec![1.0, 0.5]])
+    );
+    assert_eq!(ds.rows[1].values[1], Value::Null);
+    assert_eq!(
+        ds.rows[2].values[1],
+        Value::Matrix(vec![vec![150.0, 300.0], vec![1.0, 2.0]])
+    );
+    // Usable by the spectral functions straight away.
+    let out = run(
+        &mut db,
+        "SELECT SPEC_ENTROPY(peaks, peaks, 0.01) AS s FROM p WHERE id = 1",
+    );
+    match out {
+        DslOutput::Table(t) => match t.rows[0].values[0] {
+            Value::Float64(s) => assert!((s - 1.0).abs() < 1e-12, "{}", s),
+            ref other => panic!("{:?}", other),
+        },
+        other => panic!("{:?}", other),
+    }
+    let lineage = match run(&mut db, "EXPLAIN LINEAGE p AS JSON") {
+        DslOutput::Message(m) => m,
+        other => panic!("{:?}", other),
+    };
+    assert!(
+        lineage.contains("\"cast\": \"f32\"") && lineage.contains("\"rows\": 3"),
+        "{}",
+        lineage
+    );
+}
+
+#[test]
+fn peaks_errors_name_column_and_row() {
+    let (_dir, mut db) = db();
+    let check = |mzs: ArrayRef, ints: ArrayRef, want: &str, db: &mut TensorDb| {
+        let b = batch(vec![("mzs", mzs), ("ints", ints)]);
+        let e = db
+            .load_record_batch_with_peaks("p", &b, "test", &peak_opts(true, false))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(want), "expected '{}' in: {}", want, e);
+    };
+    check(
+        f64_lists(&[Some(vec![1.0]), Some(vec![1.0, 2.0])]),
+        f64_lists(&[Some(vec![1.0]), Some(vec![1.0])]),
+        "row 1 has 2 m/z values and 1 intensities",
+        &mut db,
+    );
+    check(
+        f64_lists(&[Some(vec![1.0, f64::NAN])]),
+        f64_lists(&[Some(vec![1.0, 1.0])]),
+        "row 0 has NaN",
+        &mut db,
+    );
+    check(
+        f64_lists(&[None]),
+        f64_lists(&[Some(vec![1.0])]),
+        "row 0 has a NULL in only one of 'mzs' and 'ints'",
+        &mut db,
+    );
+    check(
+        Arc::new(Int64Array::from(vec![1])),
+        f64_lists(&[Some(vec![1.0])]),
+        "column 'mzs' is Int64, not a variable-length list",
+        &mut db,
+    );
+    let b = batch(vec![("mzs", f64_lists(&[Some(vec![1.0])]))]);
+    let e = db
+        .load_record_batch_with_peaks("p", &b, "test", &peak_opts(true, false))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("column 'ints' not found"), "{}", e);
+    assert!(db.get_dataset("p").is_err());
+}

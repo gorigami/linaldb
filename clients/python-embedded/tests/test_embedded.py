@@ -370,3 +370,143 @@ def test_load_numpy_quantized(db, enc, tol):
     assert np.all(np.abs(got - vecs) <= tol * scale + 1e-6)
     with pytest.raises(LinalError, match="quantize must be"):
         db.load_numpy("bad", vecs, quantize="F8")
+
+
+# --- Round 2: entropy, cleaning, peak loading, lineage (CASMI P8/P11/P12/P15) --
+
+
+def _raw_spectra(np, n, seed):
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        mz = np.unique(np.sort(rng.uniform(50, 500, int(rng.integers(1, 40)))).astype(np.float32))
+        out.append((mz, rng.uniform(0.01, 100, mz.size).astype(np.float32), float(rng.uniform(150, 520))))
+    return out
+
+
+def test_spec_entropy_matches_ms_entropy(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+    ms_entropy = pytest.importorskip("ms_entropy")
+
+    tol = 0.02
+    raw = _raw_spectra(np, 40, 11)
+    # Library = queries, plus noisy copies, so there are identical, partly
+    # matching and disjoint pairs.
+    rng = np.random.default_rng(12)
+    noisy = [(mz + rng.uniform(-0.005, 0.005, mz.size).astype(np.float32), it, pm) for mz, it, pm in raw]
+    noisy = [(mz[np.argsort(mz)], it[np.argsort(mz)], pm) for mz, it, pm in noisy]
+    clean = lambda s: ms_entropy.clean_spectrum(np.stack([s[0], s[1]], 1), min_ms2_difference_in_da=2 * tol)
+    lib = [clean(s) for s in raw]
+    qry = [clean(s) for s in raw + noisy]
+    one = lambda n: np.ones(n, dtype=np.int64)
+    db.load_arrow("lib", pa.table({"id": np.arange(len(lib)), "k": one(len(lib)), "spec": linaldb.peaks_array([(p[:, 0], p[:, 1]) for p in lib])}))
+    db.load_arrow("qry", pa.table({"qid": np.arange(len(qry)), "k": one(len(qry)), "qspec": linaldb.peaks_array([(p[:, 0], p[:, 1]) for p in qry])}))
+    result = db.execute(
+        f"SELECT id, qid, SPEC_ENTROPY(spec, qspec, {tol}) AS w, SPEC_ENTROPY(spec, qspec, {tol}, false) AS u "
+        "FROM lib JOIN qry ON lib.k = qry.k"
+    )
+    assert len(result.rows) == len(lib) * len(qry)
+    for a, b, w, u in result.rows:
+        # ms_entropy computes in float32; this engine in float64.
+        assert w == pytest.approx(ms_entropy.calculate_entropy_similarity(lib[a], qry[b], tol, clean_spectra=False), abs=1e-5)
+        assert u == pytest.approx(ms_entropy.calculate_unweighted_entropy_similarity(lib[a], qry[b], tol, clean_spectra=False), abs=1e-5)
+        if a == b:
+            assert w == pytest.approx(1.0, abs=1e-12)
+
+
+def test_spec_clean_matches_ms_entropy_and_matchms(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+    ms_entropy = pytest.importorskip("ms_entropy")
+    pytest.importorskip("matchms")
+    from matchms import Spectrum
+    from matchms.filtering import reduce_to_number_of_peaks, select_by_mz, select_by_relative_intensity
+
+    raw = _raw_spectra(np, 60, 21)
+    db.load_arrow("raw", pa.table({
+        "i": np.arange(len(raw)),
+        "pm": np.array([pm for _, _, pm in raw]),
+        "p": linaldb.peaks_array([(mz, it) for mz, it, _ in raw]),
+    }))
+
+    def check(sql, ref):
+        for i, (mz, it) in db.execute(sql).rows:
+            want = ref(i)
+            assert len(mz) == want.shape[0], i
+            np.testing.assert_allclose(mz, want[:, 0], rtol=1e-6)
+            np.testing.assert_allclose(it, want[:, 1], atol=1e-5)
+
+    check(
+        "SELECT i, SPEC_CLEAN(p, pm, 0.05, 10, 2.0, 1.0, 'sum', 0.04) AS c FROM raw ORDER BY i",
+        lambda i: ms_entropy.clean_spectrum(
+            np.stack([raw[i][0], raw[i][1]], 1), max_mz=raw[i][2] + 2.0, noise_threshold=0.05,
+            min_ms2_difference_in_da=0.04, max_peak_num=10),
+    )
+
+    def matchms_chain(i):
+        mz, it, pm = raw[i]
+        s = Spectrum(mz=mz.astype(float), intensities=it.astype(float), metadata={"precursor_mz": pm})
+        s = select_by_relative_intensity(select_by_mz(s, mz_from=0, mz_to=pm + 2.0), intensity_from=0.01, intensity_to=1.0)
+        s = reduce_to_number_of_peaks(s, n_max=20)
+        if s is None or s.peaks.mz.size == 0:
+            return np.zeros((0, 2))
+        w = np.sqrt(s.peaks.intensities)
+        return np.stack([s.peaks.mz, w / w.max()], 1)
+
+    check("SELECT i, SPEC_CLEAN(p, pm, 0.01, 20, 2.0, 0.5) AS c FROM raw ORDER BY i", matchms_chain)
+
+
+def test_load_arrow_builds_peaks_from_two_list_columns(db):
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+
+    mzs = [[100.0, 150.5, 200.25], None, [300.0, 120.0]]
+    ints = [[1.0, 0.5, 0.25], None, [2.0, 1.0]]
+    table = pa.table({
+        "id": np.arange(3),
+        "ms2_mzs": pa.array(mzs, pa.list_(pa.float64())),
+        "ms2_intensities": pa.array(ints, pa.list_(pa.float64())),
+    })
+    spec = {"peaks": ("ms2_mzs", "ms2_intensities")}
+    with pytest.raises(LinalError, match="cast='f32'"):
+        db.load_arrow("p", table, peaks=spec)
+    with pytest.raises(LinalError, match="row 2 has m/z 120 after 300"):
+        db.load_arrow("p", table, peaks=spec, cast="f32")
+    assert db.load_arrow("p", table, peaks=spec, cast="f32", sort=True) == 3
+    result = db.execute("SELECT * FROM p")
+    assert result.columns == ["id", "peaks"]
+    assert result.rows[1][1] is None
+    assert result.rows[2][1] == [[120.0, 300.0], [1.0, 2.0]]
+    # Same content as peaks_array() on the same (sorted) data.
+    sorted_rows = [(m, i) if m is None else tuple(map(list, zip(*sorted(zip(m, i))))) for m, i in zip(mzs, ints)]
+    db.load_arrow("q", pa.table({
+        "id": np.arange(3),
+        "peaks": pa.array(
+            [None if m is None else [np.float32(m).tolist(), np.float32(i).tolist()] for m, i in sorted_rows],
+            pa.list_(pa.list_(pa.field("item", pa.float32(), nullable=False)), 2),
+        ),
+    }))
+    assert db.lineage("p")["entity"]["Dataset"]["content_hash"] == db.lineage("q")["entity"]["Dataset"]["content_hash"]
+
+
+def test_lineage_dict_and_assert_lineage(db, tmp_path):
+    import json
+
+    db.execute("DATASET lib COLUMNS (id: Int, mass: Float)")
+    db.execute("INSERT INTO lib VALUES (1, 100.0)")
+    db.execute("DATASET light FROM lib FILTER mass < 200")
+    tree = db.lineage("light")
+    assert tree["operation"] == "DATASET FROM"
+    assert tree["parameters"]["rows"] == 1
+    assert tree["inputs"][0]["entity"]["Dataset"]["name"] == "lib"
+    path = tmp_path / "light.json"
+    path.write_text(json.dumps(tree))
+    assert "matches" in db.execute(f"ASSERT LINEAGE light MATCHES '{path}'")
+    # A later run whose input changed fails, naming the source.
+    other = linaldb.Db(str(tmp_path / "rerun"))
+    for line in ["DATASET lib COLUMNS (id: Int, mass: Float)", "INSERT INTO lib VALUES (1, 101.0)",
+                 "DATASET light FROM lib FILTER mass < 200"]:
+        other.execute(line)
+    with pytest.raises(LinalError, match="source 'lib' changed"):
+        other.execute(f"ASSERT LINEAGE light MATCHES '{path}'")

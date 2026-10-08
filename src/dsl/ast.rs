@@ -115,6 +115,8 @@ pub enum Statement {
     /// internals, per this file's doc comment) -- the executor parses it into
     /// a real `chrono::DateTime<Utc>`, erroring loudly on malformed input.
     PruneLineage(PruneLineageStmt),
+    /// `ASSERT LINEAGE <name> MATCHES '<file.json>'`
+    AssertLineage(AssertLineageStmt),
 }
 
 impl Statement {
@@ -173,7 +175,8 @@ impl Statement {
             | Statement::UseDatabase(_)
             | Statement::DescribePipeline(_)
             | Statement::Checkpoint
-            | Statement::PruneLineage(_) => false,
+            | Statement::PruneLineage(_)
+            | Statement::AssertLineage(_) => false,
         }
     }
 
@@ -209,6 +212,15 @@ impl Statement {
 }
 
 // ─── Statement structs ────────────────────────────────────────────────────────
+
+/// `ASSERT LINEAGE <name> MATCHES '<file.json>'`: fails unless every
+/// entity in the file (an `EXPLAIN LINEAGE <name> AS JSON` output) is in
+/// `<name>`'s current lineage with the same content hash.
+#[derive(Debug, Clone)]
+pub struct AssertLineageStmt {
+    pub name: String,
+    pub path: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct PruneLineageStmt {
@@ -745,6 +757,11 @@ pub struct SearchStmt {
     /// `PREFILTER <predicate> APPROX`: rank the passing rows through the
     /// column's HNSW graph instead of an exact scan.
     pub approx: bool,
+    /// `RETURN col, ...` / `RETURN NONE` (modern syntax only): the dataset
+    /// columns each hit carries. `None` keeps every column; `Some(vec![])`
+    /// (`RETURN NONE`) keeps only the per-hit columns of a batch
+    /// (`query_id, rank, score, row_id`).
+    pub returning: Option<Vec<String>>,
     /// Optional output dataset name (defaults to `"search_results"`).
     pub target: Option<String>,
 }
@@ -923,6 +940,13 @@ pub enum VectorFnKind {
     /// `SPEC_MATCHES(a, b, tolerance [, shift])` — number of peaks the
     /// greedy (modified, with `shift`) cosine matched. Result: `Int`.
     SpecMatches,
+    /// `SPEC_ENTROPY(a, b, tolerance [, weighted])` — entropy similarity of
+    /// two peak lists (`core::spectral::entropy_similarity`). Result: `Float64`.
+    SpecEntropy,
+    /// `SPEC_CLEAN(peaks, precursor_mz [, floor, max_peaks, above_precursor,
+    /// power, normalize, min_distance])` — preprocessed peak list
+    /// (`core::spectral::clean`). Result: `Matrix(2, *)`.
+    SpecClean,
     /// `SPARSE(dim, [indices], [values])` — builds a `SparseVector`.
     SparseNew,
 }

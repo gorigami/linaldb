@@ -197,3 +197,130 @@ fn loud_errors() {
     assert!(e.contains("sorted ascending"), "{}", e);
     assert_eq!(rows(run(&mut db, "SELECT pm FROM lib ORDER BY id")), before);
 }
+
+// ── SPEC_ENTROPY / SPEC_CLEAN (CASMI_WORKLOADS_PLAN_2.md, P8 / P12) ─────────
+// Agreement with ms_entropy and matchms is checked in clients/python-embedded's
+// tests; these cover the DSL paths and hand-computable values.
+
+fn matrix(v: &Value) -> Vec<Vec<f32>> {
+    match v {
+        Value::Matrix(m) => m.clone(),
+        other => panic!("expected a Matrix, got {:?}", other),
+    }
+}
+
+#[test]
+fn spec_entropy_by_hand() {
+    let (_dir, mut db) = db();
+    setup(&mut db);
+    // Unweighted, two equal peaks each, one shared: p = 0.5 everywhere, one
+    // pair: [f(1) - 2 f(0.5)] / 2 = 0.5.
+    run(
+        &mut db,
+        "DATASET h COLUMNS (k: Int, a: Matrix(2, *), b: Matrix(2, *))",
+    );
+    run(
+        &mut db,
+        "INSERT INTO h VALUES (1, [[100.0, 200.0], [1.0, 1.0]], [[100.005, 300.0], [3.0, 3.0]])",
+    );
+    let r = rows(run(
+        &mut db,
+        "SELECT SPEC_ENTROPY(a, b, 0.01, false) AS u, SPEC_ENTROPY(a, b, 0.001, false) AS none, SPEC_ENTROPY(a, a, 0.01) AS same FROM h",
+    ));
+    assert!((f64v(&r[0][0]) - 0.5).abs() < 1e-12);
+    assert_eq!(f64v(&r[0][1]), 0.0);
+    assert!((f64v(&r[0][2]) - 1.0).abs() < 1e-12);
+    // Over the library: identical spectra score 1, and the score is symmetric.
+    let r = rows(run(
+        &mut db,
+        "SELECT id, SPEC_ENTROPY(spec, spec, 0.01) AS s, SPEC_ENTROPY(spec, [[100.0], [2.0]], 0.01) AS x FROM lib ORDER BY id",
+    ));
+    for row in &r {
+        assert!((f64v(&row[1]) - 1.0).abs() < 1e-12);
+    }
+    assert!((f64v(&r[3][2]) - 1.0).abs() < 1e-12);
+    let e = run_err(
+        &mut db,
+        "SELECT SPEC_ENTROPY(spec, spec, 0.01, 1) AS s FROM lib",
+    );
+    assert!(e.contains("argument 4 must be true or false"), "{}", e);
+    let e = run_err(
+        &mut db,
+        "SELECT SPEC_ENTROPY(spec, [[100.0], [-1.0]], 0.01) AS s FROM lib",
+    );
+    assert!(e.contains("negative intensity"), "{}", e);
+}
+
+#[test]
+fn spec_clean_in_select_update_and_dataset_from() {
+    let (_dir, mut db) = db();
+    run(
+        &mut db,
+        "DATASET raw COLUMNS (id: Int, pm: DOUBLE, spec: Matrix(2, *))",
+    );
+    // 50 below the 1% floor, 260 above precursor + 2.
+    run(
+        &mut db,
+        "INSERT INTO raw VALUES (1, 250.0, [[50.0, 100.0, 150.0, 260.0], [0.5, 100.0, 25.0, 80.0]])",
+    );
+    run(
+        &mut db,
+        "INSERT INTO raw VALUES (2, 500.0, [[100.0, 100.01, 300.0], [1.0, 3.0, 4.0]])",
+    );
+    let r = rows(run(
+        &mut db,
+        "SELECT id, SPEC_CLEAN(spec, pm) AS c, SPEC_CLEAN(spec, pm, 0.0, 1, 2.0, 0.5, 'sum') AS top, SPEC_CLEAN(spec, pm, 0.0, 0, 2.0, 1.0, 'none', 0.05) AS cent FROM raw ORDER BY id",
+    ));
+    assert_eq!(matrix(&r[0][1]), vec![vec![100.0, 150.0], vec![1.0, 0.25]]);
+    assert_eq!(matrix(&r[0][2]), vec![vec![100.0], vec![1.0]]);
+    // Rows of different widths in one computed column.
+    assert_eq!(matrix(&r[1][1])[0].len(), 3);
+    let cent = matrix(&r[1][3]);
+    assert_eq!(cent[1], vec![4.0, 4.0]);
+    assert!((cent[0][0] - 100.0075).abs() < 1e-4);
+    // Everything filtered: an empty peak list, not NULL.
+    let r = rows(run(
+        &mut db,
+        "SELECT SPEC_CLEAN(spec, 0.0, 0.01, 0, 0.0) AS c FROM raw WHERE id = 1",
+    ));
+    assert_eq!(matrix(&r[0][0]), vec![Vec::<f32>::new(), Vec::new()]);
+
+    run(
+        &mut db,
+        "DATASET cleaned FROM raw SELECT id, SPEC_CLEAN(spec, pm, 0.01, 0, 2.0, 0.5) AS spec",
+    );
+    let r = rows(run(&mut db, "SELECT spec FROM cleaned ORDER BY id"));
+    assert_eq!(matrix(&r[0][0])[0], vec![100.0, 150.0]);
+    assert!((matrix(&r[0][0])[1][1] - 0.5).abs() < 1e-6);
+    // Lineage records the transform with its parameters.
+    match run(&mut db, "EXPLAIN LINEAGE cleaned AS JSON") {
+        DslOutput::Message(m) => assert!(
+            m.contains("SPEC_CLEAN(spec, pm, 0.01, 0, 2, 0.5) AS spec"),
+            "{}",
+            m
+        ),
+        other => panic!("{:?}", other),
+    }
+    run(&mut db, "UPDATE raw SET spec = SPEC_CLEAN(spec, pm)");
+    let r = rows(run(&mut db, "SELECT spec FROM raw WHERE id = 1"));
+    assert_eq!(matrix(&r[0][0]), vec![vec![100.0, 150.0], vec![1.0, 0.25]]);
+
+    let e = run_err(&mut db, "SELECT SPEC_CLEAN(spec, pm, 2.0) AS c FROM raw");
+    assert!(e.contains("floor must be between 0 and 1"), "{}", e);
+    let e = run_err(
+        &mut db,
+        "SELECT SPEC_CLEAN(spec, pm, 0.01, 0, 2.0, 1.0, 'median') AS c FROM raw",
+    );
+    assert!(e.contains("'max', 'sum' or 'none'"), "{}", e);
+    let e = run_err(
+        &mut db,
+        "SELECT SPEC_CLEAN(spec, pm, 0.01, 1.5) AS c FROM raw",
+    );
+    assert!(
+        e.contains("max_peaks must be a non-negative integer"),
+        "{}",
+        e
+    );
+    let e = run_err(&mut db, "SELECT SPEC_CLEAN(spec) AS c FROM raw");
+    assert!(e.contains("takes 2 to 8 arguments"), "{}", e);
+}

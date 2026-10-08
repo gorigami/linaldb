@@ -297,6 +297,17 @@ SEARCH lib ON e QUERIES q.e PREFILTER mass < 500.0 APPROX LIMIT 25
 DATASET cands COLUMNS (id: Int, fp: BitVector(2048), spec: Matrix(2, *))
 SELECT id, TANIMOTO(fp, CAST("0110...1" AS BITVECTOR(2048))) AS t FROM cands ORDER BY t DESC LIMIT 25
 SELECT id, SPEC_COSINE(spec, [[101.05, 150.2], [1.0, 0.4]], 0.01, 0, 0.5) AS s FROM cands
+-- Shared preprocessing and entropy similarity (checked against ms_entropy)
+UPDATE cands SET spec = SPEC_CLEAN(spec, 400.0, 0.01, 0, 2.0, 1.0, 'sum', 0.04)
+SELECT id, SPEC_ENTROPY(spec, [[101.05, 150.2], [1.0, 0.4]], 0.02) AS s FROM cands
+-- Small hit rows: only the columns you need
+SEARCH library ON e QUERIES queries.e KEY spectrum RETURN id, mass LIMIT 25 INTO hits
+```
+
+```python
+# Peak lists straight from two list<float64> columns, built in Rust; a run manifest
+db.load_arrow("lib", table, peaks={"peaks": ("ms2_mzs", "ms2_intensities")}, cast="f32")
+json.dump(db.lineage("hits"), open("hits.json", "w"))   # later: ASSERT LINEAGE hits MATCHES 'hits.json'
 ```
 
 ```sql

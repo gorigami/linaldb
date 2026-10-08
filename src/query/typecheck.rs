@@ -61,9 +61,18 @@ pub fn check_expr(expr: &Expr, schema: &Schema) -> Result<(), String> {
             VectorFnKind::SpecCosine => Some(("SPEC_COSINE", 3, 5)),
             VectorFnKind::SpecCosineMod => Some(("SPEC_COSINE_MOD", 4, 6)),
             VectorFnKind::SpecMatches => Some(("SPEC_MATCHES", 3, 4)),
+            VectorFnKind::SpecEntropy => Some(("SPEC_ENTROPY", 3, 4)),
+            VectorFnKind::SpecClean => Some(("SPEC_CLEAN", 2, 8)),
             _ => None,
         };
         if let Some((name, min, max)) = spec {
+            // How many leading arguments are peak lists, and which
+            // (1-based) argument is a Bool / a String instead of a number.
+            let (peak_args, bool_arg, string_arg) = match func {
+                VectorFnKind::SpecClean => (1, 0, 7),
+                VectorFnKind::SpecEntropy => (2, 4, 0),
+                _ => (2, 0, 0),
+            };
             if args.len() < min || args.len() > max {
                 return Err(format!(
                     "{} takes {} to {} arguments, got {}",
@@ -75,8 +84,12 @@ pub fn check_expr(expr: &Expr, schema: &Schema) -> Result<(), String> {
             }
             for (i, arg) in args.iter().enumerate() {
                 let t = infer_expr_type_full(arg, schema);
-                let ok = if i < 2 {
+                let ok = if i < peak_args {
                     matches!(t, ValueType::Matrix(2, _) | ValueType::Null)
+                } else if i + 1 == bool_arg {
+                    matches!(t, ValueType::Bool | ValueType::Null)
+                } else if i + 1 == string_arg {
+                    matches!(t, ValueType::String | ValueType::Null)
                 } else {
                     matches!(
                         t,
@@ -84,8 +97,12 @@ pub fn check_expr(expr: &Expr, schema: &Schema) -> Result<(), String> {
                     )
                 };
                 if !ok {
-                    let expected = if i < 2 {
+                    let expected = if i < peak_args {
                         "a peak list Matrix(2, n)"
+                    } else if i + 1 == bool_arg {
+                        "true or false"
+                    } else if i + 1 == string_arg {
+                        "'max', 'sum' or 'none'"
                     } else {
                         "a number"
                     };

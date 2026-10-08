@@ -598,6 +598,39 @@ pub fn execute_statement(
         }
 
         // ── Provenance maintenance ──────────────────────────────────────────
+        Statement::AssertLineage(s) => {
+            let fail = |msg: String| DslError::Engine {
+                line: line_no,
+                source: crate::engine::EngineError::InvalidOp(msg),
+            };
+            let text = std::fs::read_to_string(&s.path)
+                .map_err(|e| fail(format!("ASSERT LINEAGE: cannot read '{}': {}", s.path, e)))?;
+            let expected: crate::core::provenance::ProvenanceTree = serde_json::from_str(&text)
+                .map_err(|e| {
+                    fail(format!(
+                        "ASSERT LINEAGE: '{}' is not an EXPLAIN LINEAGE ... AS JSON output: {}",
+                        s.path, e
+                    ))
+                })?;
+            let actual = show::resolve_lineage_tree(db, &s.name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            let mismatches = actual.mismatches(&expected);
+            if !mismatches.is_empty() {
+                return Err(fail(format!(
+                    "ASSERT LINEAGE {} MATCHES '{}' failed:\n  {}",
+                    s.name,
+                    s.path,
+                    mismatches.join("\n  ")
+                )));
+            }
+            Ok(DslOutput::Message(format!(
+                "Lineage of '{}' matches '{}'",
+                s.name, s.path
+            )))
+        }
+
         Statement::PruneLineage(s) => {
             let cutoff = chrono::DateTime::parse_from_rfc3339(&s.before)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -685,9 +718,13 @@ fn record_search_provenance(
     let output = db.get_dataset(target).map_err(engine_err)?.content_hash();
     let record = ProvenanceRecord::new("SEARCH", crate::core::tensor::ExecutionId::new())
         .with_param("column", s.column.clone())
-        .with_param("k", s.top_k)
-        .with_inputs(inputs)
-        .with_outputs(vec![ProvenanceEntity::dataset(target.to_string(), output)]);
+        .with_param("k", s.top_k);
+    let record = match &s.returning {
+        Some(cols) => record.with_param("return", cols.clone()),
+        None => record,
+    }
+    .with_inputs(inputs)
+    .with_outputs(vec![ProvenanceEntity::dataset(target.to_string(), output)]);
     db.active_instance_mut().record_provenance(record);
     Ok(())
 }

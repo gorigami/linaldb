@@ -1126,6 +1126,7 @@ impl Parser {
                 filter: None,
                 prefilter: None,
                 approx: false,
+                returning: None,
                 target: Some(first),
             }))
         } else if self.at(&Token::Where) {
@@ -1144,6 +1145,7 @@ impl Parser {
                 filter: None,
                 prefilter: None,
                 approx: false,
+                returning: None,
                 target: None,
             }))
         } else {
@@ -1202,6 +1204,23 @@ impl Parser {
             if approx {
                 self.advance();
             }
+            // RETURN col, ... | RETURN NONE: which dataset columns each hit carries.
+            let returning = if self.at_ident("RETURN") {
+                self.advance();
+                if self.at_ident("NONE") {
+                    self.advance();
+                    Some(Vec::new())
+                } else {
+                    let mut cols = vec![self.eat_ident()?];
+                    while self.at(&Token::Comma) {
+                        self.advance();
+                        cols.push(self.eat_ident()?);
+                    }
+                    Some(cols)
+                }
+            } else {
+                None
+            };
             self.eat(&Token::Limit)?;
             let top_k = self.eat_usize()?;
             // FILTER, not WHERE: WHERE is already claimed by this statement's
@@ -1228,6 +1247,7 @@ impl Parser {
                 filter,
                 prefilter,
                 approx,
+                returning,
                 target,
             }))
         }

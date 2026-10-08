@@ -20,6 +20,34 @@ pub(super) fn execute_create_dataset_from(
 ) -> Result<DslOutput, DslError> {
     let source_name = clause.source.clone();
     let had_group_by = !clause.group_by.is_empty();
+    // What lineage records about the transform: the select list and filter
+    // as text, so e.g. `SPEC_CLEAN(spec, pm, 0.01, 50)` and its parameters
+    // show up in `EXPLAIN LINEAGE`.
+    let as_alias = |text: String, alias: &Option<String>| match alias {
+        Some(a) => format!("{} AS {}", text, a),
+        None => text,
+    };
+    let select_text: Option<Vec<String>> = clause.select.as_ref().map(|exprs| {
+        exprs
+            .iter()
+            .map(|e| match e {
+                SelectExpr::Column(c) => c.clone(),
+                SelectExpr::Computed { expr, alias } => {
+                    as_alias(super::eval::expr_to_string(expr), alias)
+                }
+                SelectExpr::Aggregate { func, expr, alias } => as_alias(
+                    format!(
+                        "{}({})",
+                        format!("{:?}", func).to_uppercase(),
+                        super::eval::expr_to_string(expr)
+                    ),
+                    alias,
+                ),
+                SelectExpr::Window { alias, .. } => alias.clone(),
+            })
+            .collect()
+    });
+    let filter_text = clause.filter.as_ref().map(super::eval::expr_to_string);
     // Delegate to `execute_select` instead of re-deriving a LogicalPlan by
     // hand: the hand-rolled version here used to build its own Project/
     // Aggregate plan directly from `clause.select` and only ever kept
@@ -99,7 +127,15 @@ pub(super) fn execute_create_dataset_from(
         operation,
         crate::core::tensor::ExecutionId::new(),
     )
-    .with_param("source", source_name)
+    .with_param("source", source_name);
+    let record = match select_text {
+        Some(cols) => record.with_param("select", cols),
+        None => record,
+    };
+    let record = match filter_text {
+        Some(f) => record.with_param("filter", f),
+        None => record,
+    }
     .with_inputs(inputs)
     .with_outputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
         name,
@@ -198,6 +234,34 @@ pub(super) fn search_plan(
         )));
     }
     let is_batch = matches!(s.query, SearchQuery::Batch { .. });
+    // RETURN: the dataset columns each hit carries, in the order given.
+    let projection: Option<Vec<usize>> = match &s.returning {
+        None => None,
+        Some(cols) if cols.is_empty() && !is_batch => {
+            return Err(invalid(
+                "SEARCH: RETURN NONE needs a batch (QUERIES ...): a single-query SEARCH returns the dataset's own rows, so name at least one column".to_string(),
+            ))
+        }
+        Some(cols) => {
+            let mut idx = Vec::with_capacity(cols.len());
+            for c in cols {
+                let i = schema.get_field_index(c).ok_or_else(|| {
+                    invalid(format!(
+                        "SEARCH ... RETURN: unknown column '{}' in dataset '{}'",
+                        c, s.dataset
+                    ))
+                })?;
+                if idx.contains(&i) {
+                    return Err(invalid(format!(
+                        "SEARCH ... RETURN: column '{}' is listed twice",
+                        c
+                    )));
+                }
+                idx.push(i);
+            }
+            Some(idx)
+        }
+    };
     if !is_batch && s.prefilter.is_none() {
         let plan = LogicalPlan::VectorSearch {
             input: Box::new(LogicalPlan::Scan {
@@ -208,7 +272,19 @@ pub(super) fn search_plan(
             query: single_query(db)?,
             k: s.top_k,
         };
-        return Ok((plan, schema));
+        return Ok(match (&s.returning, &projection) {
+            (Some(cols), Some(idx)) => {
+                let fields = idx.iter().map(|&i| schema.fields[i].clone()).collect();
+                (
+                    LogicalPlan::Project {
+                        input: Box::new(plan),
+                        columns: cols.clone(),
+                    },
+                    Arc::new(crate::core::tuple::Schema::new(fields)),
+                )
+            }
+            _ => (plan, schema),
+        });
     }
 
     // Batch queries, and any PREFILTER search (a single query runs as a
@@ -267,7 +343,11 @@ pub(super) fn search_plan(
     } else {
         Vec::new()
     };
-    for f in &schema.fields {
+    let kept: Vec<usize> = match &projection {
+        Some(idx) => idx.clone(),
+        None => (0..schema.fields.len()).collect(),
+    };
+    for f in kept.iter().map(|&i| &schema.fields[i]) {
         if fields.iter().any(|g| g.name == f.name) {
             return Err(invalid(format!(
                 "SEARCH QUERIES: dataset '{}' has a column named '{}', which collides with the batch result column of the same name -- rename it first",
@@ -293,6 +373,7 @@ pub(super) fn search_plan(
         schema: out_schema.clone(),
         prefilter,
         rows_only: !is_batch,
+        projection,
     };
     Ok((plan, out_schema))
 }
@@ -1257,6 +1338,8 @@ fn infer_expr_result_type(expr: &Expr) -> ValueType {
             VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
             VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
             VectorFnKind::SpecMatches => ValueType::Int,
+            VectorFnKind::SpecEntropy => ValueType::Float64,
+            VectorFnKind::SpecClean => ValueType::Matrix(2, 0),
             VectorFnKind::SparseNew => ValueType::SparseVector(0),
         },
         _ => ValueType::Float,
@@ -1316,11 +1399,29 @@ fn apply_window_and_computed_exprs(
                         source: crate::engine::EngineError::InvalidOp(e),
                     });
                 }
-                let vtype = vals
+                let mut vtype = vals
                     .iter()
                     .find(|v| !matches!(v, Value::Null))
                     .map(|v| v.value_type())
                     .unwrap_or(fallback_vtype);
+                // Rows of different widths (e.g. `SPEC_CLEAN` peak lists):
+                // the column is `Matrix(r, *)` / `Vector(*)`. Typing it by
+                // the first row made every other row fail validation and
+                // silently lose the column.
+                let widths_differ = |t: &ValueType| {
+                    vals.iter()
+                        .filter(|v| !v.is_null())
+                        .any(|v| v.value_type() != *t)
+                };
+                match vtype {
+                    ValueType::Matrix(r, c) if c != 0 && widths_differ(&vtype) => {
+                        vtype = ValueType::Matrix(r, 0)
+                    }
+                    ValueType::Vector(d) if d != 0 && widths_differ(&vtype) => {
+                        vtype = ValueType::Vector(0)
+                    }
+                    _ => {}
+                }
 
                 rows = rows
                     .into_iter()
@@ -2375,6 +2476,8 @@ pub(super) fn dsl_expr_to_logical_expr(
                 VectorFnKind::SpecCosine => LVk::SpecCosine,
                 VectorFnKind::SpecCosineMod => LVk::SpecCosineMod,
                 VectorFnKind::SpecMatches => LVk::SpecMatches,
+                VectorFnKind::SpecEntropy => LVk::SpecEntropy,
+                VectorFnKind::SpecClean => LVk::SpecClean,
                 VectorFnKind::SparseNew => LVk::SparseNew,
             };
             LogicalExpr::VectorFn {

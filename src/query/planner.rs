@@ -172,6 +172,7 @@ impl<'a> Planner<'a> {
                 schema,
                 prefilter,
                 rows_only,
+                projection,
             } => {
                 let resolved_index_type = self
                     .db
@@ -187,6 +188,7 @@ impl<'a> Planner<'a> {
                     schema: schema.clone(),
                     prefilter: prefilter.clone(),
                     rows_only: *rows_only,
+                    projection: projection.clone(),
                     resolved_index_type,
                 }))
             }

@@ -6,6 +6,6 @@ pub mod kernels;
 pub mod operations;
 pub mod wal;
 
-pub use db::{PipelineRegistry, TensorDb};
+pub use db::{PeakColumns, PeakLoad, PipelineRegistry, TensorDb};
 pub use error::EngineError;
 pub use operations::{BinaryOp, TensorKind, UnaryOp};

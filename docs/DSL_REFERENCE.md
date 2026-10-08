@@ -397,6 +397,46 @@ FROM library JOIN queries ON library.k = queries.k
 ORDER BY score DESC
 ```
 
+#### Entropy similarity: `SPEC_ENTROPY`
+
+| Function | Returns | Description |
+|---|---|---|
+| `SPEC_ENTROPY(a, b, tolerance [, weighted])` | `Double` | Entropy similarity (Li et al., *Nature Methods* 18, 1524–1531, 2021), in [0, 1]; 1 for identical spectra. `weighted` (default `true`) applies the paper's entropy-based intensity weighting |
+
+- Each spectrum's intensities are scaled to sum to 1 (and, when `weighted`, a spectrum with entropy `H < 3` has every intensity raised to `0.25 + 0.25·H` and is rescaled). Peaks pair one-to-one by a sweep over the ascending m/z values (a pair when they differ by at most `tolerance` Da), and the score is `Σ [f(pa+pb) − f(pa) − f(pb)] / 2` over the pairs, with `f(x) = x·log2(x)`. Symmetric.
+- This is `ms_entropy.calculate_entropy_similarity(a, b, tolerance, clean_spectra=False)` (and `calculate_unweighted_entropy_similarity` for `weighted = false`). Like `ms_entropy`, it expects **centroided** spectra -- no two peaks of one spectrum within `2 · tolerance`. Clean them first with `SPEC_CLEAN` below, passing `min_distance` = 2 · `tolerance`: `SPEC_ENTROPY(SPEC_CLEAN(a, ..., 'sum', 2·tol), SPEC_CLEAN(b, ..., 'sum', 2·tol), tol)` is `ms_entropy`'s default call, which cleans internally.
+- Agreement: equal to a 64-bit port of `ms_entropy`'s algorithm to 1e-15, and to `ms_entropy` itself to 3e-7 (`ms_entropy` computes in 32-bit floats), over 300 pairs (identical, noisy, partly overlapping, disjoint, single-peak).
+- A spectrum with no peaks or all-zero intensities scores 0. A negative intensity, unsorted m/z, a non-finite value or a negative tolerance is an error with the row. Only Da tolerances (no ppm).
+
+#### Preprocessing: `SPEC_CLEAN`
+
+| Function | Returns | Description |
+|---|---|---|
+| `SPEC_CLEAN(peaks, precursor_mz [, floor, max_peaks, above_precursor, power, normalize, min_distance])` | `Matrix(2, *)` | The peak list after the cleaning chain below |
+
+Arguments are positional; defaults: `floor` 0.01, `max_peaks` 0 (keep all), `above_precursor` 2.0, `power` 1.0, `normalize` `'max'`, `min_distance` 0 (no centroiding). The steps, in order:
+
+1. drop peaks with m/z ≤ 0 or intensity ≤ 0;
+2. drop peaks with m/z above `precursor_mz + above_precursor` (a negative `above_precursor`, e.g. `-1.6`, also drops peaks just below the precursor);
+3. with `min_distance` > 0, centroid: from the most intense peak down, merge every peak within `min_distance` Da of it into one peak at the intensity-weighted mean m/z carrying the summed intensity, until no two peaks are closer than `min_distance`;
+4. drop peaks below `floor` × the highest intensity;
+5. keep the `max_peaks` most intense (ties keep the higher m/z);
+6. raise intensities to `power` (`0.5` = square root);
+7. normalize: `'max'` (highest = 1), `'sum'` (sum = 1) or `'none'`.
+
+- Steps 1–5 with `normalize = 'sum'` are `ms_entropy.clean_spectrum` (`max_mz`, `noise_threshold`, `min_ms2_difference_in_da`, `max_peak_num`), and agree with it to 1e-7. Without centroiding and with `'max'`, it equals matchms' `select_by_mz` → `select_by_relative_intensity` → `reduce_to_number_of_peaks` → `normalize_intensities` chain (with `power` applied after selection).
+- Use it in `SELECT`, `UPDATE ... SET spec = SPEC_CLEAN(spec, pm)` or `DATASET cleaned FROM raw SELECT id, SPEC_CLEAN(spec, pm) AS spec`, so the library and the queries get the same preprocessing and lineage records it. If every peak is filtered out the result is an empty peak list, not `NULL`; a `NULL` argument gives `NULL`.
+- Errors: `floor` outside [0, 1], a non-integer or negative `max_peaks`, a non-positive `power`, a negative `min_distance`, an unknown `normalize`, or bad peaks (with the row).
+
+```sql
+-- CASMI-style: 1% floor, top 50 peaks, sqrt intensities, nothing above precursor + 2 Da
+UPDATE library SET spec = SPEC_CLEAN(spec, precursor_mz, 0.01, 50, 2.0, 0.5)
+-- Entropy match on centroided spectra (tolerance 0.02 Da, so min_distance 0.04)
+DATASET lib_c FROM library SELECT id, pm, k, SPEC_CLEAN(spec, pm, 0.01, 0, 2.0, 1.0, 'sum', 0.04) AS spec
+DATASET q_c FROM queries SELECT qid, qpm, k, SPEC_CLEAN(qspec, qpm, 0.01, 0, 2.0, 1.0, 'sum', 0.04) AS qspec
+SELECT id, qid, SPEC_ENTROPY(spec, qspec, 0.02) AS s FROM lib_c JOIN q_c ON lib_c.k = q_c.k ORDER BY s DESC
+```
+
 **Typical similarity search**:
 
 ```sql
@@ -717,7 +757,18 @@ map like the engine's own Parquet packages (`int64`/`int32` → `Int`, `float32`
 `float64` → `Float64`, `string` → `String`, `bool` → `Bool`, `fixed_size_list<float32>` →
 `Vector(d)`, nested → `Matrix(r, c)`); any other type, a `NaN`/infinite value, or an existing
 dataset name is an error naming the column and row. Values load bit-exact. The load appears in
-`EXPLAIN LINEAGE` as `LOAD FROM MEMORY` with its origin and the dataset's content hash. With the
+`EXPLAIN LINEAGE` as `LOAD FROM MEMORY` with its origin and the dataset's content hash.
+
+**Peak lists from two list columns.** Spectra often arrive as two variable-length columns (m/z
+values and intensities, `list<float64>`). `Db.load_arrow(name, table, peaks={"peaks": ("ms2_mzs",
+"ms2_intensities")}, cast="f32")` combines each pair into one `Matrix(2, *)` column in Rust
+(`TensorDb::load_record_batch_with_peaks`), placed where the m/z column was; the two source
+columns are dropped. Per row both lists must be present (or both `NULL`, giving a `NULL`
+spectrum), of equal length, finite, and with ascending m/z -- `sort=True` sorts the pairs instead.
+`float64` lists are rejected unless `cast="f32"` asks for them to be rounded to `float32`, the
+only precision peak lists have. The result is identical to building the column with
+`linaldb.peaks_array()` (same content hash); 2.5M spectra / 75M peaks load in about 12 s on an
+M-series laptop. Lineage records the source columns, the cast and whether peaks were sorted. With the
 write-ahead log enabled, a checkpoint is taken right after the load, because the log only
 replays DSL statements.
 
@@ -884,7 +935,7 @@ SEARCH library ON embedding QUERIES queries.embedding KEY spectrum_id LIMIT 25
 SEARCH library ON embedding QUERIES query_matrix LIMIT 25 FILTER rank <= 5 INTO hits
 ```
 
-- `SEARCH <dataset> ON <column> QUERIES <matrix> | <dataset>.<column> [KEY <column>] LIMIT <k> [FILTER <predicate>] [INTO <target>]`
+- `SEARCH <dataset> ON <column> QUERIES <matrix> | <dataset>.<column> [KEY <column>] [PREFILTER <predicate> [APPROX]] [RETURN <columns> | RETURN NONE] LIMIT <k> [FILTER <predicate>] [INTO <target>]`
 - The queries are the rows of a 2-D `Matrix` tensor, or the vectors in a dataset column. Each
   must have the indexed column's dimension.
 - The result has one row per (query, hit): `query_id`, `rank` (1-based), `score` (cosine
@@ -904,6 +955,24 @@ SEARCH library ON embedding QUERIES query_matrix LIMIT 25 FILTER rank <= 5 INTO 
   columns and is an error; rename it first.
 - `EXPLAIN SEARCH ... QUERIES ...` shows `BatchVectorSearchExec` with the query count and the
   index type it uses.
+
+#### Result columns: `RETURN`
+
+By default every hit carries every column of the searched dataset, including its vectors or peak
+lists. `RETURN` (right before `LIMIT`) keeps only the columns you name, in that order:
+
+```sql
+SEARCH library ON embedding QUERIES q.embedding KEY qid PREFILTER mass BETWEEN q.lo AND q.hi RETURN inchikey, mass LIMIT 50
+SEARCH library ON embedding QUERIES q.embedding KEY qid RETURN NONE LIMIT 50 INTO hits
+SEARCH library ON embedding QUERY [0.9, 0.1, 0.0] RETURN id LIMIT 10
+```
+
+- The hits (`query_id`, `rank`, `score`, `row_id`) are the same as without `RETURN`; only the
+  copied columns change. `RETURN NONE` (batch only) keeps just those four.
+- A single-query `SEARCH` returns only the named dataset columns.
+- `FILTER` and `INTO` see the projected columns; `INTO` stores only them, and lineage records
+  the projection (`"return"` in the `SEARCH` step's parameters).
+- An unknown or repeated column is an error.
 
 All three forms **require a `CREATE VECTOR INDEX` on `<column>` first** — `SEARCH` always executes as an index-accelerated lookup and errors if no vector index exists on the target column. For ad hoc similarity scoring without a prebuilt index, use `COSINE_SIM` directly in `SELECT`/`WHERE`/`ORDER BY` (§4) instead — that's the more common pattern for one-off queries; `SEARCH` is specifically for index-accelerated top-k retrieval.
 
@@ -1042,7 +1111,8 @@ SHOW "--- Begin training phase ---"
 ### Lineage & Provenance
 
 - `EXPLAIN LINEAGE <name>`: Show the real, persisted derivation ancestry for a tensor or dataset — a genuinely different thing from `EXPLAIN <target>` above (that shows a *query plan*; this shows *how the data actually got here*: every `IMPORT`, `DATASET ... FROM`, `ADD COMPUTED COLUMN`, tensor op, and `SAVE`, in order). Resolves `<name>` against tensor names first, then dataset names. Survives a restart: ancestry is read from a persisted, content-hash-addressed provenance log (`{data_dir}/{db}/provenance.jsonl`), not just the current session's in-memory state, so it still works on a dataset you just `LOAD`ed fresh. A name with no recorded history (e.g. one that predates this feature) resolves as a single `ROOT` node rather than erroring.
-  - `EXPLAIN LINEAGE <name> AS JSON`: same ancestry, as JSON, for programmatic or compliance consumption.
+  - `EXPLAIN LINEAGE <name> AS JSON`: same ancestry, as JSON, for programmatic or compliance consumption. Each node has its entity (name and content hash), the operation that produced it, its parameters and its inputs. A step that produced one dataset records its row count (`"rows"`); loads record their origin (`"origin"`, or `"path"` for `IMPORT`); `DATASET ... FROM` records its select list and filter as text (`"select"`, `"filter"`), so a transform such as `SPEC_CLEAN(spec, pm, 0.01, 50)` is visible with its parameters. In Python, `Db.lineage(name)` returns this as a dict. Saved to a file, it is a run manifest:
+- `ASSERT LINEAGE <name> MATCHES '<file.json>'`: fails unless every entity recorded in the file (an `EXPLAIN LINEAGE ... AS JSON` output) is still in `<name>`'s lineage with the same content hash. The error lists each difference, sources first (`source 'lib' changed: expected hash 72596d415bcf, now 488481ea3336`, then the derived steps it affected). Timestamps, execution ids and parameters are not compared, so a re-run over identical inputs -- in the same database or a fresh one -- passes. The path is read as given (relative to the working directory).
   - `SHOW LINEAGE <name>` is a working, documented-as-superseded alias for the text-tree form.
 - `PRUNE LINEAGE BEFORE <RFC3339 timestamp string>`: Compact the provenance log by removing records older than the given cutoff (e.g. `PRUNE LINEAGE BEFORE "2026-01-01T00:00:00Z"`) — a maintenance operation for long-running/edge deployments where `provenance.jsonl` would otherwise grow unbounded. **Never removes a record still needed to resolve `EXPLAIN LINEAGE` for a currently-live tensor or dataset**, no matter how old it is — this is not a blind time-window truncation. Records that are old enough to prune but are still reachable from something live are kept and counted separately in the output message (`"... N retained because a live tensor/dataset's lineage still needs them ..."`), so the message always reflects exactly what happened rather than overclaiming a full prune. A malformed timestamp is a loud parse error, not a silent no-op.
 - `AUDIT DATASET <name>`: Perform a deep **referential-integrity** health check — detects dangling tensor references in a dataset's columns. This is unrelated to derivation history despite the naming similarity: `AUDIT DATASET` answers "do this dataset's column references still resolve?"; `EXPLAIN LINEAGE` answers "how was this data derived?". Use `EXPLAIN LINEAGE`, not `AUDIT DATASET`, to inspect provenance. **Only works on tensor-first datasets** (built via the `dataset()` constructor, §2) — it errors `Tensor dataset '<name>' not found` against an ordinary `DATASET <name> COLUMNS (...)` (legacy relational) dataset, even one that exists and works fine with `SHOW`/`SELECT`/etc. Almost every other example in this reference uses the legacy form, so this is easy to hit by surprise.

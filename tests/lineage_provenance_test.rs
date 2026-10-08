@@ -462,3 +462,75 @@ fn prune_lineage_does_not_misattribute_a_multi_output_binding_on_a_real_content_
 
     let _ = fs::remove_dir_all(&data_dir);
 }
+
+// ── Run manifest: row counts + ASSERT LINEAGE (CASMI_WORKLOADS_PLAN_2.md, P15) ──
+
+fn manifest_run(dir: &std::path::Path, second_mass: &str) -> TensorDb {
+    let mut config = EngineConfig::default();
+    config.storage.data_dir = dir.to_path_buf();
+    let mut db = TensorDb::with_config(config);
+    for line in [
+        "DATASET lib COLUMNS (id: Int, mass: Float)".to_string(),
+        "INSERT INTO lib VALUES (1, 100.0)".to_string(),
+        format!("INSERT INTO lib VALUES (2, {})", second_mass),
+        "DATASET light FROM lib FILTER mass < 200".to_string(),
+        "DATASET heavy FROM lib FILTER mass >= 200".to_string(),
+    ] {
+        expect_ok(execute_line(&mut db, &line, 1), &line);
+    }
+    db
+}
+
+#[test]
+fn explain_lineage_json_is_a_manifest_that_assert_lineage_checks() {
+    let scratch = tempfile::tempdir().unwrap();
+    let manifest = scratch.path().join("heavy.json");
+    {
+        let first = tempfile::tempdir().unwrap();
+        let mut db = manifest_run(first.path(), "300.0");
+        let json = expect_message(
+            execute_line(&mut db, "EXPLAIN LINEAGE heavy AS JSON", 1),
+            "explain",
+        );
+        let tree: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(tree["parameters"]["rows"], 1, "{}", json);
+        fs::write(&manifest, &json).unwrap();
+        let ok = expect_message(
+            execute_line(
+                &mut db,
+                &format!("ASSERT LINEAGE heavy MATCHES '{}'", manifest.display()),
+                1,
+            ),
+            "assert same db",
+        );
+        assert!(ok.contains("matches"), "{}", ok);
+    }
+    // A fresh run over identical inputs matches.
+    let again = tempfile::tempdir().unwrap();
+    let mut db = manifest_run(again.path(), "300.0");
+    let stmt = format!("ASSERT LINEAGE heavy MATCHES '{}'", manifest.display());
+    expect_message(execute_line(&mut db, &stmt, 1), "assert re-run");
+    // A changed input fails, naming the source first.
+    let changed = tempfile::tempdir().unwrap();
+    let mut db = manifest_run(changed.path(), "301.0");
+    let err = execute_line(&mut db, &stmt, 1).unwrap_err().to_string();
+    assert!(err.contains("source 'lib' changed"), "{}", err);
+    assert!(err.contains("derived 'heavy' changed"), "{}", err);
+    let lines: Vec<&str> = err.lines().collect();
+    assert!(lines[1].contains("source 'lib'"), "{}", err);
+    // A file that isn't a lineage export.
+    let bad = scratch.path().join("bad.json");
+    fs::write(&bad, "{\"x\": 1}").unwrap();
+    let err = execute_line(
+        &mut db,
+        &format!("ASSERT LINEAGE heavy MATCHES '{}'", bad.display()),
+        1,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("is not an EXPLAIN LINEAGE"), "{}", err);
+    let err = execute_line(&mut db, "ASSERT LINEAGE heavy '/x.json'", 1)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expected MATCHES"), "{}", err);
+}

@@ -363,6 +363,7 @@ impl Parser {
                 Ok(Statement::Checkpoint)
             }
             Some(Token::Prune) => self.parse_prune_lineage(),
+            Some(Token::Ident(s)) if s == "ASSERT" => self.parse_assert_lineage(),
             Some(Token::Ident(_)) if self.peek_at(1) == Some(&Token::Dot) => {
                 self.parse_method_call()
             }

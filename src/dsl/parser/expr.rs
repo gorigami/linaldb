@@ -601,7 +601,7 @@ impl Parser {
                     "L2_NORM" | "COSINE_SIM" | "DOT" | "VEC_ADD" | "VEC_SCALE" | "MAT_SHAPE"
                     | "REAL" | "IMAG" | "ABS" | "PHASE" | "CONJ" | "COMPLEX" | "TANIMOTO"
                     | "JACCARD" | "HAMMING" | "BIT_COUNT" | "SPEC_COSINE" | "SPEC_COSINE_MOD"
-                    | "SPEC_MATCHES" | "SPARSE"
+                    | "SPEC_MATCHES" | "SPEC_ENTROPY" | "SPEC_CLEAN" | "SPARSE"
                         if self.at(&Token::LParen) =>
                     {
                         let func = match upper.as_str() {
@@ -624,6 +624,8 @@ impl Parser {
                             "SPEC_COSINE" => VectorFnKind::SpecCosine,
                             "SPEC_COSINE_MOD" => VectorFnKind::SpecCosineMod,
                             "SPEC_MATCHES" => VectorFnKind::SpecMatches,
+                            "SPEC_ENTROPY" => VectorFnKind::SpecEntropy,
+                            "SPEC_CLEAN" => VectorFnKind::SpecClean,
                             "SPARSE" => VectorFnKind::SparseNew,
                             _ => unreachable!(),
                         };
