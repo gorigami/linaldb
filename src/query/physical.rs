@@ -880,10 +880,30 @@ impl PhysicalPlan for AggregateExec {
         let rows = self.input.execute(db)?;
         crate::query::row_error::clear();
 
-        // If no rows and no group by, return empty result set
-        // (Aggregations on empty sets typically return no rows, not NULL rows)
+        // No input rows: with GROUP BY there are no groups, so no output
+        // rows. Without it (a global aggregate) SQL returns exactly one row:
+        // COUNT is 0 and every other aggregate is NULL. Before v0.1.93 this
+        // returned no rows at all, so `SELECT COUNT(*) ... WHERE <nothing
+        // matches>` had no answer instead of 0.
         if rows.is_empty() {
-            return Ok(vec![]);
+            if !self.group_expr.is_empty() {
+                return Ok(vec![]);
+            }
+            use crate::core::value::Value;
+            let values = self
+                .aggr_expr
+                .iter()
+                .map(|e| match e {
+                    crate::query::logical::Expr::AggregateExpr {
+                        func: crate::query::logical::AggregateFunction::Count,
+                        ..
+                    } => Value::Int(0),
+                    _ => Value::Null,
+                })
+                .collect();
+            return Ok(vec![
+                Tuple::new(self.schema.clone(), values).map_err(EngineError::InvalidOp)?
+            ]);
         }
 
         // If no group by, global aggregation (1 group)

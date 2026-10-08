@@ -31,7 +31,7 @@ Defined with specific dimensionality:
 - `Matrix(R, C)`: A 2D tensor with `R` rows and `C` columns.
 - `Vector(N, F16)` / `Vector(N, I8)` (column type only): an opt-in **quantized** vector column. `F16` stores each element as IEEE half precision (2 bytes; values beyond ±65504 are an error); `I8` stores one signed byte per element plus one `Float` scale per vector (`scale = max|x| / 127`, element `= round(x / scale) * scale`). Values are quantized once, when they enter the column (`INSERT` of a vector literal, `UPDATE`, `CAST(... AS VECTOR(N, F16))`, loading); from then on the stored value is the value: `SELECT` returns it, and every expression (`COSINE_SIM`, `DOT`, ...) and vector index works on it as an ordinary `Vector(N)`, so index scores equal `COSINE_SIM` on the column. The vector payload takes half (F16) or a quarter (I8, plus 4 bytes) of the memory, in rows and in vector indexes. Measured top-10 recall of an HNSW search on 4,000 random 64-dimensional vectors against the exact answer on the original `f32` values: F16 1.000, I8 0.990 (the test suite requires at least 0.95 and 0.90). Columns without an encoding are never quantized.
 - `SparseVector(N)`: an `N`-dimensional vector storing only its nonzero entries (strictly increasing indices with their `Float` values), e.g. a finely binned spectrum. Insert a dense vector literal (zeros are dropped) or build one with `SPARSE(N, [indices], [values])`. `COSINE_SIM`, `DOT`, `L2_NORM`, `NORMALIZE` and `VEC_SCALE` accept it (also mixed with a dense `Vector(N)`) and give exactly the same result as on the dense equivalent. `CAST` converts to and from `VECTOR(N)`. Vector indexes don't accept it (an error says so); search it exactly with `SEARCH ... PREFILTER`. Stored in Parquet as a struct of index and value lists.
-- `Matrix(R, *)` (column type only): `R` rows whose length may differ from one cell to the next -- every row of a cell has the same length. The natural type for MS/MS spectra as peak lists: `Matrix(2, *)` with row 0 the m/z values (ascending) and row 1 the intensities, as used by `SPEC_COSINE` (§4). Stored natively in Parquet as `FixedSizeList<List<Float32>, R>`. Shown by `SHOW SCHEMA` as `MATRIX[R, 0]`.
+- `Matrix(R, *)` (column type only): `R` rows whose length may differ from one cell to the next -- every row of a cell has the same length. The natural type for MS/MS spectra as peak lists: `Matrix(2, *)` with row 0 the m/z values (ascending) and row 1 the intensities, as used by `SPEC_COSINE` (§4). Stored natively in Parquet as `FixedSizeList<List<Float32>, R>`. Shown by `SHOW SCHEMA` as `Matrix(R, *)`.
 - `Tensor(d1, d2, ...)`: An N-dimensional tensor.
 
 ---
@@ -438,6 +438,10 @@ SELECT user_id, SUM_VEC(event_vector) AS total
 FROM events
 GROUP BY user_id
 ```
+
+**Over no rows.** Without `GROUP BY`, an aggregate query returns exactly one row even when no
+row matches: `COUNT` is `0` and every other aggregate is `NULL` (as in SQL). With `GROUP BY`,
+no rows means no groups, so no output rows. (Before v0.1.93 the global case returned no rows.)
 
 ### Selection and Rank-Fusion Aggregates
 
@@ -890,6 +894,10 @@ SEARCH library ON embedding QUERIES query_matrix LIMIT 25 FILTER rank <= 5 INTO 
 - Each query runs exactly the search a single-query `SEARCH` would, on the same index, in
   parallel. With an IVF index above its clustering threshold that search is approximate, the
   same as single-query `SEARCH`.
+- **Ties.** Equal scores (e.g. duplicate vectors) are returned in row order -- lower row id
+  first -- by every search path: IVF, HNSW, and the exact `PREFILTER` ranking.
+- `SEARCH ... INTO <target>` records lineage: `EXPLAIN LINEAGE <target>` shows a `SEARCH` step
+  whose parents are the searched dataset and the queries' dataset or tensor.
 - `FILTER` is a post-filter, as for single-query `SEARCH`, and can use the result columns
   (`rank`, `score`, `query_id`) as well as the dataset's own.
 - A dataset column named `query_id`, `rank`, `score` or `row_id` collides with the result

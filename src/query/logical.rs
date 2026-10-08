@@ -401,7 +401,15 @@ impl LogicalPlan {
                             _ => {}
                         }
 
-                        fields.push(crate::core::tuple::Field::new(&name, typ));
+                        // Every aggregate but COUNT is NULL over an empty
+                        // input (a global aggregate still returns its one
+                        // row then), so its column is nullable.
+                        let field = crate::core::tuple::Field::new(&name, typ);
+                        fields.push(if matches!(func, AggregateFunction::Count) {
+                            field
+                        } else {
+                            field.nullable()
+                        });
                     }
                 }
                 Arc::new(Schema::new(fields))

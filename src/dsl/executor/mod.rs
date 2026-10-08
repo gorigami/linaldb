@@ -534,7 +534,7 @@ pub fn execute_statement(
         Statement::Search(s) => {
             let (result_schema, result_rows) = query::run_search(db, &s, line_no)?;
             let row_count = result_rows.len();
-            match s.target {
+            match s.target.clone() {
                 // No `INTO <target>`: return the top-k rows inline, matching
                 // DSL_REFERENCE.md §7 ("INTO <target> materializes the results
                 // as a new dataset instead of returning them inline") — this
@@ -559,6 +559,7 @@ pub fn execute_statement(
                         ds.rows = result_rows;
                         ds.metadata.update_stats(&ds.schema, &ds.rows);
                     }
+                    record_search_provenance(db, &s, &target, line_no)?;
                     Ok(DslOutput::Message(format!(
                         "Search completed. Found {} results in '{}'.",
                         row_count, target
@@ -643,6 +644,52 @@ fn to_engine_kind(k: TensorKindAst) -> TensorKind {
         TensorKindAst::Strict => TensorKind::Strict,
         TensorKindAst::Lazy => TensorKind::Lazy,
     }
+}
+
+/// Lineage for `SEARCH ... INTO <target>`: the searched dataset and the
+/// queries' source (a dataset for `QUERIES <ds>.<col>`, a tensor for
+/// `QUERY <tensor>` / `QUERIES <matrix>`) are its inputs. Before v0.1.93 the
+/// result was recorded as a lineage root with no parents.
+fn record_search_provenance(
+    db: &mut TensorDb,
+    s: &SearchStmt,
+    target: &str,
+    line_no: usize,
+) -> Result<(), DslError> {
+    use crate::core::provenance::{ProvenanceEntity, ProvenanceRecord};
+    let engine_err = |e| DslError::Engine {
+        line: line_no,
+        source: e,
+    };
+    let mut inputs = vec![ProvenanceEntity::dataset(
+        s.dataset.clone(),
+        db.get_dataset(&s.dataset)
+            .map_err(engine_err)?
+            .content_hash(),
+    )];
+    let query_source = match &s.query {
+        SearchQuery::Batch { source, .. } | SearchQuery::TensorRef(source) => Some(source.clone()),
+        SearchQuery::Inline(_) => None,
+    };
+    if let Some(name) = query_source {
+        if let Ok(ds) = db.get_dataset(&name) {
+            inputs.push(ProvenanceEntity::dataset(name.clone(), ds.content_hash()));
+        } else if let Ok(t) = db.get(&name) {
+            inputs.push(ProvenanceEntity::tensor(
+                t.id,
+                Some(name.clone()),
+                t.data_hash().to_string(),
+            ));
+        }
+    }
+    let output = db.get_dataset(target).map_err(engine_err)?.content_hash();
+    let record = ProvenanceRecord::new("SEARCH", crate::core::tensor::ExecutionId::new())
+        .with_param("column", s.column.clone())
+        .with_param("k", s.top_k)
+        .with_inputs(inputs)
+        .with_outputs(vec![ProvenanceEntity::dataset(target.to_string(), output)]);
+    db.active_instance_mut().record_provenance(record);
+    Ok(())
 }
 
 /// `INSERT` into a `BitVector(n)` column takes a bit string (`"0101..."`)

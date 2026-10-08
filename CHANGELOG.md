@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.93] - 2026-10-07
+
+### Fixed — five issues found by linal-hub on the published 0.1.92 / linaldb 0.1.17
+
+Found by re-running all of `linal-hub`'s notebooks on the published wheel and by building its new
+notebook 16 (MS/MS spectral identification on public MassBank + GNPS libraries, cross-checked
+against matchms and RDKit).
+
+- **A global aggregate over no rows returned no rows.** `SELECT COUNT(*) FROM t WHERE <nothing
+  matches>` (or over an empty dataset) gave an empty result instead of SQL's single row with
+  `COUNT` = 0. Without `GROUP BY` an aggregate now always returns exactly one row: `COUNT` 0, every
+  other aggregate (`SUM`, `AVG`, `MIN`, `MAX`, `ARG_MAX`, `RRF`, ...) `NULL`. Their columns are
+  now nullable for that reason. With `GROUP BY`, no rows still means no groups. **Behavior
+  change:** two existing tests (`silent_correctness_test`, `avg_aggregation_test`) pinned the
+  old no-rows result as a convention; they now assert the SQL result.
+- **`SEARCH ... INTO` recorded no lineage.** The result was a lineage root. It now records a
+  `SEARCH` step whose inputs are the searched dataset and the queries' dataset (or tensor), so
+  `EXPLAIN LINEAGE` traces a candidate table back to its library and queries.
+- **Exact score ties ordered differently per index type.** With duplicate vectors the IVF index
+  put rows added after it was built first, while HNSW and exact search put the lower row id first,
+  so the top-1 depended on the index. All paths now order equal scores by row (lower row id
+  first).
+- **`stats.json` and the `.meta.json` stats changed key order run to run** (a `HashMap`), so
+  identical data produced different files. They're name-ordered now (`BTreeMap`).
+- **`SHOW SCHEMA` showed internal type names** for variable-width matrices (`Matrix(2, 0)`) and
+  quantized vectors (`QVector(1000, F16)`); it now shows `Matrix(2, *)` and `Vector(1000, F16)`,
+  and table headers say `MATRIX[2, *]`.
+
+**Tests:** new `tests/hub_findings_0_1_93_test.rs` (one per issue).
+
 ## [0.1.92] - 2026-10-07
 
 ### Added — scientific retrieval, large-impact tier (CASMI 2026 proposal)

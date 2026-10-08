@@ -307,16 +307,21 @@ fn test_bare_count_and_avg_aggregate_together() {
 }
 
 #[test]
-fn test_bare_aggregate_on_empty_table_returns_no_rows() {
-    // Aggregation over an empty set returns no rows (existing convention,
-    // see AggregateExec::execute's early-return for empty input) — this
-    // guards against the fix changing that behavior.
+fn test_bare_aggregate_on_empty_table_returns_one_null_row() {
+    // A global aggregate (no GROUP BY) over an empty set returns exactly one
+    // row, as in SQL: SUM is NULL (COUNT would be 0). Until v0.1.93 this
+    // returned no rows -- an "existing convention" this test used to guard,
+    // changed because a query asking "how much / how many?" then got no
+    // answer at all (found building linal-hub's notebook 16).
     let mut db = TensorDb::new();
     exec(&mut db, "DATASET nums COLUMNS (id: INT, price: FLOAT)", 1);
 
     let out = exec(&mut db, "SELECT SUM(price) AS total FROM nums", 2);
     match out {
-        DslOutput::Table(ds) => assert_eq!(ds.len(), 0),
+        DslOutput::Table(ds) => {
+            assert_eq!(ds.len(), 1);
+            assert_eq!(ds.rows[0].values[0], linal::core::value::Value::Null);
+        }
         other => panic!("Expected Table output, got: {other:?}"),
     }
 }

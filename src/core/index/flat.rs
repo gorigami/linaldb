@@ -258,8 +258,9 @@ impl FlatVectors {
     }
 
     /// Exact top-`k` over positions `candidates` by cosine similarity to
-    /// `query`, as `(row_id, score)`, highest first. Ties keep candidate
-    /// order (stable sort), so results are deterministic.
+    /// `query`, as `(row_id, score)`, highest first; equal scores go in row
+    /// order (lower row id first), the same rule every search path uses, so
+    /// IVF, HNSW and exact search agree on ties (e.g. duplicate vectors).
     pub fn top_k(
         &self,
         candidates: impl Iterator<Item = usize>,
@@ -270,7 +271,11 @@ impl FlatVectors {
         let mut scores: Vec<(usize, f32)> = candidates
             .map(|i| (self.row_ids[i], self.cosine(i, query, qn)))
             .collect();
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
         scores.truncate(k);
         scores
     }
