@@ -51,7 +51,17 @@ value and the query panicked.
 |---|---|
 | P9 | `SEARCH ... USING <expression>`: top-k by any score (`SPEC_*`, `DOT`, `TANIMOTO`, ...) |
 | P13 | `CANDIDATES n RERANK USING <expression>`: two-stage search in one statement |
-| P14 | Memory-mapped columnar storage for `Vector`, `Vector(d, F16\|I8)` and `BitVector` columns, read-only first |
+| P14 | Memory-mapped columnar storage for `Vector(d, F16\|I8)` and `BitVector` columns (`SAVE`/`LOAD DATASET ... MMAP`), read-only first |
+
+Notes:
+
+- P9/P13: checked against a brute-force `SELECT ... ORDER BY ... LIMIT k` per query for
+  `SPEC_ENTROPY`, `SPEC_COSINE_MOD` (per-pair shift), `DOT` and `DISTANCE ASC`, and the rerank
+  against its two stages run separately (`tests/search_using_test.rs`). Added
+  `DOT(BitVector, Vector)` for fingerprints against per-bit weights.
+- P14: plain `Vector(d)` (`f32`) is not mapped -- `Value::Vector` is a bare `Vec<f32>` used by
+  every vector kernel; quantized columns are the mapped form. Every query/search/index answers
+  identically to the heap-loaded dataset (`tests/mmap_columns_test.rs`).
 
 ## Findings from checking the proposal against the code
 

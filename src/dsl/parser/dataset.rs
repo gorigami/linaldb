@@ -1093,6 +1093,21 @@ impl Parser {
     }
 
     // SEARCH <dataset> ON <column> QUERY <tensor_name|[vector]> LIMIT <k> [INTO <target>]
+    // <expr> [ASC|DESC], for SEARCH ... USING / RERANK USING.
+    fn parse_score_clause(&mut self) -> Result<ScoreClause, ParseError> {
+        let expr = self.parse_expr()?;
+        let ascending = if self.at_ident("ASC") {
+            self.advance();
+            true
+        } else {
+            if self.at_ident("DESC") {
+                self.advance();
+            }
+            false
+        };
+        Ok(ScoreClause { expr, ascending })
+    }
+
     pub(super) fn parse_search(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Search)?;
         let first = self.eat_ident()?;
@@ -1127,6 +1142,8 @@ impl Parser {
                 prefilter: None,
                 approx: false,
                 returning: None,
+                using: None,
+                rerank: None,
                 target: Some(first),
             }))
         } else if self.at(&Token::Where) {
@@ -1146,6 +1163,8 @@ impl Parser {
                 prefilter: None,
                 approx: false,
                 returning: None,
+                using: None,
+                rerank: None,
                 target: None,
             }))
         } else {
@@ -1193,6 +1212,13 @@ impl Parser {
                     SearchQuery::TensorRef(self.eat_ident()?)
                 }
             };
+            // USING <expr> [ASC|DESC]: the score to rank by.
+            let using = if self.at_ident("USING") {
+                self.advance();
+                Some(self.parse_score_clause()?)
+            } else {
+                None
+            };
             // PREFILTER: applied before ranking (exact top-k over passing rows).
             let prefilter = if self.at_ident("PREFILTER") {
                 self.advance();
@@ -1204,6 +1230,24 @@ impl Parser {
             if approx {
                 self.advance();
             }
+            // CANDIDATES <n> RERANK USING <expr> [ASC|DESC]: two-stage ranking.
+            let rerank = if self.at_ident("CANDIDATES") {
+                self.advance();
+                let n = self.eat_usize()?;
+                if !self.at_ident("RERANK") {
+                    return Err(
+                        self.error("expected RERANK USING <expression> after CANDIDATES <n>")
+                    );
+                }
+                self.advance();
+                if !self.at_ident("USING") {
+                    return Err(self.error("expected USING <expression> after RERANK"));
+                }
+                self.advance();
+                Some((n, self.parse_score_clause()?))
+            } else {
+                None
+            };
             // RETURN col, ... | RETURN NONE: which dataset columns each hit carries.
             let returning = if self.at_ident("RETURN") {
                 self.advance();
@@ -1248,6 +1292,8 @@ impl Parser {
                 prefilter,
                 approx,
                 returning,
+                using,
+                rerank,
                 target,
             }))
         }

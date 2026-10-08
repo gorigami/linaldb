@@ -58,7 +58,7 @@ pub fn get_connector_registry() -> ConnectorRegistry {
 /// absolute path) -- used by the WAL checkpoint (`engine::db::snapshot`) so
 /// a snapshot goes through exactly the SAVE/LOAD code path user data does.
 pub(crate) fn save_dataset_to_dir(db: &mut TensorDb, name: &str, dir: &Path) -> Result<(), String> {
-    save_dataset_core(db, name, Some(&dir.to_string_lossy()), 0)
+    save_dataset_core(db, name, Some(&dir.to_string_lossy()), MmapMode::Off, 0)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -69,15 +69,45 @@ pub(crate) fn load_dataset_from_dir(
     name: &str,
     dir: &Path,
 ) -> Result<(), String> {
-    load_dataset_core(db, name, Some(&dir.to_string_lossy()), 0)
+    load_dataset_core(db, name, Some(&dir.to_string_lossy()), MmapMode::Off, 0)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Whether `SAVE`/`LOAD DATASET` uses memory-mapped column files
+/// (`core::colbuf`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MmapMode {
+    /// Never (the WAL checkpoint).
+    Off,
+    /// Only if `[storage] mmap_columns` is on -- and then only where it can.
+    Config,
+    /// Required: `SAVE`/`LOAD DATASET ... MMAP`; an error if it can't.
+    Explicit,
+}
+
+impl MmapMode {
+    fn of(explicit: bool) -> Self {
+        if explicit {
+            MmapMode::Explicit
+        } else {
+            MmapMode::Config
+        }
+    }
+    fn enabled(self, db: &TensorDb) -> bool {
+        match self {
+            MmapMode::Off => false,
+            MmapMode::Config => db.config.storage.mmap_columns,
+            MmapMode::Explicit => true,
+        }
+    }
 }
 
 fn save_dataset_core(
     db: &mut TensorDb,
     dataset_name: &str,
     explicit_path: Option<&str>,
+    mmap: MmapMode,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     let (disk_name, storage_path) = if let Some(p_str) = explicit_path {
@@ -121,6 +151,28 @@ fn save_dataset_core(
             line: line_no,
             msg: format!("Failed to save dataset: {}", e),
         })?;
+    // Column files for memory-mapped loading, or none: stale ones from an
+    // earlier `SAVE ... MMAP` must not outlive the Parquet data they mirror.
+    let mapped_columns = if mmap.enabled(db) {
+        match storage.save_column_files(&disk_name, &dataset) {
+            Ok(cols) => cols,
+            Err(e) if mmap == MmapMode::Explicit => {
+                return Err(DslError::Parse {
+                    line: line_no,
+                    msg: format!("Failed to save dataset: {}", e),
+                })
+            }
+            Err(_) => Vec::new(),
+        }
+    } else {
+        storage
+            .remove_column_files(&disk_name)
+            .map_err(|e| DslError::Parse {
+                line: line_no,
+                msg: format!("Failed to remove old column files: {}", e),
+            })?;
+        Vec::new()
+    };
 
     // Indices (`CREATE INDEX`/`CREATE VECTOR INDEX`) live only on the
     // in-memory `Dataset` (`indices` is `#[serde(skip)]`) since their
@@ -242,9 +294,14 @@ fn save_dataset_core(
     )]);
     db.active_instance_mut().record_provenance(record);
 
+    let mmap_note = if mapped_columns.is_empty() {
+        String::new()
+    } else {
+        format!(", column files for: {}", mapped_columns.join(", "))
+    };
     Ok(DslOutput::Message(format!(
-        "Saved dataset '{}' (v{}) to '{}'",
-        dataset_name, metadata.version, storage_path
+        "Saved dataset '{}' (v{}) to '{}'{}",
+        dataset_name, metadata.version, storage_path, mmap_note
     )))
 }
 
@@ -286,6 +343,7 @@ fn load_dataset_core(
     db: &mut TensorDb,
     dataset_name: &str,
     explicit_path: Option<&str>,
+    mmap: MmapMode,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     let (disk_name, storage_path) = if let Some(p_str) = explicit_path {
@@ -347,15 +405,28 @@ fn load_dataset_core(
         )));
     }
 
-    let mut dataset = storage
-        .load_dataset(&disk_name)
-        .map_err(|e| DslError::Parse {
-            line: line_no,
-            msg: format!(
-                "Failed to load dataset '{}' from '{}': {}",
-                disk_name, storage_path, e
-            ),
-        })?;
+    let load_err = |e: crate::core::storage::StorageError| DslError::Parse {
+        line: line_no,
+        msg: format!(
+            "Failed to load dataset '{}' from '{}': {}",
+            disk_name, storage_path, e
+        ),
+    };
+    // With the config switch alone, map only when column files exist.
+    let has_column_files = Path::new(&storage_path)
+        .join("datasets")
+        .join(&disk_name)
+        .join("columns")
+        .is_dir();
+    let (mut dataset, mapped_columns) =
+        if mmap == MmapMode::Explicit || (mmap.enabled(db) && has_column_files) {
+            storage.load_dataset_mapped(&disk_name).map_err(load_err)?
+        } else {
+            (
+                storage.load_dataset(&disk_name).map_err(load_err)?,
+                Vec::new(),
+            )
+        };
 
     if dataset_name != disk_name {
         dataset.metadata.name = Some(dataset_name.to_string());
@@ -481,9 +552,14 @@ fn load_dataset_core(
         )
     };
 
+    let mmap_note = if mapped_columns.is_empty() {
+        String::new()
+    } else {
+        format!(", memory-mapped: {}", mapped_columns.join(", "))
+    };
     Ok(DslOutput::Message(format!(
-        "Loaded dataset '{}' from '{}' ({} rows{})",
-        dataset_name, storage_path, row_count, index_note
+        "Loaded dataset '{}' from '{}' ({} rows{}{})",
+        dataset_name, storage_path, row_count, index_note, mmap_note
     )))
 }
 
@@ -948,10 +1024,13 @@ pub fn save_typed(
     kind: PersistKind,
     name: &str,
     explicit_path: Option<&str>,
+    mmap: bool,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     match kind {
-        PersistKind::Dataset => save_dataset_core(db, name, explicit_path, line_no),
+        PersistKind::Dataset => {
+            save_dataset_core(db, name, explicit_path, MmapMode::of(mmap), line_no)
+        }
         PersistKind::Tensor => save_tensor_core(db, name, explicit_path, line_no),
         PersistKind::Pipeline => save_pipeline_core(db, name, explicit_path, line_no),
     }
@@ -962,10 +1041,13 @@ pub fn load_typed(
     kind: PersistKind,
     name: &str,
     explicit_path: Option<&str>,
+    mmap: bool,
     line_no: usize,
 ) -> Result<DslOutput, DslError> {
     match kind {
-        PersistKind::Dataset => load_dataset_core(db, name, explicit_path, line_no),
+        PersistKind::Dataset => {
+            load_dataset_core(db, name, explicit_path, MmapMode::of(mmap), line_no)
+        }
         PersistKind::Tensor => load_tensor_core(db, name, explicit_path, line_no),
         PersistKind::Pipeline => load_pipeline_core(db, name, explicit_path, line_no),
     }

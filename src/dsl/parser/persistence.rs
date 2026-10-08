@@ -15,7 +15,13 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::Save(SaveStmt { kind, name, path }))
+        let mmap = self.parse_mmap_flag(&kind)?;
+        Ok(Statement::Save(SaveStmt {
+            kind,
+            name,
+            path,
+            mmap,
+        }))
     }
 
     // LOAD TENSOR <name> [FROM <path>]
@@ -30,7 +36,25 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::Load(LoadStmt { kind, name, path }))
+        let mmap = self.parse_mmap_flag(&kind)?;
+        Ok(Statement::Load(LoadStmt {
+            kind,
+            name,
+            path,
+            mmap,
+        }))
+    }
+
+    // Trailing MMAP on SAVE / LOAD DATASET.
+    fn parse_mmap_flag(&mut self, kind: &PersistKind) -> Result<bool, ParseError> {
+        if !self.at_ident("MMAP") {
+            return Ok(false);
+        }
+        if !matches!(kind, PersistKind::Dataset) {
+            return Err(self.error("MMAP applies to SAVE / LOAD DATASET only"));
+        }
+        self.advance();
+        Ok(true)
     }
 
     pub(super) fn parse_persist_kind(&mut self) -> Result<PersistKind, ParseError> {

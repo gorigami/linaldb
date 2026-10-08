@@ -455,6 +455,22 @@ pub struct Prefilter {
     /// `APPROX`: rank the passing rows through the HNSW graph
     /// (`HnswIndex::search_filtered`) instead of an exact scan.
     pub approximate: bool,
+    /// `SEARCH ... USING`: the score each passing row is ranked by,
+    /// instead of cosine on the searched column.
+    pub score: Option<ScoreExpr>,
+    /// `CANDIDATES n RERANK USING`: the top `n` by the first score are
+    /// ordered by this one.
+    pub rerank: Option<(usize, ScoreExpr)>,
+}
+
+/// A `SEARCH` score over `Prefilter::combined_schema`.
+#[derive(Debug, Clone)]
+pub struct ScoreExpr {
+    pub expr: Expr,
+    /// Lowest first (`ASC`, for distances); highest first otherwise.
+    pub ascending: bool,
+    /// The expression as written, for `EXPLAIN`.
+    pub label: String,
 }
 
 // Leaves out the per-query values and the combined schema, which can be
@@ -465,6 +481,8 @@ impl std::fmt::Debug for Prefilter {
             .field("predicate", &self.predicate)
             .field("sorted_range", &self.sorted_range)
             .field("approximate", &self.approximate)
+            .field("score", &self.score.as_ref().map(|s| &s.label))
+            .field("rerank", &self.rerank.as_ref().map(|(n, s)| (n, &s.label)))
             .finish()
     }
 }
@@ -607,5 +625,62 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             CastTarget::BitVector(n) => ValueType::BitVector(n.unwrap_or(0)),
             CastTarget::SparseVector(n) => ValueType::SparseVector(*n),
         },
+    }
+}
+
+/// Every column name `expr` reads (with repeats), in evaluation order.
+pub fn collect_columns(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Column(name) => out.push(name.clone()),
+        Expr::Literal(_) | Expr::VecLiteral(_) | Expr::MatLiteral(_) => {}
+        Expr::BinaryExpr { left, right, .. } => {
+            collect_columns(left, out);
+            collect_columns(right, out);
+        }
+        Expr::And(l, r) | Expr::Or(l, r) => {
+            collect_columns(l, out);
+            collect_columns(r, out);
+        }
+        Expr::Not(e) | Expr::IsNull(e) | Expr::IsNotNull(e) => collect_columns(e, out),
+        Expr::In { expr, list } => {
+            collect_columns(expr, out);
+            list.iter().for_each(|e| collect_columns(e, out));
+        }
+        Expr::Between { expr, low, high } => {
+            collect_columns(expr, out);
+            collect_columns(low, out);
+            collect_columns(high, out);
+        }
+        Expr::AggregateExpr { expr, func, .. } => {
+            collect_columns(expr, out);
+            if let AggregateFunction::ArgMax(by) | AggregateFunction::ArgMin(by) = func {
+                collect_columns(by, out);
+            }
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            if let Some(o) = operand {
+                collect_columns(o, out);
+            }
+            for (c, r) in branches {
+                collect_columns(c, out);
+                collect_columns(r, out);
+            }
+            if let Some(e) = else_expr {
+                collect_columns(e, out);
+            }
+        }
+        Expr::Coalesce(args) | Expr::ScalarFn { args, .. } => {
+            args.iter().for_each(|e| collect_columns(e, out))
+        }
+        Expr::VectorFn { args, .. } => args.iter().for_each(|e| collect_columns(e, out)),
+        Expr::Nullif(a, b) => {
+            collect_columns(a, out);
+            collect_columns(b, out);
+        }
+        Expr::Cast { expr, .. } => collect_columns(expr, out),
     }
 }

@@ -52,8 +52,12 @@ impl std::str::FromStr for Quantization {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(into = "QuantRepr", try_from = "QuantRepr")]
 pub enum QuantVec {
-    F16(Vec<u16>),
-    I8 { scale: f32, data: Vec<i8> },
+    /// Owned, or a view into a memory-mapped column file (`core::colbuf`).
+    F16(crate::core::colbuf::Buf<u16>),
+    I8 {
+        scale: f32,
+        data: crate::core::colbuf::Buf<i8>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,7 +131,7 @@ impl QuantVec {
                     }
                     out.push(h.to_bits());
                 }
-                QuantVec::F16(out)
+                QuantVec::F16(out.into())
             }
             Quantization::I8 => {
                 let max = v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
@@ -172,11 +176,19 @@ impl QuantVec {
         }
     }
 
+    /// Bytes of a mapped column file these elements cover (0 when owned).
+    pub fn mapped_bytes(&self) -> usize {
+        match self {
+            QuantVec::F16(d) => d.mapped_bytes(),
+            QuantVec::I8 { data, .. } => data.mapped_bytes(),
+        }
+    }
+
     /// Heap bytes held.
     pub fn heap_bytes(&self) -> usize {
         match self {
-            QuantVec::F16(d) => d.capacity() * 2,
-            QuantVec::I8 { data, .. } => data.capacity(),
+            QuantVec::F16(d) => d.heap_bytes(),
+            QuantVec::I8 { data, .. } => data.heap_bytes(),
         }
     }
 }

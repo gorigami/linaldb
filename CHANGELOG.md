@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — scientific workloads round 2, medium and large tier (CASMI_WORKLOADS_PLAN_2.md: P9, P13, P14)
+
+- **`SEARCH ... USING <expression> [ASC|DESC]`** (P9): rank each query's hits by any numeric
+  score over the searched row and the query row (`SPEC_ENTROPY`, `SPEC_COSINE_MOD` with a
+  per-pair shift, `TANIMOTO`, `DOT`, `DISTANCE ... ASC`, ...) instead of cosine on the `ON`
+  column. Exact (every row passing `PREFILTER`, or every row), no vector index needed, `score`
+  is `Double`. Equal to the brute-force `SELECT ... ORDER BY ... LIMIT k` per query; `USING
+  COSINE_SIM` equals the plain `PREFILTER` search. Single-call spectral/bit-vector/`DOT` scores
+  borrow their arguments from the stored rows instead of copying each peak list.
+- **`CANDIDATES <n> RERANK USING <expression>`** (P13): two-stage search in one statement --
+  each query's top `n` by the first score (`USING`, or cosine), reordered by the second;
+  `score_stage1` keeps the first. Equal to the two stages run separately. `EXPLAIN` shows both
+  scores; `INTO` lineage records them (`"using"`, `"candidates"`, `"rerank"`).
+- **`DOT(BitVector, Vector)`**: sum of the vector's entries at the set bits (a fingerprint
+  against per-bit weights).
+- **Memory-mapped columns** (P14, read-only first): `SAVE DATASET <name> MMAP` writes each
+  `BitVector` / `Vector(d, F16|I8)` column as a column file (SHA-256 checked) and `LOAD DATASET
+  <name> MMAP` maps it instead of reading it into the heap; `[storage] mmap_columns = true`
+  does it for every save and load. Answers are identical; writes copy the touched cell;
+  `SHOW MEMORY` lists mapped bytes per column. Plain `Vector(d)` (`f32`) columns are not
+  mapped.
+
 ### Added — scientific workloads round 2, low tier (CASMI_WORKLOADS_PLAN_2.md: P8, P10, P11, P12, P15)
 
 - **`SPEC_ENTROPY(a, b, tolerance [, weighted])`** (P8): entropy similarity of two peak lists
