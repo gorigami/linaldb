@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.94] - 2026-10-08
+
 ### Added — scientific workloads round 2, medium and large tier (CASMI_WORKLOADS_PLAN_2.md: P9, P13, P14)
 
 - **`SEARCH ... USING <expression> [ASC|DESC]`** (P9): rank each query's hits by any numeric

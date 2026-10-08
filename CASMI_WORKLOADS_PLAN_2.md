@@ -18,7 +18,7 @@ matchms, NumPy brute force), fail loudly on bad input, keep new behavior opt-in,
    the round-2 features; any bug found gets a fix PR that goes all the way through a release;
    then the hub docs (DSL reference, Use Cases, playground pin).
 
-### PR A — low and low+ impact
+### PR A — low and low+ impact — merged (#141)
 
 | Item | What | Where |
 |---|---|---|
@@ -45,7 +45,7 @@ Bug found and fixed along the way: a computed `SELECT` column whose rows differ 
 variable-width matrix or vector expression) was typed from its first row; other rows lost the
 value and the query panicked.
 
-### PR B — medium and large impact
+### PR B — medium and large impact — merged (#142)
 
 | Item | What |
 |---|---|
