@@ -6,12 +6,21 @@ engine's own changelog.
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-10-08
+
+Picks up the root engine's `v0.1.94`: round 2 of the CASMI scientific-workloads plan
+(`CASMI_WORKLOADS_PLAN_2.md`, P8-P15).
+
 - `Db.load_arrow(..., peaks={new: (mz_column, intensity_column)}, cast=None|"f32", sort=False)`:
   build `Matrix(2, *)` peak-list columns from two variable-length list columns in Rust (P11).
 - `Db.lineage(name) -> dict`: `EXPLAIN LINEAGE <name> AS JSON` as a dict, for run manifests
   checked with `ASSERT LINEAGE` (P15).
 - Picks up the engine's `SPEC_ENTROPY`, `SPEC_CLEAN` and `SEARCH ... RETURN`; tests check them
   against `ms_entropy` and matchms when installed.
+- Engine additions reachable through `execute()`: `SEARCH ... USING <score>` (exact top-k by
+  any score, e.g. `SPEC_ENTROPY`), `CANDIDATES n RERANK USING <score>` (two-stage search),
+  `DOT(BitVector, Vector)`, and `SAVE`/`LOAD DATASET ... MMAP` (memory-mapped `BitVector` and
+  `Vector(d, F16|I8)` columns). See the root `CHANGELOG.md`.
 
 ## [0.1.18] - 2026-10-07
 
