@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — scientific workloads round 2, low tier (CASMI_WORKLOADS_PLAN_2.md: P8, P10, P11, P12, P15)
+
+- **`SPEC_ENTROPY(a, b, tolerance [, weighted])`** (P8): entropy similarity of two peak lists
+  (Li et al., *Nature Methods* 2021), the library-match score of current MS/MS search tools.
+  Equal to a 64-bit port of `ms_entropy`'s algorithm to 1e-15 and to `ms_entropy` itself to 3e-7
+  (it computes in float32) on 300 pairs; symmetric; 1 for identical spectra.
+- **`SPEC_CLEAN(peaks, precursor_mz [, floor, max_peaks, above_precursor, power, normalize,
+  min_distance])`** (P12): the preprocessing chain (drop empty peaks, drop peaks above precursor
+  + Δ, optional centroiding, relative intensity floor, top-N, intensity power, max/sum
+  normalization) as one function usable in `SELECT`, `UPDATE` and `DATASET ... FROM`, so library
+  and queries share it and lineage records it. Equal to `ms_entropy.clean_spectrum` (to 1e-7)
+  and to a matchms filter chain, on 600 spectra × 6 parameter sets.
+- **`SEARCH ... RETURN <columns> | RETURN NONE`** (P10): each hit carries only the named dataset
+  columns (or none: just `query_id, rank, score, row_id`) instead of every column, including
+  full vectors and peak lists. Hits are unchanged; `INTO` stores the projection and lineage
+  records it.
+- **Peak lists from two Arrow list columns** (P11): `Db.load_arrow(..., peaks={"peaks": (mz_col,
+  intensity_col)}, cast="f32", sort=False)` / `TensorDb::load_record_batch_with_peaks` builds a
+  `Matrix(2, *)` column in Rust instead of a Python loop -- 2.5M spectra / 75M peaks in ~12 s.
+  `float64` lists are only accepted with the explicit `cast="f32"`; errors name column and row;
+  identical to `peaks_array()` (same content hash).
+- **Run manifest** (P15): lineage steps that produce one dataset record its row count
+  (`"rows"`), and `DATASET ... FROM` records its select list and filter (`"select"`,
+  `"filter"`), so a `SPEC_CLEAN(...)` preprocessing step shows with its parameters; new `ASSERT LINEAGE <name> MATCHES '<file.json>'` fails, listing changed sources
+  first, unless every entity in a saved `EXPLAIN LINEAGE <name> AS JSON` is still in the lineage
+  with the same content hash; Python `Db.lineage(name)` returns that JSON as a dict.
+
+### Fixed
+
+- **A computed `SELECT` column whose rows have different widths lost its values.** The column
+  was typed from its first row (e.g. `Matrix(2, 7)`), every row of another width then failed
+  validation and silently kept no value for it, and the query panicked (`index out of bounds`)
+  while assembling the result. Variable-width results (e.g. `SPEC_CLEAN` peak lists, or any
+  expression returning matrices or vectors of varying size) are now typed `Matrix(r, *)` /
+  `Vector(*)`.
+
 ## [0.1.93] - 2026-10-07
 
 ### Fixed — five issues found by linal-hub on the published 0.1.92 / linaldb 0.1.17

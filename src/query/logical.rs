@@ -92,6 +92,8 @@ pub enum VectorFnKind {
     SpecCosine,
     SpecCosineMod,
     SpecMatches,
+    SpecEntropy,
+    SpecClean,
     SparseNew,
 }
 
@@ -221,6 +223,9 @@ pub enum LogicalPlan {
         /// Emit only the dataset's columns (a single-query `SEARCH ...
         /// PREFILTER`, which keeps plain `SEARCH`'s output shape).
         rows_only: bool,
+        /// `RETURN`: indices of the dataset columns each hit carries, in
+        /// output order; `None` keeps them all.
+        projection: Option<Vec<usize>>,
     },
     /// Sort rows by one or more columns
     Sort {
@@ -560,6 +565,8 @@ pub(crate) fn infer_expr_type_full(expr: &Expr, schema: &Schema) -> crate::core:
             VectorFnKind::Hamming | VectorFnKind::BitCount => ValueType::Int,
             VectorFnKind::SpecCosine | VectorFnKind::SpecCosineMod => ValueType::Float64,
             VectorFnKind::SpecMatches => ValueType::Int,
+            VectorFnKind::SpecEntropy => ValueType::Float64,
+            VectorFnKind::SpecClean => ValueType::Matrix(2, 0),
             VectorFnKind::SparseNew => match args.first() {
                 Some(Expr::Literal(Value::Int(d))) if *d > 0 => {
                     ValueType::SparseVector(*d as usize)

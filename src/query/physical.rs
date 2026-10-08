@@ -286,6 +286,9 @@ pub struct BatchVectorSearchExec {
     pub schema: Arc<Schema>,
     pub prefilter: Option<Arc<crate::query::logical::Prefilter>>,
     pub rows_only: bool,
+    /// `RETURN`: the dataset columns each hit carries, in output order;
+    /// `None` keeps them all.
+    pub projection: Option<Vec<usize>>,
     /// Same role as `VectorSearchExec::resolved_index_type`: for `EXPLAIN`.
     pub resolved_index_type: Option<String>,
 }
@@ -595,7 +598,8 @@ fn sparse_new(vals: &[crate::core::value::Value]) -> crate::core::value::Value {
     })
 }
 
-/// `SPEC_COSINE` / `SPEC_COSINE_MOD` / `SPEC_MATCHES` (`core::spectral`).
+/// `SPEC_COSINE` / `SPEC_COSINE_MOD` / `SPEC_MATCHES` / `SPEC_ENTROPY`
+/// (`core::spectral`).
 /// A NULL argument gives NULL; bad data (unsorted m/z, a non-finite value,
 /// a negative tolerance) is recorded in `row_error` so the statement fails
 /// with it.
@@ -610,6 +614,7 @@ fn spectral_fn(
     let name = match func {
         VectorFnKind::SpecCosine => "SPEC_COSINE",
         VectorFnKind::SpecCosineMod => "SPEC_COSINE_MOD",
+        VectorFnKind::SpecEntropy => "SPEC_ENTROPY",
         _ => "SPEC_MATCHES",
     };
     if vals.iter().any(|v| v.is_null()) {
@@ -630,6 +635,15 @@ fn spectral_fn(
         let a = peaks(a, "first spectrum")?;
         let b = peaks(b, "second spectrum")?;
         let tolerance = num(2).ok_or("tolerance must be a number")?;
+        if func == VectorFnKind::SpecEntropy {
+            let weighted = match vals.get(3) {
+                None => true,
+                Some(Value::Bool(w)) => *w,
+                Some(_) => return Err("weighted must be true or false".to_string()),
+            };
+            return crate::core::spectral::entropy_similarity(&a, &b, tolerance, weighted)
+                .map(Value::Float64);
+        }
         let (shift, powers_at) = match func {
             VectorFnKind::SpecCosineMod => (Some(num(3).ok_or("shift must be a number")?), 4),
             VectorFnKind::SpecMatches => (num(3), 4),
@@ -664,6 +678,76 @@ fn spectral_fn(
             Value::Null
         }
     }
+}
+
+/// `SPEC_CLEAN(peaks, precursor_mz [, floor, max_peaks, above_precursor,
+/// power, normalize, min_distance])` (`core::spectral::clean`). Defaults:
+/// floor 0.01, max_peaks 0 (all), above_precursor 2.0, power 1.0,
+/// normalize 'max', min_distance 0 (no centroiding). A NULL argument gives
+/// NULL; bad data or parameters are recorded in `row_error`.
+fn spectral_clean(vals: &[crate::core::value::Value]) -> crate::core::value::Value {
+    use crate::core::spectral::{clean, peaks, CleanParams, Normalize};
+    use crate::core::value::Value;
+
+    if vals.iter().any(|v| v.is_null()) {
+        return Value::Null;
+    }
+    let num = |i: usize, default: f64, what: &str| -> Result<f64, String> {
+        match vals.get(i) {
+            None => Ok(default),
+            Some(Value::Int(n)) => Ok(*n as f64),
+            Some(Value::Float(f)) => Ok(*f as f64),
+            Some(Value::Float64(f)) => Ok(*f),
+            Some(_) => Err(format!("{} must be a number", what)),
+        }
+    };
+    let result = (|| -> Result<Value, String> {
+        let Some(Value::Matrix(m)) = vals.first() else {
+            return Err("the first argument must be a peak list, Matrix(2, n)".to_string());
+        };
+        let p = peaks(m, "spectrum")?;
+        let precursor = num(1, 0.0, "precursor_mz")?;
+        if !precursor.is_finite() {
+            return Err("precursor_mz must be finite".to_string());
+        }
+        let max_peaks = num(3, 0.0, "max_peaks")?;
+        if max_peaks < 0.0 || max_peaks.fract() != 0.0 {
+            return Err(format!(
+                "max_peaks must be a non-negative integer, got {}",
+                max_peaks
+            ));
+        }
+        let above = num(4, 2.0, "above_precursor")?;
+        let normalize = match vals.get(6) {
+            None => Normalize::Max,
+            Some(Value::String(s)) => match s.to_ascii_lowercase().as_str() {
+                "max" => Normalize::Max,
+                "sum" => Normalize::Sum,
+                "none" => Normalize::None,
+                _ => {
+                    return Err(format!(
+                        "normalize must be 'max', 'sum' or 'none', got '{}'",
+                        s
+                    ))
+                }
+            },
+            Some(_) => return Err("normalize must be 'max', 'sum' or 'none'".to_string()),
+        };
+        let params = CleanParams {
+            max_mz: precursor + above,
+            floor: num(2, 0.01, "floor")?,
+            max_peaks: max_peaks as usize,
+            power: num(5, 1.0, "power")?,
+            normalize,
+            min_distance: num(7, 0.0, "min_distance")?,
+        };
+        let (mz, intensity) = clean(&p, params)?;
+        Ok(Value::Matrix(vec![mz, intensity]))
+    })();
+    result.unwrap_or_else(|e| {
+        crate::query::row_error::record(format!("SPEC_CLEAN: {}", e));
+        Value::Null
+    })
 }
 
 /// Every column name `expr` reads.
@@ -708,16 +792,31 @@ impl PhysicalPlan for BatchVectorSearchExec {
                         dataset.rows.len()
                     ))
                 })?;
-                let row = evaluate_lazy_columns_in_row(dataset, row)?;
+                // Only the returned columns are copied; lazy columns are
+                // evaluated only when one of them is returned.
+                let picked: Vec<crate::core::value::Value> = match &self.projection {
+                    Some(idx) if idx.is_empty() => Vec::new(),
+                    Some(idx) => {
+                        let evaluated;
+                        let row = if idx.iter().any(|&i| dataset.schema.fields[i].is_lazy) {
+                            evaluated = evaluate_lazy_columns_in_row(dataset, row)?;
+                            &evaluated
+                        } else {
+                            row
+                        };
+                        idx.iter().map(|&i| row.values[i].clone()).collect()
+                    }
+                    None => evaluate_lazy_columns_in_row(dataset, row)?.values,
+                };
                 let values = if self.rows_only {
-                    row.values
+                    picked
                 } else {
-                    let mut values = Vec::with_capacity(4 + row.values.len());
+                    let mut values = Vec::with_capacity(4 + picked.len());
                     values.push(query_id.clone());
                     values.push(crate::core::value::Value::Int(rank as i64 + 1));
                     values.push(crate::core::value::Value::Float(score));
                     values.push(crate::core::value::Value::Int(row_id as i64));
-                    values.extend(row.values);
+                    values.extend(picked);
                     values
                 };
                 out.push(Tuple::new(self.schema.clone(), values).map_err(EngineError::InvalidOp)?);
@@ -2165,7 +2264,9 @@ pub fn evaluate_expression(
                 },
                 VectorFnKind::SpecCosine
                 | VectorFnKind::SpecCosineMod
-                | VectorFnKind::SpecMatches => spectral_fn(*func, &vals),
+                | VectorFnKind::SpecMatches
+                | VectorFnKind::SpecEntropy => spectral_fn(*func, &vals),
+                VectorFnKind::SpecClean => spectral_clean(&vals),
                 VectorFnKind::SparseNew => sparse_new(&vals),
                 VectorFnKind::Distance => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => Value::Float(

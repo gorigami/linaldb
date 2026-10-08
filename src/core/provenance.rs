@@ -197,6 +197,71 @@ pub struct ProvenanceTree {
 }
 
 impl ProvenanceTree {
+    /// Every entity in this tree with whether it is a source (a node with
+    /// no recorded inputs), in depth-first order.
+    fn entities(&self, out: &mut Vec<(String, String, bool)>) {
+        out.push((
+            self.entity.display_name(),
+            self.entity.content_hash().to_string(),
+            self.inputs.is_empty(),
+        ));
+        for input in &self.inputs {
+            input.entities(out);
+        }
+    }
+
+    /// What `ASSERT LINEAGE` reports: one line per entity of `expected`
+    /// that is not in `self` with the same content hash, sources first.
+    /// Empty when `self` contains everything `expected` recorded.
+    /// Timestamps, execution ids and parameters are not compared, so a
+    /// re-run over identical inputs matches.
+    pub fn mismatches(&self, expected: &ProvenanceTree) -> Vec<String> {
+        let (mut want, mut have) = (Vec::new(), Vec::new());
+        expected.entities(&mut want);
+        self.entities(&mut have);
+        let short = |h: &str| h[..h.len().min(12)].to_string();
+        let mut sources = Vec::new();
+        let mut derived = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (name, hash, is_source) in want {
+            if !seen.insert((name.clone(), hash.clone())) {
+                continue;
+            }
+            if have.iter().any(|(n, h, _)| *n == name && *h == hash) {
+                continue;
+            }
+            let now: Vec<String> = have
+                .iter()
+                .filter(|(n, _, _)| *n == name)
+                .map(|(_, h, _)| short(h))
+                .collect();
+            let kind = if is_source { "source" } else { "derived" };
+            let line = if now.is_empty() {
+                format!(
+                    "{} '{}' (hash {}) is no longer in the lineage",
+                    kind,
+                    name,
+                    short(&hash)
+                )
+            } else {
+                format!(
+                    "{} '{}' changed: expected hash {}, now {}",
+                    kind,
+                    name,
+                    short(&hash),
+                    now.join(", ")
+                )
+            };
+            if is_source {
+                sources.push(line);
+            } else {
+                derived.push(line);
+            }
+        }
+        sources.extend(derived);
+        sources
+    }
+
     /// A leaf node with no known producer -- either genuinely the root of
     /// the ancestry chain, or an entity that predates this feature and has
     /// no recorded history.

@@ -167,8 +167,20 @@ impl Db {
     /// a file or the DSL parser -- `Db.load_arrow()`/`Db.load_numpy()` in
     /// the Python layer serialize to this. All batches in the stream are
     /// concatenated into one dataset. Returns the number of rows loaded.
-    #[pyo3(signature = (name, ipc_stream, origin))]
-    fn load_arrow_ipc(&mut self, name: &str, ipc_stream: &[u8], origin: &str) -> PyResult<usize> {
+    /// `peaks`: `(new column, m/z column, intensity column)` triples to
+    /// combine into `Matrix(2, *)` peak lists (`TensorDb::
+    /// load_record_batch_with_peaks`); `cast_f64` allows float64 lists,
+    /// rounded to float32; `sort` sorts unsorted peaks.
+    #[pyo3(signature = (name, ipc_stream, origin, peaks=Vec::new(), cast_f64=false, sort=false))]
+    fn load_arrow_ipc(
+        &mut self,
+        name: &str,
+        ipc_stream: &[u8],
+        origin: &str,
+        peaks: Vec<(String, String, String)>,
+        cast_f64: bool,
+        sort: bool,
+    ) -> PyResult<usize> {
         let reader =
             arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc_stream), None)
                 .map_err(|e| LinalError::new_err(format!("invalid Arrow IPC stream: {e}")))?;
@@ -178,9 +190,25 @@ impl Db {
             .map_err(|e| LinalError::new_err(format!("invalid Arrow IPC stream: {e}")))?;
         let batch = arrow::compute::concat_batches(&schema, &batches)
             .map_err(|e| LinalError::new_err(e.to_string()))?;
-        self.inner
-            .load_record_batch(name, &batch, origin)
-            .map_err(|e| LinalError::new_err(e.to_string()))
+        let result = if peaks.is_empty() {
+            self.inner.load_record_batch(name, &batch, origin)
+        } else {
+            let opts = linal::engine::PeakLoad {
+                peaks: peaks
+                    .into_iter()
+                    .map(|(name, mz, intensity)| linal::engine::PeakColumns {
+                        name,
+                        mz,
+                        intensity,
+                    })
+                    .collect(),
+                cast_f64,
+                sort,
+            };
+            self.inner
+                .load_record_batch_with_peaks(name, &batch, origin, &opts)
+        };
+        result.map_err(|e| LinalError::new_err(e.to_string()))
     }
 
     /// The database currently active on this instance (`USE <db>` changes

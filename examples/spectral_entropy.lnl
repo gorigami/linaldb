@@ -1,0 +1,48 @@
+-- Spectral library matching with peak lists: shared preprocessing (SPEC_CLEAN), entropy
+-- similarity (SPEC_ENTROPY), small hit rows (SEARCH ... RETURN) and a lineage manifest.
+-- CASMI_WORKLOADS_PLAN_2.md, P8 / P10 / P12 / P15. Peaks are Matrix(2, *): row 0 m/z
+-- (ascending), row 1 intensity; the values are small illustrative spectra, written inline.
+
+DROP DATABASE IF EXISTS spectral_entropy
+CREATE DATABASE spectral_entropy
+USE spectral_entropy
+
+-- Raw library spectra: a noise peak, a peak above the precursor, and two peaks 0.01 Da apart.
+DATASET library COLUMNS (cand: String, pm: DOUBLE, k: Int, spec: Matrix(2, *))
+INSERT INTO library VALUES ("caffeine", 195.088, 1, [[42.03, 110.07, 138.07, 163.06, 195.09, 210.0], [0.5, 30.0, 100.0, 12.0, 60.0, 8.0]])
+INSERT INTO library VALUES ("theobromine", 181.072, 1, [[67.03, 110.07, 124.05, 138.07, 138.08, 181.07], [10.0, 25.0, 15.0, 40.0, 45.0, 100.0]])
+INSERT INTO library VALUES ("paraxanthine", 181.072, 1, [[69.04, 124.05, 142.06, 181.07], [20.0, 100.0, 35.0, 70.0]])
+INSERT INTO library VALUES ("tryptophan", 205.097, 1, [[118.07, 132.08, 146.06, 188.07, 205.10], [20.0, 15.0, 70.0, 100.0, 30.0]])
+
+-- Query spectra: noisy measurements of unknowns.
+DATASET queries COLUMNS (qid: Int, qpm: DOUBLE, k: Int, qspec: Matrix(2, *))
+INSERT INTO queries VALUES (1, 195.087, 1, [[110.072, 138.068, 163.058, 195.088, 260.0], [25.0, 100.0, 15.0, 55.0, 4.0]])
+INSERT INTO queries VALUES (2, 181.071, 1, [[69.041, 124.048, 142.061, 181.072], [18.0, 100.0, 30.0, 75.0]])
+
+-- One preprocessing for both sides: 1% floor, nothing above precursor + 2 Da, centroid at
+-- 2 x tolerance (0.04 Da), intensities summing to 1. Recorded in lineage as DATASET FROM steps.
+DATASET lib_clean FROM library SELECT cand, pm, k, SPEC_CLEAN(spec, pm, 0.01, 0, 2.0, 1.0, 'sum', 0.04) AS spec
+DATASET q_clean FROM queries SELECT qid, qpm, k, SPEC_CLEAN(qspec, qpm, 0.01, 0, 2.0, 1.0, 'sum', 0.04) AS qspec
+SELECT cand, spec FROM lib_clean
+
+-- Entropy similarity of every query against every library spectrum, best first.
+SELECT qid, cand, SPEC_ENTROPY(spec, qspec, 0.02) AS entropy, SPEC_COSINE(spec, qspec, 0.02) AS cosine FROM lib_clean JOIN q_clean ON lib_clean.k = q_clean.k ORDER BY qid, entropy DESC
+
+-- One answer per query.
+SELECT qid, ARG_MAX(cand, entropy) AS best, MAX(entropy) AS score FROM (SELECT qid, cand, SPEC_ENTROPY(spec, qspec, 0.02) AS entropy FROM lib_clean JOIN q_clean ON lib_clean.k = q_clean.k) AS scored GROUP BY qid ORDER BY qid
+
+-- Vector search over binned spectra returning only the columns needed downstream.
+DATASET binned COLUMNS (cand: String, mass: Float, e: Vector(4))
+INSERT INTO binned VALUES ("caffeine", 194.08, [0.1, 0.9, 0.3, 0.1])
+INSERT INTO binned VALUES ("theobromine", 180.06, [0.2, 0.8, 0.4, 0.0])
+INSERT INTO binned VALUES ("tryptophan", 204.09, [0.8, 0.0, 0.1, 0.7])
+DATASET qb COLUMNS (qid: Int, lo: Float, hi: Float, e: Vector(4))
+INSERT INTO qb VALUES (1, 190.0, 200.0, [0.1, 0.85, 0.3, 0.1])
+SEARCH binned ON e QUERIES qb.e KEY qid PREFILTER mass BETWEEN qb.lo AND qb.hi RETURN cand LIMIT 5 INTO hits
+SELECT * FROM hits
+
+-- The lineage of the cleaned library, as a machine-readable manifest (save it and check later
+-- runs with ASSERT LINEAGE lib_clean MATCHES '<file.json>').
+EXPLAIN LINEAGE lib_clean AS JSON
+
+USE default

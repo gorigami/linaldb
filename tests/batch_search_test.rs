@@ -242,3 +242,71 @@ fn loud_errors() {
     let e = run_err(&mut db, "SEARCH clash ON e QUERIES q.e LIMIT 1");
     assert!(e.contains("collides"), "{}", e);
 }
+
+// ── SEARCH ... RETURN (CASMI_WORKLOADS_PLAN_2.md, P10) ──────────────────────
+
+fn table(out: DslOutput) -> (Vec<String>, Vec<Vec<Value>>) {
+    match out {
+        DslOutput::Table(ds) => (
+            ds.schema.fields.iter().map(|f| f.name.clone()).collect(),
+            ds.rows.iter().map(|r| r.values.clone()).collect(),
+        ),
+        other => panic!("expected a table, got {:?}", other),
+    }
+}
+
+#[test]
+fn return_projects_hit_columns_without_changing_hits() {
+    let (_dir, mut db) = db();
+    setup(&mut db, 40, 3, false);
+    let base = "SEARCH lib ON e QUERIES q.e KEY name PREFILTER mass >= 110.0";
+    let (_, full) = table(run(&mut db, &format!("{} LIMIT 5", base)));
+    let (cols, some) = table(run(&mut db, &format!("{} RETURN mass, id LIMIT 5", base)));
+    assert_eq!(cols, ["query_id", "rank", "score", "row_id", "mass", "id"]);
+    let (cols, none) = table(run(&mut db, &format!("{} RETURN NONE LIMIT 5", base)));
+    assert_eq!(cols, ["query_id", "rank", "score", "row_id"]);
+    assert_eq!(full.len(), 15);
+    for ((f, s), n) in full.iter().zip(&some).zip(&none) {
+        assert_eq!(f[..4], s[..4]);
+        assert_eq!(f[..4], n[..]);
+        assert_eq!(s[4], f[5]); // mass
+        assert_eq!(s[5], f[4]); // id
+    }
+    // Index path (no PREFILTER), and FILTER over a returned column.
+    let (cols, r) = table(run(
+        &mut db,
+        "SEARCH lib ON e QUERIES q.e RETURN id LIMIT 3 FILTER rank = 1",
+    ));
+    assert_eq!(cols, ["query_id", "rank", "score", "row_id", "id"]);
+    assert_eq!(r.len(), 3);
+    // Single query: the dataset's own columns, projected.
+    let (cols, r) = table(run(
+        &mut db,
+        "SEARCH lib ON e QUERY [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] RETURN id LIMIT 2",
+    ));
+    assert_eq!(cols, ["id"]);
+    assert_eq!(r.len(), 2);
+    // INTO stores only the projected columns.
+    run(&mut db, &format!("{} RETURN id LIMIT 2 INTO hits", base));
+    let (cols, _) = table(run(&mut db, "SELECT * FROM hits"));
+    assert_eq!(cols, ["query_id", "rank", "score", "row_id", "id"]);
+    let lineage = match run(&mut db, "EXPLAIN LINEAGE hits AS JSON") {
+        DslOutput::Message(m) => m,
+        other => panic!("{:?}", other),
+    };
+    assert!(
+        lineage.contains("\"return\": [\n      \"id\"\n    ]"),
+        "{}",
+        lineage
+    );
+
+    let e = run_err(&mut db, &format!("{} RETURN nope LIMIT 2", base));
+    assert!(e.contains("unknown column 'nope'"), "{}", e);
+    let e = run_err(&mut db, &format!("{} RETURN id, id LIMIT 2", base));
+    assert!(e.contains("listed twice"), "{}", e);
+    let e = run_err(
+        &mut db,
+        "SEARCH lib ON e QUERY [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] RETURN NONE LIMIT 2",
+    );
+    assert!(e.contains("RETURN NONE needs a batch"), "{}", e);
+}

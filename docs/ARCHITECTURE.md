@@ -455,6 +455,10 @@ language packages, not workspace members):
     hash), and checkpoints if the WAL is on. The IPC hop is one extra copy;
     it avoids a version coupling between this crate's `arrow` and the
     binding's `pyo3` that `arrow`'s own `pyarrow` feature would add.
+    With `peaks=`, `combine_peak_columns` first rewrites the batch: each pair of
+    variable-length list columns (m/z, intensity) becomes one
+    `FixedSizeList<List<Float32>, 2>` column, the same encoding storage uses
+    for `Matrix(2, *)`, so the rest of the load path is unchanged.
 
 ### 7. Utils Module (`src/utils/`)
 
@@ -787,6 +791,9 @@ columns too. Equal scores are ordered by row id on every path (`FlatVectors::top
 HNSW merge), so the index type never changes which of two duplicate vectors comes first.
 `SEARCH ... INTO` records a `SEARCH` provenance step (`record_search_provenance` in
 `dsl/executor/mod.rs`) with the searched dataset and the queries' source as inputs.
+`RETURN` is resolved in `search_plan` to column indices (`BatchVectorSearch::projection`); the
+executor copies only those columns per hit, and evaluates lazy columns only when one of them is
+returned. The single-query index path wraps its `VectorSearch` in a `Project`.
 
 ### Memory Accounting
 
@@ -916,7 +923,11 @@ accepts any count (`Field::is_compatible`), with every row of one cell the
 same length. Arrow encoding is `FixedSizeList<List<Float32>, r>`
 (`build_variable_matrix_column`); the reader recognizes it in
 `vector_or_matrix_type`/`matrix_array_to_values`. `core/spectral.rs`
-implements the matchms-compatible greedy cosine on such peak lists.
+implements the matchms-compatible greedy cosine on such peak lists, the
+`ms_entropy`-compatible entropy similarity (`entropy_similarity`) and the
+`SPEC_CLEAN` preprocessing chain (`clean`, whose centroiding is a port of
+`ms_entropy`'s). A computed `SELECT` column whose rows differ in width is
+typed `Matrix(r, *)` / `Vector(*)` rather than by its first row.
 
 ---
 
@@ -995,6 +1006,14 @@ OpenLineage mapping was clean.
 - **`EXPLAIN LINEAGE <name> [AS JSON]`**: the user-facing command (§9 of
   `docs/DSL_REFERENCE.md`), text-tree or JSON. `SHOW LINEAGE <name>` is kept
   working as a documented-superseded alias, same resolver.
+  `DatabaseInstance::record_provenance` adds a `rows` parameter to every
+  record whose single output is a dataset, so the JSON doubles as a run
+  manifest.
+- **`ASSERT LINEAGE <name> MATCHES '<file>'`**: parses the file back into a
+  `ProvenanceTree` and calls `ProvenanceTree::mismatches`, which compares
+  `(name, content hash)` pairs only -- not timestamps, execution ids or
+  parameters -- so an identical re-run matches; differences are reported
+  sources first.
 - **`PRUNE LINEAGE BEFORE <timestamp>`** (`PERFORMANCE_OPTIMIZATION_PLAN.md` Phase 2):
   compacts the otherwise-unbounded append-only log. `ProvenanceStore::prune_before`
   computes the set of record indices reachable from every currently-live tensor/dataset

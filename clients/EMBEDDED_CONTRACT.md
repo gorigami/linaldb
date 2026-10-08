@@ -91,9 +91,22 @@ any problem.
   `linaldb.sparse_array(rows, dim)` returns `(array, field_metadata)` for a `SparseVector(dim)`
   column (`rows`: `(indices, values)` pairs or `None`); a struct column without that metadata is
   an error.
-- Raw layer: `Db._native.load_arrow_ipc(name, ipc_stream: bytes, origin: str) -> int` takes an
-  Arrow IPC stream; the two methods above serialize to it. Engine entry point:
-  `TensorDb::load_record_batch(name, &RecordBatch, origin)`.
+- Peak lists from two list columns (round 2, P11): `load_arrow(name, data, *, origin="arrow",
+  peaks=None, cast=None, sort=False)`. `peaks={"peaks": ("ms2_mzs", "ms2_intensities")}` combines
+  each pair of `list<float32|float64>` (or `large_list`) columns into one `Matrix(2, *)` column,
+  placed where the m/z column was; the two sources are dropped. Per row both lists are present
+  (or both null, giving a null spectrum), of equal length, finite, with ascending m/z
+  (`sort=True` sorts the pairs). `float64` lists need `cast="f32"` (rounded to float32);
+  without it they are an error naming the column. Errors name the column and row. The result is
+  identical to `peaks_array()` on the same data. Lineage records `peaks`, `cast` and `sorted`.
+- Raw layer: `Db._native.load_arrow_ipc(name, ipc_stream: bytes, origin: str, peaks=[(new, mz,
+  intensity), ...], cast_f64=False, sort=False) -> int` takes an Arrow IPC stream; the methods
+  above serialize to it. Engine entry points: `TensorDb::load_record_batch(name, &RecordBatch,
+  origin)` and, with `peaks`, `TensorDb::load_record_batch_with_peaks(name, &RecordBatch,
+  origin, &PeakLoad)`.
+- `Db.lineage(name) -> dict`: `json.loads` of `EXPLAIN LINEAGE <name> AS JSON` (entity with
+  content hash, `operation`, `parameters` incl. `rows`/`origin`, `inputs`). Saved with
+  `json.dump`, it is what `ASSERT LINEAGE <name> MATCHES '<file>'` checks.
 - The R binding has no equivalent yet.
 
 ## 2. Dataset export — no `/delivery`, direct filesystem reads

@@ -11,6 +11,7 @@ use super::operations::{BinaryOp, TensorKind, UnaryOp};
 use crate::engine::context::ExecutionContext;
 
 mod memory_load;
+pub use memory_load::{combine_peak_columns, PeakColumns, PeakLoad};
 mod snapshot;
 
 struct NameEntry {
@@ -96,7 +97,19 @@ impl DatabaseInstance {
     /// `DATASET d FROM t GROUP BY x` persists unchanged content and must
     /// not erase `t`'s ancestry from `EXPLAIN LINEAGE d`. A record with real
     /// inputs, or whose output is genuinely new content, is always kept.
-    pub fn record_provenance(&mut self, record: crate::core::provenance::ProvenanceRecord) {
+    pub fn record_provenance(&mut self, mut record: crate::core::provenance::ProvenanceRecord) {
+        // A record producing one dataset carries that dataset's row count,
+        // so `EXPLAIN LINEAGE ... AS JSON` works as a run manifest.
+        if let [crate::core::provenance::ProvenanceEntity::Dataset { name, .. }] =
+            record.outputs.as_slice()
+        {
+            if !record.parameters.contains_key("rows") {
+                if let Ok(ds) = self.get_dataset(name) {
+                    let n = ds.rows.len();
+                    record.parameters.insert("rows".to_string(), n.into());
+                }
+            }
+        }
         // While replaying the WAL (or restoring/writing a checkpoint), a
         // record whose outputs all already have a producer is a re-run of
         // something the original execution already recorded: skip it so

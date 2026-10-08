@@ -276,7 +276,16 @@ class Db:
             )
         return result.to_pandas()
 
-    def load_arrow(self, name: str, data, *, origin: str = "arrow") -> int:
+    def load_arrow(
+        self,
+        name: str,
+        data,
+        *,
+        origin: str = "arrow",
+        peaks: dict | None = None,
+        cast: str | None = None,
+        sort: bool = False,
+    ) -> int:
         """Create dataset `name` from in-memory Arrow data -- a
         `pyarrow.Table`, a `pyarrow.RecordBatch`, or anything
         `pyarrow.table()` accepts (e.g. an object exposing
@@ -290,8 +299,23 @@ class Db:
         Any other type, NaN or infinite values, or an existing dataset
         named `name` raise `LinalError`. The load is recorded in the
         lineage log under `origin`. Returns the number of rows loaded.
+
+        `peaks` builds `Matrix(2, *)` peak-list columns from pairs of
+        variable-length list columns, in Rust:
+        `peaks={"peaks": ("ms2_mzs", "ms2_intensities")}` combines the two
+        into one column `peaks` (placed where the m/z column was; the two
+        source columns are dropped). Each row's lists must
+        have equal lengths, finite values and ascending m/z (`sort=True`
+        sorts the pairs instead). float64 lists are rejected unless
+        `cast="f32"` asks for them to be rounded to float32 explicitly.
+        The result is identical to building the column with `peaks_array()`.
         """
         import pyarrow as pa
+
+        if cast not in (None, "f32"):
+            raise LinalError(f"load_arrow: cast must be None or 'f32', got {cast!r}")
+        if peaks is not None and not isinstance(peaks, dict):
+            raise LinalError("load_arrow: peaks must be a dict {new_column: (mz_column, intensity_column)}")
 
         if isinstance(data, pa.RecordBatch):
             table = pa.Table.from_batches([data])
@@ -302,7 +326,26 @@ class Db:
         sink = pa.BufferOutputStream()
         with pa.ipc.new_stream(sink, table.schema) as writer:
             writer.write_table(table)
-        return self._native.load_arrow_ipc(name, sink.getvalue().to_pybytes(), origin)
+        triples = [(new, mz, it) for new, (mz, it) in (peaks or {}).items()]
+        return self._native.load_arrow_ipc(
+            name,
+            sink.getvalue().to_pybytes(),
+            origin,
+            triples,
+            cast == "f32",
+            sort,
+        )
+
+    def lineage(self, name: str) -> dict:
+        """`name`'s lineage as a dict: the `EXPLAIN LINEAGE <name> AS JSON`
+        tree (each node's entity with its content hash, the operation that
+        produced it, its parameters -- including row counts and load
+        origins -- and its inputs). Save it with `json.dump` and check a
+        later run against it with `ASSERT LINEAGE <name> MATCHES '<file>'`.
+        """
+        import json
+
+        return json.loads(self.execute(f"EXPLAIN LINEAGE {name} AS JSON"))
 
     def load_numpy(
         self,

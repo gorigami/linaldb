@@ -107,7 +107,268 @@ fn check_supported(name: &str, data_type: &DataType) -> Result<(), EngineError> 
     )))
 }
 
+/// One `Matrix(2, *)` peak-list column to build from two variable-length
+/// list columns (`PeakLoad`).
+#[derive(Debug, Clone)]
+pub struct PeakColumns {
+    /// Name of the new column.
+    pub name: String,
+    /// Source column with each spectrum's m/z values.
+    pub mz: String,
+    /// Source column with each spectrum's intensities.
+    pub intensity: String,
+}
+
+/// Options for `TensorDb::load_record_batch_with_peaks`.
+#[derive(Debug, Clone, Default)]
+pub struct PeakLoad {
+    pub peaks: Vec<PeakColumns>,
+    /// Allow `Float64` source lists, rounded to `Float32` (the only
+    /// precision peak lists have). Without it, `Float64` lists are an error:
+    /// values are never converted behind the caller's back.
+    pub cast_f64: bool,
+    /// Sort each spectrum's peaks by m/z instead of rejecting unsorted ones.
+    pub sort: bool,
+}
+
+/// A list column's per-row values as f32, or an error naming the column.
+/// `List` and `LargeList` of `Float32` (always) or `Float64` (`cast_f64`).
+fn list_rows(
+    batch: &RecordBatch,
+    column: &str,
+    cast_f64: bool,
+) -> Result<Vec<Option<Vec<f32>>>, EngineError> {
+    use arrow::array::{GenericListArray, OffsetSizeTrait};
+    let bad = |msg: String| EngineError::InvalidOp(format!("peaks: column '{}' {}", column, msg));
+    let array = batch
+        .column_by_name(column)
+        .ok_or_else(|| bad("not found".to_string()))?;
+    fn rows<O: OffsetSizeTrait>(
+        list: &GenericListArray<O>,
+        cast_f64: bool,
+        bad: &dyn Fn(String) -> EngineError,
+    ) -> Result<Vec<Option<Vec<f32>>>, EngineError> {
+        let values = list.values();
+        let get: Box<dyn Fn(usize) -> f32> = match values.data_type() {
+            DataType::Float32 => {
+                let v = values.as_any().downcast_ref::<Float32Array>().unwrap().clone();
+                Box::new(move |i| v.value(i))
+            }
+            DataType::Float64 if cast_f64 => {
+                let v = values.as_any().downcast_ref::<Float64Array>().unwrap().clone();
+                Box::new(move |i| v.value(i) as f32)
+            }
+            DataType::Float64 => {
+                return Err(bad(
+                    "holds float64 values; peak lists are float32 -- pass cast='f32' to round them explicitly"
+                        .to_string(),
+                ))
+            }
+            other => return Err(bad(format!("holds {:?} values, not floats", other))),
+        };
+        if values.null_count() > 0 {
+            return Err(bad("has a NULL inside a list".to_string()));
+        }
+        let offsets = list.value_offsets();
+        Ok((0..list.len())
+            .map(|r| {
+                list.is_valid(r).then(|| {
+                    (offsets[r].as_usize()..offsets[r + 1].as_usize())
+                        .map(&get)
+                        .collect()
+                })
+            })
+            .collect())
+    }
+    match array.data_type() {
+        DataType::List(_) => rows(
+            array
+                .as_any()
+                .downcast_ref::<arrow::array::ListArray>()
+                .unwrap(),
+            cast_f64,
+            &bad,
+        ),
+        DataType::LargeList(_) => rows(
+            array
+                .as_any()
+                .downcast_ref::<arrow::array::LargeListArray>()
+                .unwrap(),
+            cast_f64,
+            &bad,
+        ),
+        other => Err(bad(format!(
+            "is {:?}, not a variable-length list of floats",
+            other
+        ))),
+    }
+}
+
+/// `batch` with each `PeakLoad::peaks` entry's two list columns combined
+/// into one `Matrix(2, *)` column (`FixedSizeList<List<Float32>, 2>`, as
+/// `linaldb.peaks_array()` builds it), placed where the m/z column was.
+/// The two source columns are dropped (variable-length lists are not a
+/// column type of their own).
+/// Per row: both lists NULL gives a NULL spectrum; otherwise both must be
+/// present, of equal length, finite, and with ascending m/z (or sorted,
+/// with `sort`). Errors name the column and row.
+pub fn combine_peak_columns(
+    batch: &RecordBatch,
+    opts: &PeakLoad,
+) -> Result<RecordBatch, EngineError> {
+    use arrow::datatypes::Field;
+    let mut built: Vec<(String, String, Field, ArrayRef)> = Vec::new();
+    let mut consumed: Vec<&str> = Vec::new();
+    for spec in &opts.peaks {
+        let mz_rows = list_rows(batch, &spec.mz, opts.cast_f64)?;
+        let int_rows = list_rows(batch, &spec.intensity, opts.cast_f64)?;
+        let mut offsets: Vec<i32> = vec![0];
+        let mut values: Vec<f32> = Vec::new();
+        let mut valid: Vec<bool> = Vec::with_capacity(mz_rows.len());
+        for (r, (mz, int)) in mz_rows.into_iter().zip(int_rows).enumerate() {
+            let err = |msg: String| {
+                EngineError::InvalidOp(format!("peaks '{}': row {} {}", spec.name, r, msg))
+            };
+            let (mut mz, mut int) = match (mz, int) {
+                (None, None) => {
+                    offsets.push(values.len() as i32);
+                    offsets.push(values.len() as i32);
+                    valid.push(false);
+                    continue;
+                }
+                (Some(m), Some(i)) => (m, i),
+                _ => {
+                    return Err(err(format!(
+                        "has a NULL in only one of '{}' and '{}'",
+                        spec.mz, spec.intensity
+                    )))
+                }
+            };
+            if mz.len() != int.len() {
+                return Err(err(format!(
+                    "has {} m/z values and {} intensities",
+                    mz.len(),
+                    int.len()
+                )));
+            }
+            if let Some(x) = mz.iter().chain(&int).find(|x| !x.is_finite()) {
+                return Err(err(format!(
+                    "has {} -- NaN and infinite values are rejected",
+                    x
+                )));
+            }
+            if let Some(i) = mz.windows(2).position(|w| w[1] < w[0]) {
+                if !opts.sort {
+                    return Err(err(format!(
+                        "has m/z {} after {} -- peaks must be sorted by m/z (or pass sort=True)",
+                        mz[i + 1],
+                        mz[i]
+                    )));
+                }
+                let mut order: Vec<usize> = (0..mz.len()).collect();
+                order.sort_by(|&a, &b| mz[a].total_cmp(&mz[b]));
+                (mz, int) = (
+                    order.iter().map(|&k| mz[k]).collect(),
+                    order.iter().map(|&k| int[k]).collect(),
+                );
+            }
+            for row in [mz, int] {
+                values.extend(row);
+                offsets.push(i32::try_from(values.len()).map_err(|_| {
+                    EngineError::InvalidOp(format!(
+                        "peaks '{}': more than {} values in one load -- load in batches",
+                        spec.name,
+                        i32::MAX
+                    ))
+                })?);
+            }
+            valid.push(true);
+        }
+        let item = Arc::new(Field::new("item", DataType::Float32, false));
+        let list = arrow::array::ListArray::try_new(
+            item,
+            arrow::buffer::OffsetBuffer::new(offsets.into()),
+            Arc::new(Float32Array::from(values)),
+            None,
+        )
+        .map_err(|e| EngineError::InvalidOp(e.to_string()))?;
+        let row_field = Arc::new(Field::new("item", list.data_type().clone(), false));
+        let nulls = valid
+            .iter()
+            .any(|v| !v)
+            .then(|| arrow::buffer::NullBuffer::from(valid));
+        let outer = FixedSizeListArray::try_new(row_field.clone(), 2, Arc::new(list), nulls)
+            .map_err(|e| EngineError::InvalidOp(e.to_string()))?;
+        built.push((
+            spec.name.clone(),
+            spec.mz.clone(),
+            Field::new(&spec.name, DataType::FixedSizeList(row_field, 2), true),
+            Arc::new(outer),
+        ));
+        consumed.push(&spec.mz);
+        consumed.push(&spec.intensity);
+    }
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        let name = field.name().as_str();
+        if let Some((_, _, f, a)) = built.iter().find(|(_, mz, _, _)| mz == name) {
+            fields.push(f.clone());
+            columns.push(a.clone());
+        }
+        if !consumed.contains(&name) {
+            fields.push(field.as_ref().clone());
+            columns.push(column.clone());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(f) = fields.iter().find(|f| !seen.insert(f.name().clone())) {
+        return Err(EngineError::InvalidOp(format!(
+            "peaks: column '{}' would appear twice -- give the peak column another name",
+            f.name()
+        )));
+    }
+    RecordBatch::try_new(Arc::new(arrow::datatypes::Schema::new(fields)), columns)
+        .map_err(|e| EngineError::InvalidOp(e.to_string()))
+}
+
 impl TensorDb {
+    /// `load_record_batch` after combining list columns into peak lists
+    /// (`combine_peak_columns`). The lineage record names each combined
+    /// column's sources and whether float64 values were rounded.
+    pub fn load_record_batch_with_peaks(
+        &mut self,
+        name: &str,
+        batch: &RecordBatch,
+        origin: &str,
+        peaks: &PeakLoad,
+    ) -> Result<usize, EngineError> {
+        let combined = combine_peak_columns(batch, peaks)?;
+        let params: Vec<(String, serde_json::Value)> = vec![
+            (
+                "peaks".to_string(),
+                serde_json::Value::Object(
+                    peaks
+                        .peaks
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                serde_json::json!([p.mz.clone(), p.intensity.clone()]),
+                            )
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "cast".to_string(),
+                (if peaks.cast_f64 { "f32" } else { "none" }).into(),
+            ),
+            ("sorted".to_string(), peaks.sort.into()),
+        ];
+        self.load_record_batch_inner(name, &combined, origin, params)
+    }
+
     /// Creates dataset `name` in the active database from `batch`, without
     /// writing a file or parsing DSL. `origin` is a short description of
     /// where the data came from (e.g. `"numpy"`, `"arrow"`); it's recorded
@@ -122,6 +383,16 @@ impl TensorDb {
         name: &str,
         batch: &RecordBatch,
         origin: &str,
+    ) -> Result<usize, EngineError> {
+        self.load_record_batch_inner(name, batch, origin, Vec::new())
+    }
+
+    fn load_record_batch_inner(
+        &mut self,
+        name: &str,
+        batch: &RecordBatch,
+        origin: &str,
+        params: Vec<(String, serde_json::Value)>,
     ) -> Result<usize, EngineError> {
         if name.is_empty() {
             return Err(EngineError::InvalidOp("dataset name is empty".to_string()));
@@ -202,11 +473,14 @@ impl TensorDb {
             crate::core::tensor::ExecutionId::new(),
         )
         .with_param("origin", origin)
-        .with_param("rows", n)
-        .with_outputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
-            name.to_string(),
-            hash,
-        )]);
+        .with_param("rows", n);
+        let record = params
+            .into_iter()
+            .fold(record, |r, (k, v)| r.with_param(k, v))
+            .with_outputs(vec![crate::core::provenance::ProvenanceEntity::dataset(
+                name.to_string(),
+                hash,
+            )]);
         instance.record_provenance(record);
 
         if self.config.wal.enabled {

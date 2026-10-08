@@ -114,6 +114,22 @@ impl Parser {
         Ok(Statement::PruneLineage(PruneLineageStmt { before }))
     }
 
+    // ASSERT LINEAGE <name> MATCHES '<file.json>'
+    pub(super) fn parse_assert_lineage(&mut self) -> Result<Statement, ParseError> {
+        self.advance(); // ASSERT
+        if !self.at(&Token::Lineage) {
+            return Err(self.error("expected LINEAGE after ASSERT"));
+        }
+        self.advance();
+        let name = self.eat_ident()?;
+        if !self.at_ident("MATCHES") {
+            return Err(self.error("expected MATCHES '<file.json>' after ASSERT LINEAGE <name>"));
+        }
+        self.advance();
+        let path = self.eat_str()?;
+        Ok(Statement::AssertLineage(AssertLineageStmt { name, path }))
+    }
+
     // EXPLAIN LINEAGE <name> [AS JSON]
     // EXPLAIN <bare_ident>
     pub(super) fn parse_explain(&mut self) -> Result<Statement, ParseError> {

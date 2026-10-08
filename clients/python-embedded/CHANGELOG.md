@@ -6,6 +6,13 @@ engine's own changelog.
 
 ## [Unreleased]
 
+- `Db.load_arrow(..., peaks={new: (mz_column, intensity_column)}, cast=None|"f32", sort=False)`:
+  build `Matrix(2, *)` peak-list columns from two variable-length list columns in Rust (P11).
+- `Db.lineage(name) -> dict`: `EXPLAIN LINEAGE <name> AS JSON` as a dict, for run manifests
+  checked with `ASSERT LINEAGE` (P15).
+- Picks up the engine's `SPEC_ENTROPY`, `SPEC_CLEAN` and `SEARCH ... RETURN`; tests check them
+  against `ms_entropy` and matchms when installed.
+
 ## [0.1.18] - 2026-10-07
 
 Picks up the root engine's `v0.1.93`: five fixes found by `linal-hub` on 0.1.17.
