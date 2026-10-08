@@ -434,6 +434,22 @@ fn show_memory(
             ds.estimated_rows_bytes(),
         )
         .map_err(to_err)?;
+        // Memory-mapped columns (`LOAD DATASET ... MMAP`): file bytes read in
+        // place, not heap -- the OS pages them in and out.
+        for (i, field) in ds.schema.fields.iter().enumerate() {
+            let mapped: usize = ds.rows.iter().map(|r| r.values[i].mapped_bytes()).sum();
+            if mapped > 0 {
+                push(
+                    "mapped",
+                    name,
+                    &field.name,
+                    "memory-mapped column file".to_string(),
+                    ds.rows.len(),
+                    mapped,
+                )
+                .map_err(to_err)?;
+            }
+        }
         let mut cols: Vec<&String> = ds.indices.keys().collect();
         cols.sort();
         for col in cols {

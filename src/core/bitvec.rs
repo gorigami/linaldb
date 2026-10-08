@@ -18,15 +18,39 @@ use serde::{Deserialize, Serialize};
 pub struct BitVec {
     len: usize,
     /// `ceil(len / 64)` words; bits past `len` in the last word are always 0.
-    words: Vec<u64>,
+    /// Owned, or a view into a memory-mapped column file (`core::colbuf`).
+    words: crate::core::colbuf::Buf<u64>,
 }
 
 impl BitVec {
     pub fn zeros(len: usize) -> Self {
         Self {
             len,
-            words: vec![0; len.div_ceil(64)],
+            words: vec![0; len.div_ceil(64)].into(),
         }
+    }
+
+    /// From its words (bit `i` = bit `i % 64` of word `i / 64`), e.g. a
+    /// mapped column file's slice. `words` must hold `ceil(len / 64)` words
+    /// with the bits past `len` cleared.
+    pub fn from_words(len: usize, words: crate::core::colbuf::Buf<u64>) -> Self {
+        debug_assert_eq!(words.len(), len.div_ceil(64));
+        Self { len, words }
+    }
+
+    /// The words, bit `i` = bit `i % 64` of word `i / 64`.
+    pub fn words(&self) -> &[u64] {
+        &self.words
+    }
+
+    /// Heap bytes held (0 when the words are mapped).
+    pub fn heap_bytes(&self) -> usize {
+        self.words.heap_bytes()
+    }
+
+    /// Bytes of a mapped column file these words cover (0 when owned).
+    pub fn mapped_bytes(&self) -> usize {
+        self.words.mapped_bytes()
     }
 
     pub fn len(&self) -> usize {
@@ -49,10 +73,11 @@ impl BitVec {
             self.len
         );
         let mask = 1u64 << (i % 64);
+        let words = self.words.to_mut();
         if on {
-            self.words[i / 64] |= mask;
+            words[i / 64] |= mask;
         } else {
-            self.words[i / 64] &= !mask;
+            words[i / 64] &= !mask;
         }
     }
 
@@ -151,7 +176,7 @@ impl BitVec {
     fn and_or(&self, other: &Self) -> (u64, u64) {
         self.words
             .iter()
-            .zip(&other.words)
+            .zip(other.words.iter())
             .fold((0, 0), |(and, or), (a, b)| {
                 (
                     and + (a & b).count_ones() as u64,
@@ -168,13 +193,34 @@ impl BitVec {
         Ok(if or == 0 { 1.0 } else { and as f64 / or as f64 })
     }
 
+    /// `Σ v[i]` over the set bits `i`: the dot product of the bits (as 0/1)
+    /// with a dense vector of the same length, summed in f64.
+    pub fn dot_dense(&self, v: &[f32]) -> Result<f64, String> {
+        if v.len() != self.len {
+            return Err(format!(
+                "DOT: BitVector has {} bits, the vector {} elements",
+                self.len,
+                v.len()
+            ));
+        }
+        let mut sum = 0.0f64;
+        for (w, &word) in self.words.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                sum += v[w * 64 + bits.trailing_zeros() as usize] as f64;
+                bits &= bits - 1;
+            }
+        }
+        Ok(sum)
+    }
+
     /// Number of differing bits.
     pub fn hamming(&self, other: &Self) -> Result<u64, String> {
         self.check_len(other, "HAMMING")?;
         Ok(self
             .words
             .iter()
-            .zip(&other.words)
+            .zip(other.words.iter())
             .map(|(a, b)| (a ^ b).count_ones() as u64)
             .sum())
     }

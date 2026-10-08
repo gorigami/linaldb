@@ -89,6 +89,12 @@ pub struct StorageConfig {
     /// is unloaded.
     #[serde(default)]
     pub mmap_index_snapshots: bool,
+    /// `SAVE DATASET` also writes each `BitVector` / `Vector(d, F16|I8)`
+    /// column as a column file, and `LOAD DATASET` memory-maps those
+    /// columns instead of reading them into the heap (`core::colbuf`) --
+    /// as if every `SAVE`/`LOAD DATASET` had `MMAP`. Off by default.
+    #[serde(default)]
+    pub mmap_columns: bool,
 }
 
 impl Default for EngineConfig {
@@ -98,6 +104,7 @@ impl Default for EngineConfig {
                 data_dir: PathBuf::from("./data"),
                 default_db: "default".to_string(),
                 mmap_index_snapshots: false,
+                mmap_columns: false,
             },
             wal: WalConfig::default(),
             compute: ComputeConfig::default(),

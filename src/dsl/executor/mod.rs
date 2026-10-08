@@ -409,11 +409,11 @@ pub fn execute_statement(
 
         // ── Persistence ─────────────────────────────────────────────────────
         Statement::Save(s) => {
-            persistence::save_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
+            persistence::save_typed(db, s.kind, &s.name, s.path.as_deref(), s.mmap, line_no)
         }
 
         Statement::Load(s) => {
-            persistence::load_typed(db, s.kind, &s.name, s.path.as_deref(), line_no)
+            persistence::load_typed(db, s.kind, &s.name, s.path.as_deref(), s.mmap, line_no)
         }
 
         Statement::List(s) => persistence::list_typed(db, &s.target, line_no),
@@ -721,6 +721,25 @@ fn record_search_provenance(
         .with_param("k", s.top_k);
     let record = match &s.returning {
         Some(cols) => record.with_param("return", cols.clone()),
+        None => record,
+    };
+    // The scores that ranked the hits, as written (`"DOT(fp, q.z) ASC"`).
+    let score_text = |c: &ScoreClause| {
+        let expr = eval::expr_to_string(&c.expr);
+        if c.ascending {
+            format!("{} ASC", expr)
+        } else {
+            expr
+        }
+    };
+    let record = match &s.using {
+        Some(c) => record.with_param("using", score_text(c)),
+        None => record,
+    };
+    let record = match &s.rerank {
+        Some((n, c)) => record
+            .with_param("candidates", *n)
+            .with_param("rerank", score_text(c)),
         None => record,
     }
     .with_inputs(inputs)

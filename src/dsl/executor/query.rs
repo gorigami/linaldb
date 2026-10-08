@@ -223,6 +223,8 @@ pub(super) fn search_plan(
     };
 
     if s.prefilter.is_none()
+        && s.using.is_none()
+        && s.rerank.is_none()
         && matches!(
             schema.get_field(&s.column).map(|f| &f.value_type),
             Some(ValueType::SparseVector(_))
@@ -234,6 +236,48 @@ pub(super) fn search_plan(
         )));
     }
     let is_batch = matches!(s.query, SearchQuery::Batch { .. });
+    // USING / RERANK: scores over the searched row and the query row, so
+    // the queries must come from a dataset.
+    let scored = s.using.is_some();
+    if scored || s.rerank.is_some() {
+        let what = if scored {
+            "SEARCH ... USING"
+        } else {
+            "SEARCH ... RERANK"
+        };
+        if !matches!(
+            s.query,
+            SearchQuery::Batch {
+                column: Some(_),
+                ..
+            }
+        ) {
+            return Err(invalid(format!(
+                "{} needs queries from a dataset (QUERIES <dataset>.<column>), whose columns the score reads as <dataset>.<column>",
+                what
+            )));
+        }
+        if s.approx {
+            return Err(invalid(format!(
+                "{} ranks exactly; APPROX (the HNSW graph) only ranks by cosine -- drop APPROX",
+                what
+            )));
+        }
+        if schema.get_field(&s.column).is_none() {
+            return Err(invalid(format!(
+                "SEARCH: column '{}' not found in dataset '{}'",
+                s.column, s.dataset
+            )));
+        }
+    }
+    if let Some((n, _)) = &s.rerank {
+        if *n < s.top_k {
+            return Err(invalid(format!(
+                "SEARCH: CANDIDATES {} is fewer than LIMIT {} -- the rerank can only order the candidates it keeps",
+                n, s.top_k
+            )));
+        }
+    }
     // RETURN: the dataset columns each hit carries, in the order given.
     let projection: Option<Vec<usize>> = match &s.returning {
         None => None,
@@ -290,6 +334,8 @@ pub(super) fn search_plan(
     // Batch queries, and any PREFILTER search (a single query runs as a
     // batch of one, projected back to the dataset's columns below).
     let target_dim = match schema.get_field(&s.column).map(|f| &f.value_type) {
+        // With USING the ON column is only a name; the score reads the rows.
+        Some(_) if scored => 0,
         Some(ValueType::Vector(d)) => *d,
         Some(ValueType::SparseVector(d)) => *d,
         Some(ValueType::QVector(d, _)) => *d,
@@ -311,9 +357,8 @@ pub(super) fn search_plan(
             ref source,
             ref column,
             ref key,
-        } => {
-            resolve_batch_queries(db, source, column.as_deref(), key.as_deref()).map_err(invalid)?
-        }
+        } => resolve_batch_queries(db, source, column.as_deref(), key.as_deref(), scored)
+            .map_err(invalid)?,
         _ => BatchQueries {
             queries: vec![(Value::Int(0), single_query(db)?.to_logical_vec())],
             key_type: ValueType::Int,
@@ -333,13 +378,34 @@ pub(super) fn search_plan(
     }
     // A single prefiltered query returns the same shape as plain SEARCH
     // (the dataset's own rows); a batch adds the per-hit columns in front.
+    // Cosine scores are `Float`; a `USING` / `RERANK USING` score is
+    // `Double`. With RERANK, `score_stage1` is the first score.
+    let stage1_type = if scored {
+        ValueType::Float64
+    } else {
+        ValueType::Float
+    };
     let mut fields = if is_batch {
-        vec![
+        let mut f = vec![
             crate::core::tuple::Field::new("query_id", batch.key_type.clone()),
             crate::core::tuple::Field::new("rank", ValueType::Int),
-            crate::core::tuple::Field::new("score", ValueType::Float),
-            crate::core::tuple::Field::new("row_id", ValueType::Int),
-        ]
+            crate::core::tuple::Field::new(
+                "score",
+                if s.rerank.is_some() {
+                    ValueType::Float64
+                } else {
+                    stage1_type.clone()
+                },
+            ),
+        ];
+        if s.rerank.is_some() {
+            f.push(crate::core::tuple::Field::new(
+                "score_stage1",
+                stage1_type.clone(),
+            ));
+        }
+        f.push(crate::core::tuple::Field::new("row_id", ValueType::Int));
+        f
     } else {
         Vec::new()
     };
@@ -359,9 +425,27 @@ pub(super) fn search_plan(
         fields.push(field);
     }
     let out_schema = Arc::new(crate::core::tuple::Schema::new(fields));
-    let prefilter = match &s.prefilter {
+    // USING / RERANK always take the exact path: without PREFILTER every
+    // row is a candidate.
+    let always = Expr::Bool(true);
+    let prefilter_expr = match &s.prefilter {
+        Some(expr) => Some(expr),
+        None if scored || s.rerank.is_some() => Some(&always),
+        None => None,
+    };
+    let prefilter = match prefilter_expr {
         Some(expr) => Some(Arc::new(
-            build_prefilter(db, expr, &s.dataset, &schema, &batch, s.approx).map_err(invalid)?,
+            build_prefilter(
+                db,
+                expr,
+                &s.dataset,
+                &schema,
+                &batch,
+                s.approx,
+                s.using.as_ref(),
+                s.rerank.as_ref(),
+            )
+            .map_err(invalid)?,
         )),
         None => None,
     };
@@ -395,6 +479,7 @@ fn resolve_batch_queries(
     source: &str,
     column: Option<&str>,
     key: Option<&str>,
+    any_type: bool,
 ) -> Result<BatchQueries, String> {
     let Some(column) = column else {
         let t = db.get(source).map_err(|e| e.to_string())?;
@@ -442,6 +527,8 @@ fn resolve_batch_queries(
         let row = crate::query::physical::evaluate_lazy_columns_in_row(ds, row)
             .map_err(|e| e.to_string())?;
         let v = match &row.values[col_idx] {
+            // `USING`: the score reads the query row; no vector needed.
+            _ if any_type => Vec::new(),
             Value::Vector(v) => v.clone(),
             Value::SparseVector(sv) => sv.to_dense(),
             Value::QVector(q) => q.dequantize(),
@@ -469,9 +556,12 @@ fn resolve_batch_queries(
     })
 }
 
-/// Lowers a `PREFILTER` predicate. `<query dataset>.<column>` becomes the
-/// query column `QUERY_COLUMN_PREFIX + column`, evaluated per query; every
-/// other name must be a column of the searched dataset.
+/// Lowers a `PREFILTER` predicate, and a `USING` / `RERANK USING` score.
+/// `<query dataset>.<column>` becomes the query column
+/// `QUERY_COLUMN_PREFIX` plus the column name, evaluated per query; every
+/// other name must be a column of the searched dataset. A score must be
+/// numeric; both are type-checked before any row runs.
+#[allow(clippy::too_many_arguments)]
 fn build_prefilter(
     db: &TensorDb,
     expr: &Expr,
@@ -479,27 +569,12 @@ fn build_prefilter(
     schema: &crate::core::tuple::Schema,
     batch: &BatchQueries,
     approximate: bool,
+    score: Option<&ScoreClause>,
+    rerank: Option<&(usize, ScoreClause)>,
 ) -> Result<crate::query::logical::Prefilter, String> {
-    use crate::query::logical::QUERY_COLUMN_PREFIX;
+    use crate::query::logical::{ScoreExpr, QUERY_COLUMN_PREFIX};
 
     let query_source = batch.source.as_ref();
-    let unknown = std::cell::RefCell::new(Vec::new());
-    let rewritten = map_expr(expr, &|e| match (e, query_source) {
-        (Expr::Field { base, field }, Some((qname, qschema, _))) => match base.as_ref() {
-            Expr::Ref(b) if b == qname => {
-                if qschema.get_field_index(field).is_none() {
-                    unknown.borrow_mut().push(format!("{}.{}", qname, field));
-                }
-                Some(Expr::Ref(format!("{}{}", QUERY_COLUMN_PREFIX, field)))
-            }
-            _ => None,
-        },
-        _ => None,
-    });
-    if let Some(name) = unknown.into_inner().first() {
-        return Err(format!("PREFILTER: unknown query column '{}'", name));
-    }
-
     let mut fields: Vec<crate::core::tuple::Field> = schema
         .fields
         .iter()
@@ -520,22 +595,75 @@ fn build_prefilter(
         query_values = rows.clone();
     }
     let combined_schema = Arc::new(crate::core::tuple::Schema::new(fields));
-    let predicate = dsl_expr_to_logical_expr(
-        &rewritten,
-        &combined_schema,
-        &std::collections::HashSet::new(),
-    );
-    let mut referenced = Vec::new();
-    collect_referenced_columns(&predicate, &mut referenced);
-    for name in &referenced {
-        if combined_schema.get_field_index(name).is_none() {
+
+    let lower = |expr: &Expr, what: &str| -> Result<LogicalExpr, String> {
+        let unknown = std::cell::RefCell::new(Vec::new());
+        let rewritten = map_expr(expr, &|e| match (e, query_source) {
+            (Expr::Field { base, field }, Some((qname, qschema, _))) => match base.as_ref() {
+                Expr::Ref(b) if b == qname => {
+                    if qschema.get_field_index(field).is_none() {
+                        unknown.borrow_mut().push(format!("{}.{}", qname, field));
+                    }
+                    Some(Expr::Ref(format!("{}{}", QUERY_COLUMN_PREFIX, field)))
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some(name) = unknown.into_inner().first() {
+            return Err(format!("{}: unknown query column '{}'", what, name));
+        }
+        let lowered = dsl_expr_to_logical_expr(
+            &rewritten,
+            &combined_schema,
+            &std::collections::HashSet::new(),
+        );
+        let mut referenced = Vec::new();
+        collect_referenced_columns(&lowered, &mut referenced);
+        for name in &referenced {
+            if combined_schema.get_field_index(name).is_none() {
+                return Err(format!(
+                    "{}: unknown column '{}' in dataset '{}'",
+                    what, name, dataset
+                ));
+            }
+        }
+        Ok(lowered)
+    };
+    let score_expr = |clause: &ScoreClause, what: &str| -> Result<ScoreExpr, String> {
+        let lowered = lower(&clause.expr, what)?;
+        crate::query::typecheck::check_expr(&lowered, &combined_schema)
+            .map_err(|e| format!("{}: {}", what, e))?;
+        let t = crate::query::logical::infer_expr_type_full(&lowered, &combined_schema);
+        if !matches!(
+            t,
+            ValueType::Int | ValueType::Float | ValueType::Float64 | ValueType::Null
+        ) {
             return Err(format!(
-                "PREFILTER: unknown column '{}' in dataset '{}'",
-                name, dataset
+                "{}: the score must be a number, but `{}` is {}",
+                what,
+                super::eval::expr_to_string(&clause.expr),
+                t
             ));
         }
-    }
+        Ok(ScoreExpr {
+            expr: lowered,
+            ascending: clause.ascending,
+            label: format!(
+                "{}{}",
+                super::eval::expr_to_string(&clause.expr),
+                if clause.ascending { " ASC" } else { "" }
+            ),
+        })
+    };
 
+    let predicate = lower(expr, "PREFILTER")?;
+    let score = score
+        .map(|c| score_expr(c, "SEARCH ... USING"))
+        .transpose()?;
+    let rerank = rerank
+        .map(|(n, c)| score_expr(c, "RERANK USING").map(|s| (*n, s)))
+        .transpose()?;
     let sorted_range = sorted_prefilter_range(db, dataset, &predicate);
     Ok(crate::query::logical::Prefilter {
         predicate,
@@ -543,6 +671,8 @@ fn build_prefilter(
         query_values,
         sorted_range,
         approximate,
+        score,
+        rerank,
     })
 }
 
@@ -2071,63 +2201,7 @@ fn map_expr(expr: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
 /// (see `resolve_having` below) instead of letting an unresolvable
 /// reference silently evaluate to `false` at row-filtering time.
 fn collect_referenced_columns(expr: &LogicalExpr, out: &mut Vec<String>) {
-    match expr {
-        LogicalExpr::Column(name) => out.push(name.clone()),
-        LogicalExpr::Literal(_) | LogicalExpr::VecLiteral(_) | LogicalExpr::MatLiteral(_) => {}
-        LogicalExpr::BinaryExpr { left, right, .. } => {
-            collect_referenced_columns(left, out);
-            collect_referenced_columns(right, out);
-        }
-        LogicalExpr::And(l, r) | LogicalExpr::Or(l, r) => {
-            collect_referenced_columns(l, out);
-            collect_referenced_columns(r, out);
-        }
-        LogicalExpr::Not(e) | LogicalExpr::IsNull(e) | LogicalExpr::IsNotNull(e) => {
-            collect_referenced_columns(e, out)
-        }
-        LogicalExpr::In { expr, list } => {
-            collect_referenced_columns(expr, out);
-            list.iter().for_each(|e| collect_referenced_columns(e, out));
-        }
-        LogicalExpr::Between { expr, low, high } => {
-            collect_referenced_columns(expr, out);
-            collect_referenced_columns(low, out);
-            collect_referenced_columns(high, out);
-        }
-        LogicalExpr::AggregateExpr { expr, func, .. } => {
-            collect_referenced_columns(expr, out);
-            if let AggregateFunction::ArgMax(by) | AggregateFunction::ArgMin(by) = func {
-                collect_referenced_columns(by, out);
-            }
-        }
-        LogicalExpr::Case {
-            operand,
-            branches,
-            else_expr,
-        } => {
-            if let Some(o) = operand {
-                collect_referenced_columns(o, out);
-            }
-            for (c, r) in branches {
-                collect_referenced_columns(c, out);
-                collect_referenced_columns(r, out);
-            }
-            if let Some(e) = else_expr {
-                collect_referenced_columns(e, out);
-            }
-        }
-        LogicalExpr::Coalesce(args) | LogicalExpr::ScalarFn { args, .. } => {
-            args.iter().for_each(|e| collect_referenced_columns(e, out))
-        }
-        LogicalExpr::VectorFn { args, .. } => {
-            args.iter().for_each(|e| collect_referenced_columns(e, out))
-        }
-        LogicalExpr::Nullif(a, b) => {
-            collect_referenced_columns(a, out);
-            collect_referenced_columns(b, out);
-        }
-        LogicalExpr::Cast { expr, .. } => collect_referenced_columns(expr, out),
-    }
+    crate::query::logical::collect_columns(expr, out)
 }
 
 /// Resolves and lowers a `HAVING` clause's AST expression into a

@@ -111,6 +111,171 @@ impl ParquetStorage {
         format!("{}/datasets/{}/data.parquet", self.base_path, name)
     }
 
+    /// Where `SAVE DATASET ... MMAP` writes column `column` of `name`
+    /// (`core::colbuf`).
+    pub fn column_file_path(&self, name: &str, column: &str) -> std::path::PathBuf {
+        Path::new(&self.dataset_dir(name))
+            .join("columns")
+            .join(format!("{}.lcol", column))
+    }
+
+    /// Writes a column file for every `BitVector` / `Vector(d, F16|I8)`
+    /// column of `dataset` (saved as `name`), replacing any earlier ones;
+    /// returns the columns written. Without any such column, it's an error.
+    pub fn save_column_files(
+        &self,
+        name: &str,
+        dataset: &Dataset,
+    ) -> Result<Vec<String>, StorageError> {
+        self.remove_column_files(name)?;
+        let mut written = Vec::new();
+        for (i, field) in dataset.schema.fields.iter().enumerate() {
+            let Some((kind, dim)) = crate::core::colbuf::ColumnKind::of(&field.value_type) else {
+                continue;
+            };
+            let values: Vec<&Value> = dataset.rows.iter().map(|r| &r.values[i]).collect();
+            crate::core::colbuf::write_column(
+                &self.column_file_path(name, &field.name),
+                kind,
+                dim,
+                &values,
+            )
+            .map_err(|e| StorageError::Serialization(format!("column '{}': {}", field.name, e)))?;
+            written.push(field.name.clone());
+        }
+        if written.is_empty() {
+            return Err(StorageError::Serialization(format!(
+                "SAVE DATASET {} MMAP: no BitVector or Vector(d, F16|I8) column to map (plain Vector(d) columns are float32 heap values; declare them Vector(d, F16) or Vector(d, I8) to map them)",
+                name
+            )));
+        }
+        Ok(written)
+    }
+
+    /// Drops `name`'s column files, so a later `LOAD ... MMAP` can't map
+    /// columns older than the Parquet data just saved.
+    pub fn remove_column_files(&self, name: &str) -> Result<(), StorageError> {
+        let dir = Path::new(&self.dataset_dir(name)).join("columns");
+        if dir.exists() {
+            fs::remove_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+
+    /// `load_dataset`, with every column that has a column file
+    /// memory-mapped instead of read from Parquet (those columns aren't
+    /// decoded at all). Returns the dataset and the mapped column names; an
+    /// error if there is no column file, or one doesn't match the data.
+    pub fn load_dataset_mapped(&self, name: &str) -> Result<(Dataset, Vec<String>), StorageError> {
+        use parquet::arrow::ProjectionMask;
+        let meta_path = self.legacy_metadata_path(name);
+        if !Path::new(&meta_path).exists() {
+            return Err(StorageError::DatasetNotFound(name.to_string()));
+        }
+        let metadata: DatasetMetadataLegacy =
+            serde_json::from_str(&fs::read_to_string(&meta_path)?)
+                .map_err(|e| StorageError::Serialization(format!("Metadata error: {}", e)))?;
+        let schema = Arc::new(metadata.schema.clone());
+
+        let mut mapped: Vec<(usize, crate::core::colbuf::ColumnFile)> = Vec::new();
+        for (i, field) in schema.fields.iter().enumerate() {
+            let Some((kind, dim)) = crate::core::colbuf::ColumnKind::of(&field.value_type) else {
+                continue;
+            };
+            let path = self.column_file_path(name, &field.name);
+            if !path.exists() {
+                continue;
+            }
+            let file = crate::core::colbuf::ColumnFile::open(&path)
+                .map_err(StorageError::Serialization)?;
+            if file.kind != kind || file.dim != dim {
+                return Err(StorageError::Serialization(format!(
+                    "{}: holds {:?} of {}, but column '{}' is {:?} -- SAVE DATASET {} MMAP again",
+                    path.display(),
+                    file.kind,
+                    file.dim,
+                    field.name,
+                    field.value_type,
+                    name
+                )));
+            }
+            mapped.push((i, file));
+        }
+        if mapped.is_empty() {
+            return Err(StorageError::Serialization(format!(
+                "LOAD DATASET {} MMAP: no column files -- save it with SAVE DATASET {} MMAP (or [storage] mmap_columns = true) first",
+                name, name
+            )));
+        }
+
+        let file = fs::File::open(self.dataset_data_path(name))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let is_mapped = |field: &str| mapped.iter().any(|(i, _)| schema.fields[*i].name == field);
+        let keep: Vec<usize> = builder
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !is_mapped(f.name()))
+            .map(|(i, _)| i)
+            .collect();
+        let mask = ProjectionMask::roots(builder.parquet_schema(), keep);
+        let reader = builder
+            .with_projection(mask)
+            .with_batch_size(2048)
+            .build()
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let rest = Arc::new(Schema::new(
+            schema
+                .fields
+                .iter()
+                .filter(|f| !is_mapped(&f.name))
+                .cloned()
+                .collect(),
+        ));
+        let mut rows = Vec::new();
+        for batch in reader {
+            for partial in record_batch_to_rows(&batch?, &rest)? {
+                let r = rows.len();
+                let mut others = partial.values.into_iter();
+                let values = (0..schema.fields.len())
+                    .map(|i| match mapped.iter().find(|(m, _)| *m == i) {
+                        Some((_, file)) if r < file.rows => file.value(r),
+                        Some(_) => Value::Null,
+                        None => others.next().unwrap_or(Value::Null),
+                    })
+                    .collect();
+                rows.push(Tuple::new(schema.clone(), values).map_err(StorageError::Serialization)?);
+            }
+        }
+        for (i, file) in &mapped {
+            if file.rows != rows.len() {
+                return Err(StorageError::Serialization(format!(
+                    "{}: {} rows, the dataset has {} -- SAVE DATASET {} MMAP again",
+                    self.column_file_path(name, &schema.fields[*i].name)
+                        .display(),
+                    file.rows,
+                    rows.len(),
+                    name
+                )));
+            }
+        }
+
+        let mut dataset = Dataset::new(
+            crate::core::dataset_legacy::DatasetId(0),
+            schema.clone(),
+            Some(name.to_string()),
+        );
+        dataset.rows = rows;
+        dataset.metadata = metadata;
+        let names = mapped
+            .iter()
+            .map(|(i, _)| schema.fields[*i].name.clone())
+            .collect();
+        Ok((dataset, names))
+    }
+
     fn dataset_schema_path(&self, name: &str) -> String {
         format!("{}/datasets/{}/schema.json", self.base_path, name)
     }
@@ -1487,7 +1652,7 @@ fn qvector_array_to_values(
                         .ok_or_else(|| bad("values must be int8".into()))?;
                     QuantVec::I8 {
                         scale: scales.value(r),
-                        data: a.values().to_vec(),
+                        data: a.values().to_vec().into(),
                     }
                 }
             };

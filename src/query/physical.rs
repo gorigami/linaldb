@@ -304,6 +304,16 @@ impl std::fmt::Debug for BatchVectorSearchExec {
             ),
             None => "exact over rows passing PREFILTER, full scan".to_string(),
         });
+        let score = self.prefilter.as_ref().map(|p| {
+            let first = p
+                .score
+                .as_ref()
+                .map_or("cosine".to_string(), |s| s.label.clone());
+            match &p.rerank {
+                Some((n, r)) => format!("{} (top {}), then RERANK USING {}", first, n, r.label),
+                None => first,
+            }
+        });
         f.debug_struct("BatchVectorSearchExec")
             .field("dataset_name", &self.dataset_name)
             .field("column", &self.column)
@@ -311,7 +321,158 @@ impl std::fmt::Debug for BatchVectorSearchExec {
             .field("k", &self.k)
             .field("resolved_index_type", &self.resolved_index_type)
             .field("prefilter", &prefilter)
+            .field("score", &score)
             .finish()
+    }
+}
+
+/// One search hit: row id, score, and -- with `CANDIDATES ... RERANK` --
+/// the first-stage score.
+type Hit = (usize, f64, Option<f64>);
+
+/// Where a fast-path score argument comes from.
+enum FastArg {
+    /// A column of the candidate row, read in place.
+    Row(usize),
+    /// A column of the query row, read in place.
+    Query(usize),
+    /// Anything else, evaluated on the candidate's evaluation row.
+    Expr(crate::query::logical::Expr),
+}
+
+/// A `USING` score that is one call to a spectral, bit-vector or `DOT`
+/// function: its column arguments are borrowed from the stored rows instead
+/// of copied into an evaluation row and cloned again by the evaluator --
+/// for peak lists, three copies per candidate. Same functions, same
+/// results; anything else takes the general evaluator.
+struct FastScore {
+    func: crate::query::logical::VectorFnKind,
+    args: Vec<FastArg>,
+}
+
+impl FastScore {
+    fn compile(
+        score: &crate::query::logical::ScoreExpr,
+        dataset: &crate::core::dataset_legacy::Dataset,
+        combined: &Schema,
+    ) -> Option<Self> {
+        use crate::core::value::ValueType;
+        use crate::query::logical::{Expr, VectorFnKind as K};
+        let Expr::VectorFn { func, args } = &score.expr else {
+            return None;
+        };
+        if !matches!(
+            func,
+            K::SpecCosine
+                | K::SpecCosineMod
+                | K::SpecMatches
+                | K::SpecEntropy
+                | K::Tanimoto
+                | K::Jaccard
+                | K::Hamming
+                | K::Dot
+        ) {
+            return None;
+        }
+        let width = dataset.schema.fields.len();
+        let args = args
+            .iter()
+            .map(|a| match a {
+                Expr::Column(name) => {
+                    let i = combined.get_field_index(name)?;
+                    let f = &combined.fields[i];
+                    // The evaluator dequantizes quantized vectors and
+                    // computes lazy columns; leave those to it.
+                    let lazy = i < width && dataset.schema.fields[i].is_lazy;
+                    if lazy || matches!(f.value_type, ValueType::QVector(..)) {
+                        return None;
+                    }
+                    Some(if i < width {
+                        FastArg::Row(i)
+                    } else {
+                        FastArg::Query(i - width)
+                    })
+                }
+                other => Some(FastArg::Expr(other.clone())),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(FastScore { func: *func, args })
+    }
+
+    /// The columns its `Expr` arguments read (the others are borrowed).
+    fn collect_columns(&self, out: &mut Vec<String>) {
+        for a in &self.args {
+            if let FastArg::Expr(e) = a {
+                crate::query::logical::collect_columns(e, out);
+            }
+        }
+    }
+
+    fn eval(
+        &self,
+        row: &[crate::core::value::Value],
+        query: &[crate::core::value::Value],
+        eval_row: &Tuple,
+    ) -> crate::core::value::Value {
+        use crate::core::value::Value;
+        use crate::query::logical::VectorFnKind as K;
+        let computed: Vec<Value> = self
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                FastArg::Expr(e) => Some(evaluate_expression(e, eval_row)),
+                _ => None,
+            })
+            .collect();
+        let mut next = computed.iter();
+        let vals: Vec<&Value> = self
+            .args
+            .iter()
+            .map(|a| match a {
+                FastArg::Row(i) => &row[*i],
+                FastArg::Query(i) => query.get(*i).unwrap_or(&Value::Null),
+                FastArg::Expr(_) => next.next().unwrap(),
+            })
+            .collect();
+        // Mirrors `evaluate_expression`'s arms for these functions.
+        match self.func {
+            K::SpecCosine | K::SpecCosineMod | K::SpecMatches | K::SpecEntropy => {
+                spectral_fn(self.func, &vals)
+            }
+            K::Tanimoto | K::Jaccard => match (vals.first(), vals.get(1)) {
+                (Some(Value::BitVector(a)), Some(Value::BitVector(b))) => {
+                    a.tanimoto(b).map(Value::Float64).unwrap_or(Value::Null)
+                }
+                _ => Value::Null,
+            },
+            K::Hamming => match (vals.first(), vals.get(1)) {
+                (Some(Value::BitVector(a)), Some(Value::BitVector(b))) => a
+                    .hamming(b)
+                    .map(|h| Value::Int(h as i64))
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            },
+            _ => match (vals.first(), vals.get(1)) {
+                (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
+                    Value::Float(a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>())
+                }
+                (Some(Value::BitVector(bits)), Some(Value::Vector(v)))
+                | (Some(Value::Vector(v)), Some(Value::BitVector(bits))) => {
+                    match bits.dot_dense(v) {
+                        Ok(d) => Value::Float(d as f32),
+                        Err(e) => {
+                            crate::query::row_error::record(e);
+                            Value::Null
+                        }
+                    }
+                }
+                (Some(a), Some(b)) => match sparse_dot(a, b, "DOT") {
+                    Some((dot, _, _)) => Value::Float(dot),
+                    None => Value::Null,
+                },
+                _ => Value::Null,
+            },
+        }
     }
 }
 
@@ -319,7 +480,7 @@ impl BatchVectorSearchExec {
     fn index_results(
         &self,
         dataset: &crate::core::dataset_legacy::Dataset,
-    ) -> Result<Vec<Vec<(usize, f32)>>, EngineError> {
+    ) -> Result<Vec<Vec<Hit>>, EngineError> {
         use rayon::prelude::*;
 
         let index = dataset.get_index(&self.column).ok_or_else(|| {
@@ -348,7 +509,11 @@ impl BatchVectorSearchExec {
                     v.clone(),
                     crate::core::tensor::TensorMetadata::new(id, None),
                 )?;
-                index.search(&query, self.k)
+                index.search(&query, self.k).map(|hits| {
+                    hits.into_iter()
+                        .map(|(id, s)| (id, s as f64, None))
+                        .collect()
+                })
             })
             .collect::<Result<_, String>>()
             .map_err(EngineError::InvalidOp)
@@ -358,7 +523,7 @@ impl BatchVectorSearchExec {
         &self,
         dataset: &crate::core::dataset_legacy::Dataset,
         pf: &crate::query::logical::Prefilter,
-    ) -> Result<Vec<Vec<(usize, f32)>>, EngineError> {
+    ) -> Result<Vec<Vec<Hit>>, EngineError> {
         use crate::core::index::flat::{cosine_with_norms, l2_norm};
         use crate::core::value::Value;
         use rayon::prelude::*;
@@ -375,13 +540,30 @@ impl BatchVectorSearchExec {
                 .downcast_ref::<crate::core::index::sorted::SortedIndex>()?;
             Some((index, bounds))
         });
-        // Only the columns the predicate reads are copied into each
-        // candidate's evaluation row.
+        // Only the dataset columns the predicate and scores read are
+        // copied into each candidate's evaluation row.
+        let fast_score = pf
+            .score
+            .as_ref()
+            .and_then(|s| FastScore::compile(s, dataset, &pf.combined_schema));
+        let fast_rerank = pf
+            .rerank
+            .as_ref()
+            .and_then(|(_, s)| FastScore::compile(s, dataset, &pf.combined_schema));
         let mut referenced = Vec::new();
-        collect_columns(&pf.predicate, &mut referenced);
-        let copy_all = referenced.iter().any(|c| c == "\0all");
+        crate::query::logical::collect_columns(&pf.predicate, &mut referenced);
+        for (score, fast) in [
+            (pf.score.as_ref(), &fast_score),
+            (pf.rerank.as_ref().map(|(_, s)| s), &fast_rerank),
+        ] {
+            match (score, fast) {
+                (Some(_), Some(f)) => f.collect_columns(&mut referenced),
+                (Some(s), None) => crate::query::logical::collect_columns(&s.expr, &mut referenced),
+                (None, _) => {}
+            }
+        }
         let needed: Vec<bool> = (0..width)
-            .map(|i| copy_all || referenced.contains(&dataset.schema.fields[i].name))
+            .map(|i| referenced.contains(&dataset.schema.fields[i].name))
             .collect();
         let has_lazy = !dataset.lazy_expressions.is_empty();
         let hnsw = if pf.approximate {
@@ -399,6 +581,55 @@ impl BatchVectorSearchExec {
         } else {
             None
         };
+        // A score as f64, or None for NULL (the row is skipped).
+        let score_of = |score: &crate::query::logical::ScoreExpr,
+                        fast: &Option<FastScore>,
+                        row: &Tuple,
+                        qvals: &[Value],
+                        id: usize|
+         -> Result<Option<f64>, String> {
+            let v = match fast {
+                Some(f) => f.eval(&dataset.rows[id].values, qvals, row),
+                None => evaluate_expression(&score.expr, row),
+            };
+            if let Some(e) = crate::query::row_error::take() {
+                return Err(e);
+            }
+            let x = match v {
+                Value::Null => return Ok(None),
+                Value::Int(n) => n as f64,
+                Value::Float(f) => f as f64,
+                Value::Float64(f) => f,
+                other => {
+                    return Err(format!(
+                        "SEARCH: score `{}` is {:?} for row {}, not a number",
+                        score.label,
+                        other.value_type(),
+                        id
+                    ))
+                }
+            };
+            if x.is_nan() {
+                return Err(format!(
+                    "SEARCH: score `{}` is NaN for row {}",
+                    score.label, id
+                ));
+            }
+            Ok(Some(x))
+        };
+        // Best first (highest, or lowest with ASC); ties by row id.
+        let rank = |hits: &mut Vec<(usize, f64)>, ascending: bool, keep: usize| {
+            hits.sort_by(|a, b| {
+                let by = if ascending {
+                    a.1.total_cmp(&b.1)
+                } else {
+                    b.1.total_cmp(&a.1)
+                };
+                by.then(a.0.cmp(&b.0))
+            });
+            hits.truncate(keep);
+        };
+        let stage1_keep = pf.rerank.as_ref().map_or(self.k, |(n, _)| *n);
 
         self.queries
             .0
@@ -411,6 +642,24 @@ impl BatchVectorSearchExec {
                 let mut eval_row = Tuple {
                     schema: pf.combined_schema.clone(),
                     values: eval_values,
+                };
+                // Copies row `id`'s needed columns into `eval_row`.
+                let fill = |eval_row: &mut Tuple, id: usize| -> Result<(), String> {
+                    let stored = &dataset.rows[id];
+                    let evaluated;
+                    let row = if has_lazy {
+                        evaluated = evaluate_lazy_columns_in_row(dataset, stored)
+                            .map_err(|e| e.to_string())?;
+                        &evaluated
+                    } else {
+                        stored
+                    };
+                    for (i, keep) in needed.iter().enumerate() {
+                        if *keep {
+                            eval_row.values[i] = row.values[i].clone();
+                        }
+                    }
+                    Ok(())
                 };
 
                 let candidates: Vec<usize> = match &sorted {
@@ -429,23 +678,10 @@ impl BatchVectorSearchExec {
                 };
 
                 let query_norm = l2_norm(query);
-                let mut scored = Vec::new();
+                let mut scored: Vec<(usize, f64)> = Vec::new();
                 let mut passing: Vec<usize> = Vec::new();
                 for id in candidates {
-                    let stored = &dataset.rows[id];
-                    let evaluated;
-                    let row = if has_lazy {
-                        evaluated = evaluate_lazy_columns_in_row(dataset, stored)
-                            .map_err(|e| e.to_string())?;
-                        &evaluated
-                    } else {
-                        stored
-                    };
-                    for (i, keep) in needed.iter().enumerate() {
-                        if *keep {
-                            eval_row.values[i] = row.values[i].clone();
-                        }
-                    }
+                    fill(&mut eval_row, id)?;
                     let passes =
                         crate::query::planner::evaluate_predicate(&pf.predicate, &eval_row);
                     if let Some(e) = crate::query::row_error::take() {
@@ -458,6 +694,20 @@ impl BatchVectorSearchExec {
                         passing.push(id);
                         continue;
                     }
+                    if let Some(score) = &pf.score {
+                        if let Some(x) = score_of(score, &fast_score, &eval_row, qvals, id)? {
+                            scored.push((id, x));
+                        }
+                        continue;
+                    }
+                    let evaluated;
+                    let row = if has_lazy {
+                        evaluated = evaluate_lazy_columns_in_row(dataset, &dataset.rows[id])
+                            .map_err(|e| e.to_string())?;
+                        &evaluated
+                    } else {
+                        &dataset.rows[id]
+                    };
                     match &row.values[col_idx] {
                         Value::Vector(v) => {
                             if v.len() != query.len() {
@@ -468,7 +718,10 @@ impl BatchVectorSearchExec {
                                     query.len()
                                 ));
                             }
-                            scored.push((id, cosine_with_norms(query, query_norm, v, l2_norm(v))));
+                            scored.push((
+                                id,
+                                cosine_with_norms(query, query_norm, v, l2_norm(v)) as f64,
+                            ));
                         }
                         Value::QVector(qv) => {
                             let v = qv.dequantize();
@@ -480,7 +733,10 @@ impl BatchVectorSearchExec {
                                     query.len()
                                 ));
                             }
-                            scored.push((id, cosine_with_norms(query, query_norm, &v, l2_norm(&v))));
+                            scored.push((
+                                id,
+                                cosine_with_norms(query, query_norm, &v, l2_norm(&v)) as f64,
+                            ));
                         }
                         Value::SparseVector(sv) => {
                             if sv.dim() != query.len() {
@@ -498,7 +754,7 @@ impl BatchVectorSearchExec {
                             } else {
                                 dot / (query_norm * norm)
                             };
-                            scored.push((id, score));
+                            scored.push((id, score as f64));
                         }
                         Value::Null => {}
                         other => {
@@ -517,15 +773,30 @@ impl BatchVectorSearchExec {
                         allowed[id] = true;
                     }
                     let allowed_fn = |row_id: usize| allowed.get(row_id).copied().unwrap_or(false);
-                    return index.search_filtered(query, self.k, &allowed_fn, passing.len());
+                    return index
+                        .search_filtered(query, self.k, &allowed_fn, passing.len())
+                        .map(|hits| hits.into_iter().map(|(id, s)| (id, s as f64, None)).collect());
                 }
-                scored.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.0.cmp(&b.0))
-                });
-                scored.truncate(self.k);
-                Ok(scored)
+                let ascending = pf.score.as_ref().is_some_and(|s| s.ascending);
+                rank(&mut scored, ascending, stage1_keep);
+                let Some((_, rerank)) = &pf.rerank else {
+                    return Ok(scored.into_iter().map(|(id, s)| (id, s, None)).collect());
+                };
+                // Stage 2: the kept candidates, ordered by the rerank score.
+                let mut reranked: Vec<(usize, f64)> = Vec::with_capacity(scored.len());
+                let mut first = std::collections::HashMap::with_capacity(scored.len());
+                for (id, s1) in scored {
+                    fill(&mut eval_row, id)?;
+                    if let Some(x) = score_of(rerank, &fast_rerank, &eval_row, qvals, id)? {
+                        reranked.push((id, x));
+                        first.insert(id, s1);
+                    }
+                }
+                rank(&mut reranked, rerank.ascending, self.k);
+                Ok(reranked
+                    .into_iter()
+                    .map(|(id, s)| (id, s, first.get(&id).copied()))
+                    .collect())
             })
             .collect::<Result<_, String>>()
             .map_err(EngineError::InvalidOp)
@@ -603,9 +874,9 @@ fn sparse_new(vals: &[crate::core::value::Value]) -> crate::core::value::Value {
 /// A NULL argument gives NULL; bad data (unsorted m/z, a non-finite value,
 /// a negative tolerance) is recorded in `row_error` so the statement fails
 /// with it.
-fn spectral_fn(
+fn spectral_fn<V: std::borrow::Borrow<crate::core::value::Value>>(
     func: crate::query::logical::VectorFnKind,
-    vals: &[crate::core::value::Value],
+    vals: &[V],
 ) -> crate::core::value::Value {
     use crate::core::spectral::{cosine_greedy, peaks, Params};
     use crate::core::value::Value;
@@ -617,11 +888,11 @@ fn spectral_fn(
         VectorFnKind::SpecEntropy => "SPEC_ENTROPY",
         _ => "SPEC_MATCHES",
     };
-    if vals.iter().any(|v| v.is_null()) {
+    if vals.iter().any(|v| v.borrow().is_null()) {
         return Value::Null;
     }
     let num = |i: usize| -> Option<f64> {
-        match vals.get(i)? {
+        match vals.get(i)?.borrow() {
             Value::Int(n) => Some(*n as f64),
             Value::Float(f) => Some(*f as f64),
             Value::Float64(f) => Some(*f),
@@ -629,14 +900,17 @@ fn spectral_fn(
         }
     };
     let result = (|| -> Result<Value, String> {
-        let (Some(Value::Matrix(a)), Some(Value::Matrix(b))) = (vals.first(), vals.get(1)) else {
+        let (Some(Value::Matrix(a)), Some(Value::Matrix(b))) = (
+            vals.first().map(|v| v.borrow()),
+            vals.get(1).map(|v| v.borrow()),
+        ) else {
             return Err("the first two arguments must be peak lists, Matrix(2, n)".to_string());
         };
         let a = peaks(a, "first spectrum")?;
         let b = peaks(b, "second spectrum")?;
         let tolerance = num(2).ok_or("tolerance must be a number")?;
         if func == VectorFnKind::SpecEntropy {
-            let weighted = match vals.get(3) {
+            let weighted = match vals.get(3).map(|v| v.borrow()) {
                 None => true,
                 Some(Value::Bool(w)) => *w,
                 Some(_) => return Err("weighted must be true or false".to_string()),
@@ -750,25 +1024,6 @@ fn spectral_clean(vals: &[crate::core::value::Value]) -> crate::core::value::Val
     })
 }
 
-/// Every column name `expr` reads.
-fn collect_columns(expr: &crate::query::logical::Expr, out: &mut Vec<String>) {
-    use crate::query::logical::Expr;
-    match expr {
-        Expr::Column(c) => out.push(c.clone()),
-        Expr::Literal(_) => {}
-        Expr::BinaryExpr { left, right, .. } | Expr::And(left, right) | Expr::Or(left, right) => {
-            collect_columns(left, out);
-            collect_columns(right, out);
-        }
-        other => {
-            // Anything else: fall back to copying every column, which is
-            // always correct (just slower).
-            let _ = other;
-            out.push("\0all".to_string());
-        }
-    }
-}
-
 impl PhysicalPlan for BatchVectorSearchExec {
     fn schema(&self) -> Arc<Schema> {
         self.schema.clone()
@@ -781,9 +1036,19 @@ impl PhysicalPlan for BatchVectorSearchExec {
             None => self.index_results(dataset)?,
         };
 
+        // Cosine scores stay `Float`; expression scores are `Double`.
+        let by_expr = self.prefilter.as_ref().is_some_and(|p| p.score.is_some());
+        let reranked = self.prefilter.as_ref().is_some_and(|p| p.rerank.is_some());
+        let stage1_value = |s: f64| {
+            if by_expr {
+                crate::core::value::Value::Float64(s)
+            } else {
+                crate::core::value::Value::Float(s as f32)
+            }
+        };
         let mut out = Vec::new();
         for ((query_id, _), hits) in self.queries.0.iter().zip(results) {
-            for (rank, (row_id, score)) in hits.into_iter().enumerate() {
+            for (rank, (row_id, score, stage1)) in hits.into_iter().enumerate() {
                 let row = dataset.rows.get(row_id).ok_or_else(|| {
                     EngineError::InvalidOp(format!(
                         "SEARCH: index returned row {} but '{}' has {} rows",
@@ -814,7 +1079,12 @@ impl PhysicalPlan for BatchVectorSearchExec {
                     let mut values = Vec::with_capacity(4 + picked.len());
                     values.push(query_id.clone());
                     values.push(crate::core::value::Value::Int(rank as i64 + 1));
-                    values.push(crate::core::value::Value::Float(score));
+                    if reranked {
+                        values.push(crate::core::value::Value::Float64(score));
+                        values.push(stage1.map_or(crate::core::value::Value::Null, stage1_value));
+                    } else {
+                        values.push(stage1_value(score));
+                    }
                     values.push(crate::core::value::Value::Int(row_id as i64));
                     values.extend(picked);
                     values
@@ -2232,6 +2502,18 @@ pub fn evaluate_expression(
                 VectorFnKind::Dot => match (vals.first(), vals.get(1)) {
                     (Some(Value::Vector(a)), Some(Value::Vector(b))) => {
                         Value::Float(a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>())
+                    }
+                    // A fingerprint against per-bit weights (e.g. predicted
+                    // probabilities): the sum of the weights of the set bits.
+                    (Some(Value::BitVector(bits)), Some(Value::Vector(v)))
+                    | (Some(Value::Vector(v)), Some(Value::BitVector(bits))) => {
+                        match bits.dot_dense(v) {
+                            Ok(d) => Value::Float(d as f32),
+                            Err(e) => {
+                                crate::query::row_error::record(e);
+                                Value::Null
+                            }
+                        }
                     }
                     (Some(a), Some(b)) => match sparse_dot(a, b, "DOT") {
                         Some((dot, _, _)) => Value::Float(dot),

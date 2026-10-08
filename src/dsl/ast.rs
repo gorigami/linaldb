@@ -607,6 +607,9 @@ pub struct SaveStmt {
     pub kind: PersistKind,
     pub name: String,
     pub path: Option<String>,
+    /// `SAVE DATASET <name> [TO <path>] MMAP`: also write column files for
+    /// memory-mapped loading (`core::colbuf`).
+    pub mmap: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -614,6 +617,9 @@ pub struct LoadStmt {
     pub kind: PersistKind,
     pub name: String,
     pub path: Option<String>,
+    /// `LOAD DATASET <name> [FROM <path>] MMAP`: memory-map the saved column
+    /// files instead of reading those columns into the heap.
+    pub mmap: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -762,8 +768,23 @@ pub struct SearchStmt {
     /// (`RETURN NONE`) keeps only the per-hit columns of a batch
     /// (`query_id, rank, score, row_id`).
     pub returning: Option<Vec<String>>,
+    /// `USING <expression> [ASC|DESC]`: rank by this score instead of
+    /// cosine on the `ON` column (exact path only).
+    pub using: Option<ScoreClause>,
+    /// `CANDIDATES <n> RERANK USING <expression> [ASC|DESC]`: keep each
+    /// query's top `n` by the first score, then order those by this one.
+    pub rerank: Option<(usize, ScoreClause)>,
     /// Optional output dataset name (defaults to `"search_results"`).
     pub target: Option<String>,
+}
+
+/// A `SEARCH` score: an expression over the searched dataset's columns and
+/// the query dataset's (`<query dataset>.<column>`), highest first unless
+/// `ascending`.
+#[derive(Debug, Clone)]
+pub struct ScoreClause {
+    pub expr: Expr,
+    pub ascending: bool,
 }
 
 // ─── Shared sub-types ─────────────────────────────────────────────────────────

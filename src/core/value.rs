@@ -208,9 +208,20 @@ impl Value {
                         .sum::<usize>()
             }
             Value::QVector(q) => q.heap_bytes(),
+            Value::BitVector(b) => b.heap_bytes(),
             _ => 0,
         };
         std::mem::size_of::<Value>() + heap
+    }
+
+    /// Bytes of a memory-mapped column file this value reads in place (not
+    /// heap; `core::colbuf`). 0 for every other value.
+    pub fn mapped_bytes(&self) -> usize {
+        match self {
+            Value::QVector(q) => q.mapped_bytes(),
+            Value::BitVector(b) => b.mapped_bytes(),
+            _ => 0,
+        }
     }
 
     /// Check if this value is null

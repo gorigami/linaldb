@@ -852,6 +852,23 @@ from the index (or all rows), evaluates the predicate on a reused row that
 copies only the referenced columns, and ranks the survivors with an exact
 cosine, in parallel across queries.
 
+`SEARCH ... USING <expr>` and `CANDIDATES n RERANK USING <expr>` lower
+their scores against the same combined schema (`build_prefilter`) and
+type-check them before any row runs; an absent `PREFILTER` becomes `true`,
+so every row is a candidate. `BatchVectorSearchExec` then scores each
+passing row as an f64 instead of the cosine, keeps the best `n` (or `k`)
+-- highest first, or lowest with `ASC`, ties by row id, `NULL` scores
+skipped -- and, with `RERANK`, orders those by the second score, keeping
+the first as `score_stage1`. Only the dataset columns the predicate and
+scores reference are copied into the evaluation row. A score that is one
+call to a `SPEC_*`, bit-vector or `DOT` function takes a fast path
+(`FastScore`) that borrows its column arguments from the stored rows
+instead of copying each candidate's peak list into the row and again into
+the evaluator; anything else goes through `evaluate_expression`. Scores
+from the expression path are `Float64`; plain cosine stays `Float`.
+`DOT(BitVector, Vector)` is the sum of the vector's entries at set bits
+(a fingerprint against per-bit weights).
+
 `UPDATE`/`DELETE` call `Dataset::rebuild_after_mutation`, which refreshes
 stats and zone maps and rebuilds affected indexes (all of them after a
 `DELETE`, which shifts row ids).
@@ -908,6 +925,19 @@ in `dsl/executor/query.rs`); elsewhere it stays an f32 `Float`, so existing
   copied on first write. `decode_snapshots_mapped` validates every array exactly like the
   owned path. Snapshot files are written to a temporary file and renamed over the old one
   (`storage::write_replacing`), so a mapped file is never modified in place.
+- **Mapped columns** (`core/colbuf.rs`): `SAVE DATASET ... MMAP` writes each `BitVector` /
+  `Vector(d, F16|I8)` column to `<package>/columns/<column>.lcol` (80-byte header with kind,
+  rows, dim, stride and a SHA-256 of the body; per-row validity bytes; I8 scales; then fixed
+  stride payload, every section 8-byte aligned). `LOAD DATASET ... MMAP` reads the other
+  columns from Parquet and builds these cells as views into one `Arc<Mmap>` per file: `BitVec`
+  words and `QuantVec` elements are a `colbuf::Buf<T>` -- `Owned(Vec<T>)` or `Mapped { map,
+  offset, len }` -- dereferencing to `&[T]`, so no executor code changed; a write goes through
+  `Buf::to_mut`, which copies the cell first. Files are written to a temporary file and
+  renamed, and a plain `SAVE` deletes the `columns/` directory, so a map never sees its bytes
+  change and never outlives the Parquet data it mirrors. Header, size and hash are checked
+  before any cell is built. `Value::mapped_bytes` feeds `SHOW MEMORY`'s `mapped` rows. Plain
+  `Vector(d)` is not mappable: `Value::Vector` is a bare `Vec<f32>`, and changing it would touch
+  every vector kernel -- quantized columns are the mapped form for embeddings.
 
 ### Bit Vectors and Peak Lists
 
@@ -1298,6 +1328,7 @@ Engine configuration via `linal.toml`:
 data_dir = "./data"
 default_db = "default"
 mmap_index_snapshots = false   # memory-map saved HNSW graphs on LOAD DATASET (opt-in)
+mmap_columns = false           # SAVE/LOAD DATASET as if MMAP: map BitVector/F16/I8 columns (opt-in)
 
 [wal]                          # optional; the whole section defaults to off
 enabled = false
@@ -1314,6 +1345,9 @@ backend = "cpu"                # "cpu" | "gpu" (experimental, needs the gpu-wgpu
   graph (`hnsw_index_graphs.bin`) instead of reading it into the heap (see "Vector Index
   Storage and HNSW"). Off by default. The file must not be edited while mapped; on Windows a
   mapped file can't be replaced, so re-saving that dataset fails until it's unloaded.
+- **`storage.mmap_columns`**: when `true`, every `SAVE DATASET` also writes column files and
+  every `LOAD DATASET` maps them, as if both had `MMAP` (see "Mapped columns"). A dataset with
+  no `BitVector`/`Vector(d, F16|I8)` column saves and loads normally. Off by default.
 - **`wal.*`**: the write-ahead log (see Storage Layer → "Write-ahead log", and "Scaling &
   Deployment" → "Durability and restarts").
 - **`compute.backend`**: the per-database compute backend (see "Execution Model" → "Backend

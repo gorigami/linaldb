@@ -294,7 +294,7 @@ SEARCH lib ON e QUERIES q.e PREFILTER mass < 500.0 APPROX LIMIT 25
 
 ```sql
 -- Fingerprints as bits, spectra as peak lists (both checked against RDKit / matchms)
-DATASET cands COLUMNS (id: Int, fp: BitVector(2048), spec: Matrix(2, *))
+DATASET cands COLUMNS (id: Int, mass: DOUBLE, fp: BitVector(2048), spec: Matrix(2, *))
 SELECT id, TANIMOTO(fp, CAST("0110...1" AS BITVECTOR(2048))) AS t FROM cands ORDER BY t DESC LIMIT 25
 SELECT id, SPEC_COSINE(spec, [[101.05, 150.2], [1.0, 0.4]], 0.01, 0, 0.5) AS s FROM cands
 -- Shared preprocessing and entropy similarity (checked against ms_entropy)
@@ -302,6 +302,12 @@ UPDATE cands SET spec = SPEC_CLEAN(spec, 400.0, 0.01, 0, 2.0, 1.0, 'sum', 0.04)
 SELECT id, SPEC_ENTROPY(spec, [[101.05, 150.2], [1.0, 0.4]], 0.02) AS s FROM cands
 -- Small hit rows: only the columns you need
 SEARCH library ON e QUERIES queries.e KEY spectrum RETURN id, mass LIMIT 25 INTO hits
+-- Rank by any score, exactly, inside the mass window; or two stages in one statement
+SEARCH cands ON spec QUERIES q.spec KEY qid USING SPEC_ENTROPY(spec, q.spec, 0.01) PREFILTER mass BETWEEN q.mass - 0.01 AND q.mass + 0.01 RETURN id LIMIT 10
+SEARCH cands ON fp QUERIES q.p KEY qid USING DOT(fp, q.p) CANDIDATES 200 RERANK USING SPEC_ENTROPY(spec, q.spec, 0.01) RETURN id LIMIT 10
+-- Fingerprint / quantized columns served from memory-mapped files instead of the heap
+SAVE DATASET cands MMAP
+LOAD DATASET cands MMAP
 ```
 
 ```python

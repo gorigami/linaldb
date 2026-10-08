@@ -357,7 +357,7 @@ Use inside SELECT columns, WHERE predicates, or ORDER BY:
 |---|---|---|
 | `SPARSE(n, [indices], [values])` | `SparseVector(n)` | Builds a sparse vector. Indices must be strictly increasing integers below `n`, values finite, both lists the same length -- otherwise the statement fails with the reason. |
 
-`COSINE_SIM`, `DOT`, `L2_NORM`, `NORMALIZE` and `VEC_SCALE` accept `SparseVector` arguments as listed above. Comparing two vectors of different dimensions (sparse/sparse or sparse/dense) is an error before the query runs, or, when a dimension is only known at runtime, when the row is evaluated.
+`DOT(<BitVector(N)>, <Vector(N)>)` (either order) is the sum of the vector's entries at the set bits: a fingerprint scored against per-bit weights, e.g. predicted bit probabilities. A length mismatch is an error. `COSINE_SIM`, `DOT`, `L2_NORM`, `NORMALIZE` and `VEC_SCALE` accept `SparseVector` arguments as listed above. Comparing two vectors of different dimensions (sparse/sparse or sparse/dense) is an error before the query runs, or, when a dimension is only known at runtime, when the row is evaluated.
 
 ### Bit-Vector Functions
 
@@ -736,8 +736,28 @@ Load and save data across different formats.
   - Supports CSV, HDF5, NetCDF, NumPy, Parquet, and Zarr. `FIELDS (...)` works the same way as for `USE DATASET FROM` above.
 - `IMPORT CSV FROM "path" AS name`: (Legacy) Auto-infer schema and load CSV into a relational dataset.
 - `EXPORT [CSV] name TO "path"`: Save dataset to CSV. The `CSV` keyword is optional — `EXPORT name TO "path"` behaves identically. A `Vector`/`Matrix` column is written as a JSON string per cell (e.g. `{"Vector":[1.0,2.0,3.0]}`), the same encoding `SAVE DATASET`'s legacy fallback uses — CSV has no native representation for nested/list data. Use `SAVE DATASET` instead for a native binary (Parquet `FixedSizeList`) encoding of vector/matrix data.
-- `SAVE DATASET name [TO "path"]`: Persist to Parquet (includes metadata/lineage).
-- `LOAD DATASET name [FROM "path"]`: Restore a persisted dataset.
+- `SAVE DATASET name [TO "path"] [MMAP]`: Persist to Parquet (includes metadata/lineage).
+- `LOAD DATASET name [FROM "path"] [MMAP]`: Restore a persisted dataset.
+- **Memory-mapped columns** (`MMAP`, opt-in): `SAVE DATASET name MMAP` also writes each
+  `BitVector(N)`, `Vector(d, F16)` and `Vector(d, I8)` column as one contiguous file
+  (`<package>/columns/<column>.lcol`), and `LOAD DATASET name MMAP` maps those files instead of
+  reading the columns into the heap: a large fingerprint or quantized-embedding library then
+  costs page cache, which the OS can evict, rather than resident memory. `[storage]
+  mmap_columns = true` in `linal.toml` does this for every `SAVE`/`LOAD DATASET`.
+  - Every query, search and index answers exactly as with the heap-loaded dataset. `SHOW
+    MEMORY <name>` lists each mapped column as a `mapped` row with its file bytes.
+  - Writes still work: `UPDATE`/`INSERT`/`DELETE` copy the touched cell into the heap first.
+    Column files are never edited in place -- `SAVE` writes a new file and renames it over the
+    old one -- so a mapped file never changes under a reader. A plain `SAVE` (no `MMAP`) removes
+    the column files so they can't go stale.
+  - Each file carries its row count, layout and a SHA-256 of its contents, checked on load: a
+    damaged, truncated or mismatched file is an error naming it. A package copied elsewhere
+    (`LOAD DATASET name FROM "path" MMAP`) maps from there.
+  - Plain `Vector(d)` (`f32`) and `Matrix` columns are not mapped (still read into the heap);
+    quantize to `Vector(d, F16|I8)` to map embeddings. `MMAP` with no mappable column, `LOAD
+    ... MMAP` with no column files, or `MMAP` on `SAVE`/`LOAD TENSOR` is an error. On Windows a
+    mapped file can't be replaced, so re-saving that dataset with `MMAP` fails while it's
+    mapped.
 - `SAVE TENSOR name [TO "path"]`: Persist a tensor to JSON.
 - `LOAD TENSOR name [FROM "path"]`: Restore a persisted tensor (preserves lineage).
 - `SAVE PIPELINE name [TO "path"]`: Serialize a named pipeline to JSON. Defaults to `<data_dir>/<db>/pipelines/<name>.json`.
@@ -974,7 +994,52 @@ SEARCH library ON embedding QUERY [0.9, 0.1, 0.0] RETURN id LIMIT 10
   the projection (`"return"` in the `SEARCH` step's parameters).
 - An unknown or repeated column is an error.
 
-All three forms **require a `CREATE VECTOR INDEX` on `<column>` first** — `SEARCH` always executes as an index-accelerated lookup and errors if no vector index exists on the target column. For ad hoc similarity scoring without a prebuilt index, use `COSINE_SIM` directly in `SELECT`/`WHERE`/`ORDER BY` (§4) instead — that's the more common pattern for one-off queries; `SEARCH` is specifically for index-accelerated top-k retrieval.
+#### Ranking by any score: `USING`, `CANDIDATES ... RERANK USING`
+
+`USING <expression> [ASC|DESC]` (right before `PREFILTER`) ranks each query's hits by any
+numeric expression over the searched row and the query row instead of cosine on the `ON`
+column. Query columns are written `<query dataset>.<column>`, as in `PREFILTER`:
+
+```sql
+SEARCH library ON peaks QUERIES q.peaks KEY qid USING SPEC_ENTROPY(peaks, q.peaks, 0.01) PREFILTER mass BETWEEN q.mass - 0.01 AND q.mass + 0.01 RETURN inchikey LIMIT 10
+SEARCH library ON peaks QUERIES q.peaks KEY qid USING SPEC_COSINE_MOD(peaks, q.peaks, 0.01, mass - q.mass) PREFILTER mass BETWEEN q.mass - 200 AND q.mass + 200 LIMIT 10
+SEARCH library ON fp QUERIES q.fp KEY qid USING TANIMOTO(fp, q.fp) LIMIT 20
+SEARCH library ON e QUERIES q.e KEY qid USING DISTANCE(e, q.e) ASC LIMIT 5
+```
+
+`CANDIDATES <n> RERANK USING <expression> [ASC|DESC]` (after `PREFILTER`) is a two-stage search
+in one statement: keep each query's top `n` by the first score (`USING`, or cosine without it),
+then order those `n` by the second and keep `LIMIT`:
+
+```sql
+SEARCH library ON e QUERIES q.e KEY qid USING DOT(fp, q.z) CANDIDATES 200 RERANK USING SPEC_ENTROPY(peaks, q.peaks, 0.01) RETURN inchikey LIMIT 10
+SEARCH library ON e QUERIES q.e KEY qid CANDIDATES 100 RERANK USING SPEC_ENTROPY(peaks, q.peaks, 0.01) LIMIT 10
+```
+
+- Full form: `SEARCH <dataset> ON <column> QUERIES <dataset>.<column> [KEY <column>] [USING
+  <expr> [ASC|DESC]] [PREFILTER <predicate>] [CANDIDATES <n> RERANK USING <expr> [ASC|DESC]]
+  [RETURN ...] LIMIT <k> [FILTER ...] [INTO ...]`.
+- Highest score first (`DESC`, the default); `ASC` for distances. Ties keep row order. A row
+  whose score is `NULL` is skipped.
+- The ranking is **exact**: every row passing `PREFILTER` (every row, without it) is scored. No
+  vector index is needed; a `CREATE SORTED INDEX` narrows the `PREFILTER` window as usual. With
+  `USING`, the `ON` column only has to exist -- the score says what is compared.
+- The `score` column is `Double` for a `USING`/`RERANK` score (still `Float` for cosine). With
+  `RERANK`, a `score_stage1` column after `score` holds the first-stage score.
+- Equal to the brute-force `SELECT <score> AS s FROM <dataset> WHERE <window> ORDER BY s DESC
+  LIMIT k` run per query (tested for `SPEC_ENTROPY`, `SPEC_COSINE_MOD`, `DOT`, `DISTANCE`), and
+  `USING COSINE_SIM(e, q.e)` equals the plain `PREFILTER` search.
+- Errors, before any row runs: a score that isn't a number, an unknown column or query column,
+  wrong arguments, `APPROX` (the HNSW graph only ranks by cosine), `CANDIDATES n` below `LIMIT
+  k`, queries from a matrix tensor or a single `QUERY` (the score needs query columns), and
+  mismatched vector widths. A score that fails on a row (e.g. unsorted peaks) fails the
+  statement.
+- `INTO` lineage records the scores: `"using"`, `"candidates"` and `"rerank"` in the
+  `SEARCH` step's parameters (as written, with `ASC` when given).
+- `EXPLAIN` shows the score and the rerank (`... USING DOT(fp, q.z) (top 20), then RERANK USING
+  SPEC_ENTROPY(...)`) and any index narrowing the window.
+
+Without `PREFILTER` or `USING`, all three forms **require a `CREATE VECTOR INDEX` on `<column>` first** — `SEARCH` then executes as an index-accelerated lookup and errors if no vector index exists on the target column. For ad hoc similarity scoring without a prebuilt index, use `COSINE_SIM` directly in `SELECT`/`WHERE`/`ORDER BY` (§4) instead — that's the more common pattern for one-off queries; `SEARCH` is specifically for index-accelerated top-k retrieval.
 
 ### TRANSFORM
 

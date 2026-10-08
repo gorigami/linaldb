@@ -135,6 +135,22 @@ pub fn check_expr(expr: &Expr, schema: &Schema) -> Result<(), String> {
                 ValueType::Vector(d) | ValueType::SparseVector(d) => Some(*d),
                 _ => None,
             };
+            if let (ValueType::BitVector(n), ValueType::Vector(d))
+            | (ValueType::Vector(d), ValueType::BitVector(n)) = (&a, &b)
+            {
+                if name == "COSINE_SIM" {
+                    return Err(
+                        "COSINE_SIM takes two Vectors (or SparseVectors); for a BitVector use TANIMOTO, or DOT against a weight Vector"
+                            .to_string(),
+                    );
+                }
+                if *d != 0 && n != d {
+                    return Err(format!(
+                        "DOT: BitVector has {} bits, the Vector {} elements",
+                        n, d
+                    ));
+                }
+            }
             if matches!(a, ValueType::SparseVector(_)) || matches!(b, ValueType::SparseVector(_)) {
                 for t in [&a, &b] {
                     if dim(t).is_none() && *t != ValueType::Null {
