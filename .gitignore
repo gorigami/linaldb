@@ -39,3 +39,5 @@ clients/r-embedded/.RData
 clients/r-embedded/*.Rproj.user/
 clients/r-embedded/*.Rcheck/
 clients/r-embedded/*.tar.gz
+# macOS Finder metadata
+.DS_Store
