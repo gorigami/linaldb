@@ -57,6 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem is touched. Test: `tests/database_name_validation_test.rs` (engine, server registry
   and the real HTTP route).
 
+### Changed — load memory (P16, P17)
+
+- **Content hash streams into the hasher** (P16): `Dataset::content_hash` serializes the
+  schema and rows straight into SHA-256 (`core::provenance::HashWriter`, a `std::io::Write`
+  sink) instead of building the whole JSON with `serde_json::to_vec` first. The largest
+  transient copy of every large `LOAD`/`SEARCH ... INTO` is gone; the digest is
+  byte-identical, so lineage hashes, saved manifests and `ASSERT LINEAGE` are unchanged.
+- **Arrow loads move values into rows** (P17): `record_batch_to_rows` consumes each column
+  with `into_iter()` instead of deep-cloning every value into its row, so `Matrix`/`Vector`
+  columns no longer exist twice at once while a batch is converted. Affects every Arrow and
+  Parquet load (`load_arrow`, `load_numpy`, `IMPORT`, `LOAD DATASET`); rows and content
+  hashes are identical.
+
 ## [0.1.94] - 2026-10-08
 
 ### Added — scientific workloads round 2, medium and large tier (CASMI_WORKLOADS_PLAN_2.md: P9, P13, P14)
