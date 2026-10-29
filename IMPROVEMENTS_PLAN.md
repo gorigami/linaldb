@@ -166,11 +166,12 @@ file-level, and the statically linked HDF5, whose BSD terms ask for its full not
 distributions), and optionally `cargo deny check licenses` in CI. Releases up to 0.1.94 didn't
 ship them either, so this is not a regression.
 
-### PR 2. Small fixes — do
+### PR 2. Small fixes — in progress
 
 Engine impact: low. No answer or content-hash changes.
 
-- [ ] **Database name validation (bug, to confirm with a failing test first).**
+- [x] **Database name validation (bug, confirmed: creating and dropping `../victim` deleted a
+      sibling of `data_dir`, also over HTTP with `..%2Fvictim`).**
       `TensorDb::create_database` / `drop_database` (`src/engine/db.rs`) and
       `EngineRegistry::drop_database` (`src/server/engine.rs`) join the name onto `data_dir` and
       `remove_dir_all` it with no validation. The DSL only accepts identifiers, but
@@ -178,21 +179,22 @@ Engine impact: low. No answer or content-hash changes.
       <name>` take any string, so `..` or `../x` could be created and then dropped outside
       `data_dir`. Fix: one `validate_db_name` (identifier characters only) used by every entry
       point; tests for the HTTP and CLI paths.
-- [ ] **`DROP DATASET [IF EXISTS] <name>`** (P20, PubChem G5, CASMI G2). Parser + executor onto
+- [x] **`DROP DATASET [IF EXISTS] <name>`** (P20, PubChem G5, CASMI G2). Parser + executor onto
       the existing `remove_dataset` (`src/engine/db.rs`); drops its indexes and any `.lcol`
       column files / maps; document what happens to lineage records (they stay, the dataset is
-      gone). Python: `load_arrow(..., replace=True)` optional. Fixes the `memory_load.rs` error
-      that already tells users to "DROP it first". Test: load, drop, reload, memory released.
-- [ ] **`<>` as alias of `!=`** (P20): one lexer token in `src/dsl/lexer.rs`.
-- [ ] **Release-note figure** (P20): `CHANGELOG.md` 0.1.94 and `DSL_REFERENCE.md` say "2.5M
+      gone). Python `load_arrow(..., replace=True)` not done: `db.execute("DROP DATASET x")`
+      covers it. The `memory_load.rs` "already exists" error now names `DROP DATASET`. Test:
+      load, drop, reload, index gone; tensor-first datasets; saved package kept; WAL restart.
+- [x] **`<>` as alias of `!=`** (P20): one lexer token in `src/dsl/lexer.rs`.
+- [x] **Release-note figure** (P20): `CHANGELOG.md` 0.1.94 and `DSL_REFERENCE.md` say "2.5M
       spectra / 75M peaks in ~12 s"; the real CASMI file is 401M peaks, 132 s in shards on 4
       CPUs. Restate with the measured size (re-measure after PR 4).
-- [ ] **P16 + P17** from branch `oc/P0e` (`951dba1`, golden hash identical, tests green):
+- [x] **P16 + P17** from branch `oc/P0e` (`951dba1`, golden hash identical, tests green):
       stream the content hash into SHA-256 instead of building the JSON in memory
       (`Dataset::content_hash`), and move values into rows instead of cloning them
       (`record_batch_to_rows`). Removes ~30–50 of the ~68 B/peak transient load memory; hashes
       unchanged. Bring the code and `scripts/measure_load_memory.py`, not the design doc.
-- [ ] Repo hygiene: untrack `.DS_Store` and add it to `.gitignore`.
+- [x] Repo hygiene: untrack `.DS_Store` and add it to `.gitignore`.
 
 ### PR 3. Release pipeline — do (before the first release under the new license)
 

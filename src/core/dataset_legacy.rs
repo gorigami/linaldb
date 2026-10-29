@@ -230,11 +230,25 @@ impl Dataset {
     /// structurally-identical datasets produced by different code paths --
     /// or even the same path called twice -- hash differently, silently
     /// breaking every ancestry match.
+    ///
+    /// P16: the JSON is streamed into the hasher (`HashWriter`) instead of
+    /// being built whole with `serde_json::to_vec`. The bytes are the same,
+    /// so the digest is unchanged (see the golden test).
     pub fn content_hash(&self) -> String {
+        use crate::core::provenance::HashWriter;
         let row_values: Vec<&Vec<Value>> = self.rows.iter().map(|t| &t.values).collect();
-        let bytes = serde_json::to_vec(&(&self.schema.fields, &row_values))
-            .unwrap_or_else(|_| format!("{:?}", self.schema.fields).into_bytes());
-        crate::core::provenance::compute_content_hash(&bytes)
+        let mut writer = HashWriter::new();
+        if serde_json::to_writer(&mut writer, &(&self.schema.fields, &row_values)).is_ok() {
+            return writer.finish();
+        }
+        // The only way `to_writer` fails is a serialization error, which
+        // cannot happen for this shape (a tuple of `Vec<Field>` and
+        // `Vec<&Vec<Value>>`, all `Serialize` with string-keyed maps). Keep
+        // the old `Debug` fallback so the behavior is unchanged if it ever
+        // does; the partially-fed hasher is discarded with `writer`.
+        crate::core::provenance::compute_content_hash(
+            &format!("{:?}", self.schema.fields).into_bytes(),
+        )
     }
 
     /// Recompute `metadata` (row count + column stats) and `partitions`
@@ -1233,5 +1247,99 @@ mod tests {
         assert_eq!(age_stats.min, Some(Value::Int(25)));
         assert_eq!(age_stats.max, Some(Value::Int(35)));
         assert_eq!(age_stats.null_count, 0);
+    }
+
+    /// A fixed dataset that covers every `Value` variant, including a
+    /// variable-width `Matrix(2, *)`, a `SparseVector`, both quantized vector
+    /// encodings (`F16` and `I8`), a `BitVector` fingerprint and a `NULL`.
+    fn golden_dataset() -> Dataset {
+        use crate::core::bitvec::BitVec;
+        use crate::core::quant::{QuantVec, Quantization};
+        use crate::core::sparse::SparseVec;
+        use crate::core::value::Complex64;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("f", ValueType::Float),
+            Field::new("d", ValueType::Float64),
+            Field::new("i", ValueType::Int),
+            Field::new("s", ValueType::String),
+            Field::new("b", ValueType::Bool),
+            Field::new("v", ValueType::Vector(3)),
+            Field::new("m", ValueType::Matrix(2, 2)),
+            // `Matrix(2, *)`: a declared column count of 0 accepts any width.
+            Field::new("mstar", ValueType::Matrix(2, 0)),
+            Field::new("c", ValueType::Complex),
+            Field::new("bv", ValueType::BitVector(8)),
+            Field::new("sv", ValueType::SparseVector(5)),
+            Field::new("q16", ValueType::QVector(3, Quantization::F16)),
+            Field::new("q8", ValueType::QVector(3, Quantization::I8)),
+            Field::new("n", ValueType::Int).nullable(),
+        ]));
+
+        let row1 = Tuple::new(
+            schema.clone(),
+            vec![
+                Value::Float(1.5),
+                Value::Float64(2.25),
+                Value::Int(42),
+                Value::String("hello".to_string()),
+                Value::Bool(true),
+                Value::Vector(vec![1.0, 2.0, 3.0]),
+                Value::Matrix(vec![vec![1.0, 2.0], vec![3.0, 4.0]]),
+                Value::Matrix(vec![vec![5.0, 6.0, 7.0], vec![8.0, 9.0, 10.0]]),
+                Value::Complex(Complex64::new(1.0, 2.0)),
+                Value::BitVector(BitVec::from_bit_string("10110001").unwrap()),
+                Value::SparseVector(
+                    SparseVec::new(5, vec![0, 3, 4], vec![1.5, -2.0, 0.5]).unwrap(),
+                ),
+                Value::QVector(QuantVec::quantize(&[0.5, -1.0, 2.0], Quantization::F16).unwrap()),
+                Value::QVector(QuantVec::quantize(&[0.25, -0.5, 1.0], Quantization::I8).unwrap()),
+                Value::Null,
+            ],
+        )
+        .unwrap();
+
+        let row2 = Tuple::new(
+            schema.clone(),
+            vec![
+                Value::Float(-0.5),
+                Value::Float64(1e-9),
+                Value::Int(-7),
+                Value::String("world".to_string()),
+                Value::Bool(false),
+                Value::Vector(vec![0.0, 0.0, 0.0]),
+                Value::Matrix(vec![vec![0.0, 0.0], vec![0.0, 0.0]]),
+                Value::Matrix(vec![vec![], vec![]]),
+                Value::Complex(Complex64::new(-3.0, 0.0)),
+                Value::BitVector(BitVec::from_bit_string("00000000").unwrap()),
+                Value::SparseVector(SparseVec::new(5, vec![], vec![]).unwrap()),
+                Value::QVector(QuantVec::quantize(&[0.0, 0.0, 0.0], Quantization::F16).unwrap()),
+                Value::QVector(QuantVec::quantize(&[0.0, 0.0, 0.0], Quantization::I8).unwrap()),
+                Value::Int(123),
+            ],
+        )
+        .unwrap();
+
+        Dataset::with_rows(
+            DatasetId(99),
+            schema,
+            vec![row1, row2],
+            Some("golden".to_string()),
+        )
+        .unwrap()
+    }
+
+    /// Golden test for P16: the content hash must stay byte-identical after
+    /// the JSON is streamed into the hasher instead of materialized with
+    /// `serde_json::to_vec`. `GOLDEN` was captured from the pre-P16 code
+    /// path (`serde_json::to_vec` + SHA-256) over exactly `golden_dataset()`.
+    #[test]
+    fn golden_content_hash_over_all_value_types() {
+        let dataset = golden_dataset();
+        assert_eq!(
+            dataset.content_hash(),
+            "1fc65fa78b4468123e4e56dab922aa74600c3a8be790a678633bcd945bf7d1b1",
+            "Dataset::content_hash changed; provenance/lineage hashes would break"
+        );
     }
 }

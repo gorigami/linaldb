@@ -100,6 +100,19 @@ DATASET diagnostics COLUMNS (
 )
 ```
 
+### DROP DATASET
+
+```sql
+DROP DATASET diagnostics
+DROP DATASET IF EXISTS diagnostics   -- no error if it isn't there
+```
+
+Removes the dataset from the session: its rows, indexes and any memory-mapped column files it
+held open are released, and the name can be loaded or defined again (the way to replace data
+loaded with `load_numpy`/`load_arrow`). A tensor-first dataset of the same name goes too. A saved
+package on disk (`SAVE DATASET`) is not deleted, so `LOAD DATASET` brings it back; provenance
+records stay. Logged to the write-ahead log like any other change.
+
 ### DATASET ... FROM (Materialized View)
 
 A second `DATASET` form builds a new dataset from an existing one by running a
@@ -536,9 +549,11 @@ LIMIT 10
 - **`LIMIT`/`OFFSET`**: `LIMIT <n>` caps the row count; `OFFSET <n>` skips the first `n` rows before applying `LIMIT` (both may be used together or independently).
 - **`FROM` is optional** for a `SELECT` list of only literal/computed expressions — no column, aggregate, or window reference, since there'd be no dataset to resolve one against: `SELECT L2_NORM([3.0, 4.0]) AS five` evaluates the list once and returns a single row. Any real column reference still requires `FROM`.
 
-**Predicate vocabulary** (usable in `WHERE`/`FILTER`/`HAVING`):
+**Predicate vocabulary** (usable in `WHERE`/`FILTER`/`HAVING`). Comparisons are `=`, `!=` (or
+`<>`, its SQL spelling), `<`, `<=`, `>`, `>=`:
 
 ```sql
+SELECT * FROM items WHERE category <> 'archived'
 SELECT * FROM items WHERE category IN ('a', 'b', 'c')
 SELECT * FROM items WHERE price BETWEEN 5 AND 25
 SELECT * FROM items WHERE tag IS NULL
@@ -787,8 +802,10 @@ columns are dropped. Per row both lists must be present (or both `NULL`, giving 
 spectrum), of equal length, finite, and with ascending m/z -- `sort=True` sorts the pairs instead.
 `float64` lists are rejected unless `cast="f32"` asks for them to be rounded to `float32`, the
 only precision peak lists have. The result is identical to building the column with
-`linaldb.peaks_array()` (same content hash); 2.5M spectra / 75M peaks load in about 12 s on an
-M-series laptop. Lineage records the source columns, the cast and whether peaks were sorted. With the
+`linaldb.peaks_array()` (same content hash). Measured: 2.5M synthetic spectra / 75M peaks load
+in about 12 s on an M-series laptop; the CASMI 2026 library (2.53M spectra, 401M peaks) loads in
+132 s on 4 CPUs, in 250k-row shards, because a single load peaks at ~68 bytes per raw peak
+(8 at rest). Lineage records the source columns, the cast and whether peaks were sorted. With the
 write-ahead log enabled, a checkpoint is taken right after the load, because the log only
 replays DSL statements.
 

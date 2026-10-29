@@ -892,7 +892,11 @@ pub fn record_batch_to_rows(
     let num_rows = batch.num_rows();
     let mut tuples = Vec::with_capacity(num_rows);
 
-    let mut columns_data: Vec<Vec<Value>> = Vec::new();
+    // One value iterator per column. P17: these are consumed with
+    // `into_iter()` below, moving each value into its row instead of cloning
+    // it -- for `Matrix`/`Vector` values that would be a deep copy, so the
+    // full row form used to exist twice at once.
+    let mut columns_data: Vec<std::vec::IntoIter<Value>> = Vec::with_capacity(schema.fields.len());
 
     for field in &schema.fields {
         let arrow_col = batch.column_by_name(&field.name).ok_or_else(|| {
@@ -900,14 +904,15 @@ pub fn record_batch_to_rows(
         })?;
 
         let values = arrow_array_to_values(arrow_col, &field.value_type, num_rows)?;
-        columns_data.push(values);
+        columns_data.push(values.into_iter());
     }
 
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..num_rows {
+    for _ in 0..num_rows {
         let mut row_values = Vec::with_capacity(schema.fields.len());
-        for col_idx in 0..schema.fields.len() {
-            row_values.push(columns_data[col_idx][i].clone());
+        for column in columns_data.iter_mut() {
+            // `arrow_array_to_values` always returns exactly `num_rows`
+            // values, so each column iterator has one value per row.
+            row_values.push(column.next().expect("column shorter than the batch"));
         }
         tuples.push(Tuple::new(schema.clone(), row_values).map_err(StorageError::Serialization)?);
     }

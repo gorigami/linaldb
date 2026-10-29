@@ -25,6 +25,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md` and `PERFORMANCE_OPTIMIZATION_PLAN.md` are removed per the
   tracked-plan convention; `clients/CRAN_PUBLISHING_PLAN.md` is now tracked.
 
+### Added — `DROP DATASET [IF EXISTS] <name>`
+
+- **Frees a dataset in the session** so its name can be loaded or defined again: rows, indexes
+  and mmap'd column files go with it, as does a tensor-first dataset of the same name and any
+  variable bound to it. Until now the only way to replace data loaded with `load_numpy` /
+  `load_arrow` was another name or a new `Db`, and the "already exists" error already told users
+  to drop it. A saved package on disk is left alone (`LOAD DATASET` brings it back) and
+  provenance records stay. Logged to the WAL, so the drop survives a restart. Test:
+  `tests/drop_dataset_test.rs`.
+
+### Added — `<>` as the SQL spelling of `!=`
+
+- `WHERE tag <> 'a'` lexes to the same `!=` token, so SQL copied from elsewhere runs unchanged.
+
+### Changed — peak-list load figure restated
+
+- The 0.1.94 notes and `DSL_REFERENCE.md` quoted "2.5M spectra / 75M peaks in ~12 s", a
+  synthetic run with ~30 peaks per spectrum. The real CASMI 2026 library has 401M peaks (median
+  42 per spectrum, p99 1,347) and loads in 132 s on 4 CPUs, in shards; both places now say so.
+
+### Fixed — database names could escape `data_dir`
+
+- **`POST/DELETE /databases/:name` and `linal db create|drop <name>` validate the name.** A
+  database name becomes a directory under `data_dir`, and dropping the database deletes it with
+  `remove_dir_all`. The DSL only parses identifiers, but the HTTP routes (axum percent-decodes
+  `..%2Fvictim` into `../victim`) and the CLI passed any string through, so creating and then
+  dropping `../victim` deleted a directory next to `data_dir`, with everything in it. Names are now
+  ASCII letters, digits, `_` and `-` (max 128), checked by one `validate_db_name` used by
+  `TensorDb` and the server's `SharedEngine`; anything else is a `400` / CLI error before the
+  filesystem is touched. Test: `tests/database_name_validation_test.rs` (engine, server registry
+  and the real HTTP route).
+
+### Changed — load memory (P16, P17)
+
+- **Content hash streams into the hasher** (P16): `Dataset::content_hash` serializes the
+  schema and rows straight into SHA-256 (`core::provenance::HashWriter`, a `std::io::Write`
+  sink) instead of building the whole JSON with `serde_json::to_vec` first. The largest
+  transient copy of every large `LOAD`/`SEARCH ... INTO` is gone; the digest is
+  byte-identical, so lineage hashes, saved manifests and `ASSERT LINEAGE` are unchanged.
+- **Arrow loads move values into rows** (P17): `record_batch_to_rows` consumes each column
+  with `into_iter()` instead of deep-cloning every value into its row, so `Matrix`/`Vector`
+  columns no longer exist twice at once while a batch is converted. Affects every Arrow and
+  Parquet load (`load_arrow`, `load_numpy`, `IMPORT`, `LOAD DATASET`); rows and content
+  hashes are identical.
+
 ## [0.1.94] - 2026-10-08
 
 ### Added — scientific workloads round 2, medium and large tier (CASMI_WORKLOADS_PLAN_2.md: P9, P13, P14)
@@ -67,7 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records it.
 - **Peak lists from two Arrow list columns** (P11): `Db.load_arrow(..., peaks={"peaks": (mz_col,
   intensity_col)}, cast="f32", sort=False)` / `TensorDb::load_record_batch_with_peaks` builds a
-  `Matrix(2, *)` column in Rust instead of a Python loop -- 2.5M spectra / 75M peaks in ~12 s.
+  `Matrix(2, *)` column in Rust instead of a Python loop -- 2.5M synthetic spectra / 75M peaks
+  in ~12 s on an M-series laptop. *Correction:* the real CASMI 2026 library is 2.53M spectra /
+  401M peaks; it loads in 132 s on 4 CPUs (Kaggle), in 250k-row shards because a single load
+  peaks at ~68 bytes per raw peak.
   `float64` lists are only accepted with the explicit `cast="f32"`; errors name column and row;
   identical to `peaks_array()` (same content hash).
 - **Run manifest** (P15): lineage steps that produce one dataset record its row count

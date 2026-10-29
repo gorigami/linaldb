@@ -69,6 +69,9 @@ pub enum Statement {
     CreateDatabase(CreateDatabaseStmt),
     /// `DROP DATABASE <name>`
     DropDatabase(DropDatabaseStmt),
+    /// `DROP DATASET [IF EXISTS] <name>`: removes the dataset from the
+    /// session; a saved package on disk is left alone.
+    DropDataset(DropDatasetStmt),
     /// `USE <name>`
     UseDatabase(UseDatabaseStmt),
 
@@ -160,6 +163,7 @@ impl Statement {
             | Statement::DefinePipeline(_)
             | Statement::ApplyPipeline(_)
             | Statement::DropPipeline(_)
+            | Statement::DropDataset(_)
             | Statement::Reset => true,
             Statement::Search(s) => s.target.is_some(),
             Statement::Select(_)
@@ -684,6 +688,12 @@ pub struct CreateDatabaseStmt {
 
 #[derive(Debug, Clone)]
 pub struct DropDatabaseStmt {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropDatasetStmt {
     pub name: String,
     pub if_exists: bool,
 }

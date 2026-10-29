@@ -12,6 +12,11 @@ engine's own changelog.
   0.1.19 and earlier stay under it). The wheel carries `LICENSE` and `NOTICE` and declares
   `License-Expression: Apache-2.0` (PEP 639); builds need `maturin>=1.9`.
 
+### Added
+
+- `DROP DATASET [IF EXISTS] <name>` through `db.execute(...)`: frees a dataset loaded with
+  `load_numpy`/`load_arrow` (rows, indexes) so the name can be loaded again in the same `Db`.
+
 ## [0.1.19] - 2026-10-08
 
 Picks up the root engine's `v0.1.94`: round 2 of the CASMI scientific-workloads plan

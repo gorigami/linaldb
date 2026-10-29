@@ -128,3 +128,25 @@ fn literal_boolean_predicates() {
         vec![7]
     );
 }
+
+/// `<>` is the SQL spelling of `!=` and filters the same rows.
+#[test]
+fn not_equal_spellings_agree() {
+    let (_dir, mut db) = db();
+    for l in [
+        "DATASET t COLUMNS (id: Int, tag: String)",
+        "INSERT INTO t VALUES (1, \"a\")",
+        "INSERT INTO t VALUES (2, \"b\")",
+        "INSERT INTO t VALUES (3, \"a\")",
+    ] {
+        execute_line(&mut db, l, 1).unwrap();
+    }
+    let bang = ids(&mut db, "SELECT id FROM t WHERE tag != \"a\" ORDER BY id");
+    let sql = ids(&mut db, "SELECT id FROM t WHERE tag <> \"a\" ORDER BY id");
+    assert_eq!(bang, vec![2]);
+    assert_eq!(sql, bang);
+    assert_eq!(
+        ids(&mut db, "SELECT id FROM t WHERE id <> 2 ORDER BY id"),
+        vec![1, 3]
+    );
+}

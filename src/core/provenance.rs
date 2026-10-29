@@ -160,6 +160,45 @@ pub fn compute_content_hash(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// A `std::io::Write` sink that feeds every byte straight into a SHA-256
+/// hasher (P16, `IMPROVEMENTS_PLAN.md`).
+///
+/// `compute_content_hash` needs the whole input in one buffer; a caller that
+/// can serialize directly to a writer -- `serde_json::to_writer` over a large
+/// dataset, the content hash's single largest transient copy -- does not have
+/// to materialize it. The bytes `serde_json` writes here are identical to the
+/// ones `serde_json::to_vec` would produce, so the digest is identical and
+/// existing lineage hashes stay valid.
+#[derive(Default)]
+pub struct HashWriter {
+    hasher: Sha256,
+}
+
+impl HashWriter {
+    pub fn new() -> Self {
+        Self {
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// Finish hashing and return the lowercase hex digest, the same shape
+    /// `compute_content_hash` returns.
+    pub fn finish(self) -> String {
+        format!("{:x}", self.hasher.finalize())
+    }
+}
+
+impl std::io::Write for HashWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Real content hash for an Arrow `RecordBatch` -- used by connectors before
 /// their data becomes a `core::dataset_legacy::Dataset`. Replaces the
 /// empty-string `dataset_hash: "".to_string()` placeholder every connector

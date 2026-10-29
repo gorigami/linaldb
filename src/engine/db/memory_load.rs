@@ -399,8 +399,8 @@ impl TensorDb {
         }
         if self.get_dataset(name).is_ok() {
             return Err(EngineError::InvalidOp(format!(
-                "dataset '{}' already exists -- DROP it first or load under another name",
-                name
+                "dataset '{}' already exists -- `DROP DATASET {}` first or load under another name",
+                name, name
             )));
         }
         if batch.num_columns() == 0 {
