@@ -142,6 +142,20 @@ pub fn execute_statement(
             Ok(DslOutput::Message(format!("Dropped database: {}", s.name)))
         }
 
+        Statement::DropDataset(s) => {
+            if s.if_exists && !db.dataset_exists(&s.name) {
+                return Ok(DslOutput::Message(format!(
+                    "Dataset '{}' not found (skipped)",
+                    s.name
+                )));
+            }
+            db.drop_dataset(&s.name).map_err(|e| DslError::Engine {
+                line: line_no,
+                source: e,
+            })?;
+            Ok(DslOutput::Message(format!("Dropped dataset: {}", s.name)))
+        }
+
         Statement::UseDatabase(s) => {
             db.use_database(&s.name).map_err(|e| DslError::Engine {
                 line: line_no,

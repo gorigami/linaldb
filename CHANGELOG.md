@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md` and `PERFORMANCE_OPTIMIZATION_PLAN.md` are removed per the
   tracked-plan convention; `clients/CRAN_PUBLISHING_PLAN.md` is now tracked.
 
+### Added — `DROP DATASET [IF EXISTS] <name>`
+
+- **Frees a dataset in the session** so its name can be loaded or defined again: rows, indexes
+  and mmap'd column files go with it, as does a tensor-first dataset of the same name and any
+  variable bound to it. Until now the only way to replace data loaded with `load_numpy` /
+  `load_arrow` was another name or a new `Db`, and the "already exists" error already told users
+  to drop it. A saved package on disk is left alone (`LOAD DATASET` brings it back) and
+  provenance records stay. Logged to the WAL, so the drop survives a restart. Test:
+  `tests/drop_dataset_test.rs`.
+
 ### Fixed — database names could escape `data_dir`
 
 - **`POST/DELETE /databases/:name` and `linal db create|drop <name>` validate the name.** A

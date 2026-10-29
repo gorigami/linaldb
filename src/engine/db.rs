@@ -1336,6 +1336,16 @@ impl TensorDb {
         self.active_instance_mut().remove_dataset(name)
     }
 
+    pub fn drop_dataset(&mut self, name: &str) -> Result<(), EngineError> {
+        self.active_instance_mut().drop_dataset(name)
+    }
+
+    /// Whether `name` is a record or tensor-first dataset in the active database.
+    pub fn dataset_exists(&self, name: &str) -> bool {
+        let inst = self.active_instance();
+        inst.get_dataset(name).is_ok() || inst.tensor_datasets.exists(name)
+    }
+
     pub fn alter_dataset_add_column(
         &mut self,
         dataset_name: &str,
@@ -3117,6 +3127,21 @@ impl DatabaseInstance {
             .remove_by_name(name)
             .map(|_| ())
             .map_err(|_| EngineError::DatasetNotFound(name.to_string()))
+    }
+
+    /// `DROP DATASET`: forgets the dataset in this session -- its rows,
+    /// indexes and any mmap'd column files it held open go with it, and so
+    /// does a tensor-first dataset of the same name (it would otherwise sync
+    /// back into the record store) and any variable bound to it. A saved
+    /// package on disk and the dataset's provenance records stay.
+    pub fn drop_dataset(&mut self, name: &str) -> Result<(), EngineError> {
+        let record = self.dataset_store.remove_by_name(name).is_ok();
+        let tensor_first = self.tensor_datasets.unregister(name).is_some();
+        if !record && !tensor_first {
+            return Err(EngineError::DatasetNotFound(name.to_string()));
+        }
+        self.dataset_vars.retain(|_, ds| ds != name);
+        Ok(())
     }
 
     /// Add a column to an existing dataset

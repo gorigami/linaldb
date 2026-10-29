@@ -100,6 +100,19 @@ DATASET diagnostics COLUMNS (
 )
 ```
 
+### DROP DATASET
+
+```sql
+DROP DATASET diagnostics
+DROP DATASET IF EXISTS diagnostics   -- no error if it isn't there
+```
+
+Removes the dataset from the session: its rows, indexes and any memory-mapped column files it
+held open are released, and the name can be loaded or defined again (the way to replace data
+loaded with `load_numpy`/`load_arrow`). A tensor-first dataset of the same name goes too. A saved
+package on disk (`SAVE DATASET`) is not deleted, so `LOAD DATASET` brings it back; provenance
+records stay. Logged to the write-ahead log like any other change.
+
 ### DATASET ... FROM (Materialized View)
 
 A second `DATASET` form builds a new dataset from an existing one by running a

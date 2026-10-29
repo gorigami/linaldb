@@ -656,6 +656,7 @@ impl Parser {
     }
 
     // DROP DATABASE [IF EXISTS] <name>
+    // DROP DATASET [IF EXISTS] <name>
     // DROP PIPELINE <name>
     fn parse_drop(&mut self) -> Result<Statement, ParseError> {
         self.eat(&Token::Drop)?;
@@ -664,22 +665,32 @@ impl Parser {
             let name = self.eat_ident()?;
             return Ok(Statement::DropPipeline(name));
         }
+        if self.at(&Token::Dataset) {
+            self.advance();
+            let if_exists = self.parse_if_exists("DROP DATASET")?;
+            let name = self.eat_ident()?;
+            return Ok(Statement::DropDataset(DropDatasetStmt { name, if_exists }));
+        }
         self.eat(&Token::Database)?;
-        let if_exists = if self.at_ident("IF") {
-            self.advance();
-            if !self.at_ident("EXISTS") {
-                return Err(self.error("expected EXISTS after IF in DROP DATABASE IF EXISTS"));
-            }
-            self.advance();
-            true
-        } else {
-            false
-        };
+        let if_exists = self.parse_if_exists("DROP DATABASE")?;
         let name = self.eat_ident()?;
         Ok(Statement::DropDatabase(DropDatabaseStmt {
             name,
             if_exists,
         }))
+    }
+
+    // Optional `IF EXISTS` after `DROP DATABASE` / `DROP DATASET`.
+    fn parse_if_exists(&mut self, stmt: &str) -> Result<bool, ParseError> {
+        if !self.at_ident("IF") {
+            return Ok(false);
+        }
+        self.advance();
+        if !self.at_ident("EXISTS") {
+            return Err(self.error(format!("expected EXISTS after IF in {} IF EXISTS", stmt)));
+        }
+        self.advance();
+        Ok(true)
     }
 
     // TRANSFORM <source> SELECT ... [WHERE ...] [INTO <target>]
@@ -1470,6 +1481,21 @@ mod tests {
             panic!()
         };
         assert_eq!(s.name, "mydb");
+        assert!(s.if_exists);
+    }
+
+    #[test]
+    fn drop_dataset() {
+        let Statement::DropDataset(s) = parse_ok("DROP DATASET lib") else {
+            panic!()
+        };
+        assert_eq!(s.name, "lib");
+        assert!(!s.if_exists);
+
+        let Statement::DropDataset(s) = parse_ok("DROP DATASET IF EXISTS lib") else {
+            panic!()
+        };
+        assert_eq!(s.name, "lib");
         assert!(s.if_exists);
     }
 
