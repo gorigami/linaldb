@@ -1,5 +1,17 @@
 name: Release
 
+# Two stages (IMPROVEMENTS_PLAN.md, PR 3):
+#
+# 1. Candidate -- run this workflow by hand on the release commit (after the
+#    version-bump PR merged). It builds and smoke-tests the binaries, writes
+#    SHA256SUMS-linal.txt with build-provenance attestations, and puts them in
+#    a *draft* GitHub Release `v<engine>`. Then it starts the wheel candidate
+#    (pypi-publish-embedded.yml), which adds the wheels to the same draft,
+#    publishes them to TestPyPI and verifies them from there.
+# 2. Promote -- push the tag `v<engine>` on that same commit. Nothing is
+#    rebuilt: the draft's files are checked against their SHA256SUMS and the
+#    draft is published. (`linaldb-v<version>` promotes the wheels to PyPI.)
+
 on:
   push:
     tags:
@@ -10,8 +22,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  versions:
+    name: Versions
+    runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.check.outputs.engine }}
+      linaldb: ${{ steps.check.outputs.linaldb }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check versions and CHANGELOG entries
+        id: check
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            scripts/check_versions.sh --release --tag "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            scripts/check_versions.sh --release >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build (${{ matrix.target }})
+    needs: [versions]
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -26,6 +57,8 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive_ext: zip
+    env:
+      VERSION: ${{ needs.versions.outputs.engine }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +66,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+
+      - name: Third-party notices
+        shell: bash
+        run: scripts/third_party_notices.sh Cargo.toml THIRD_PARTY_LICENSES.md
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
@@ -48,18 +90,18 @@ jobs:
 
       - name: Run smoke test (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: .\target\${{ matrix.target }}\release\linal.exe run examples/smoke_test.lnl
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          staging="linal-${version}-${{ matrix.target }}"
+          staging="linal-${VERSION}-${{ matrix.target }}"
           mkdir -p "$staging"
           strip "target/${{ matrix.target }}/release/linal"
           cp "target/${{ matrix.target }}/release/linal" "$staging/"
-          cp README.md LICENSE NOTICE "$staging/"
+          cp README.md LICENSE NOTICE THIRD_PARTY_LICENSES.md "$staging/"
           tar czf "${staging}.tar.gz" "$staging"
           echo "ASSET=${staging}.tar.gz" >> "$GITHUB_ENV"
 
@@ -67,11 +109,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v',''
-          $staging = "linal-$version-${{ matrix.target }}"
+          $staging = "linal-$env:VERSION-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\linal.exe" "$staging\"
-          Copy-Item "README.md","LICENSE","NOTICE" "$staging\"
+          Copy-Item "README.md","LICENSE","NOTICE","THIRD_PARTY_LICENSES.md" "$staging\"
           Compress-Archive -Path $staging -DestinationPath "$staging.zip"
           echo "ASSET=$staging.zip" >> $env:GITHUB_ENV
 
@@ -82,20 +123,90 @@ jobs:
           path: ${{ env.ASSET }}
           if-no-files-found: error
 
-  release:
-    name: Publish release
-    needs: [build]
+  draft:
+    name: Draft release
+    needs: [versions, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ needs.versions.outputs.engine }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum linal-* > SHA256SUMS-linal.txt && cat SHA256SUMS-linal.txt
+
+      - name: Build-provenance attestations
+        uses: actions/attest-build-provenance@v2
         with:
-          files: artifacts/*/*
-          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          subject-path: artifacts/linal-*
+
+      # A published release for this version means the version was already
+      # released: bump it. An earlier draft (a candidate that failed later) is
+      # replaced.
+      - name: Create the draft release
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .draft")
+          case "$existing" in
+            *false*) echo "::error::$TAG is already released; bump the version"; exit 1 ;;
+            *true*) gh release delete "$TAG" --yes ;;
+          esac
+          gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "Release candidate built from $GITHUB_SHA. Wheels for linaldb ${{ needs.versions.outputs.linaldb }} are added by the wheel candidate run." \
+            artifacts/*
+
+      - name: Start the wheel candidate
+        run: gh workflow run pypi-publish-embedded.yml --ref "$GITHUB_REF_NAME"
+
+  promote:
+    name: Publish release
+    needs: [versions]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Find the candidate
+        id: draft
+        run: |
+          set -euo pipefail
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq "[.[] | select(.tag_name == \"$TAG\")][0]")
+          if [ -z "$release" ] || [ "$release" = null ]; then
+            echo "::error::no candidate for $TAG: run the Release workflow on this commit first"; exit 1
+          fi
+          if [ "$(jq -r .draft <<<"$release")" != true ]; then
+            echo "::error::$TAG is already published"; exit 1
+          fi
+          target=$(jq -r .target_commitish <<<"$release")
+          if [ "$target" != "$GITHUB_SHA" ]; then
+            echo "::error::the candidate was built from $target, the tag points at $GITHUB_SHA"; exit 1
+          fi
+
+      - name: Check the candidate's files
+        run: |
+          set -euo pipefail
+          mkdir dl && cd dl
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY"
+          sha256sum -c SHA256SUMS-linal.txt
+          if [ -f SHA256SUMS-linaldb.txt ]; then sha256sum -c SHA256SUMS-linaldb.txt; fi
+
+      - name: Publish the release
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --verify-tag --latest

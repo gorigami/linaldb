@@ -1,25 +1,49 @@
 name: PyPI Publish (linaldb, embedded)
 
+# Two stages (IMPROVEMENTS_PLAN.md, PR 3). Keep this file name and the
+# `release` environment: PyPI and TestPyPI trusted publishing is registered
+# for exactly this workflow + environment.
+#
+# 1. Candidate -- workflow_dispatch, normally started by release.yml after it
+#    created the draft release `v<engine>`. Tests and builds the wheels, adds
+#    them with SHA256SUMS-linaldb.txt and attestations to that draft,
+#    publishes them to TestPyPI, then installs `linaldb==<version>` from
+#    TestPyPI in clean environments and runs scripts/verify_wheel.py.
+# 2. Promote -- push the tag `linaldb-v<version>` on the same commit. The
+#    draft's wheels (not a rebuild) are checked against SHA256SUMS-linaldb.txt
+#    and published to PyPI, then installed from PyPI and verified again.
+
 on:
   push:
     tags:
       - "linaldb-v*"
-  workflow_dispatch:
-    inputs:
-      target:
-        description: "Where to publish"
-        type: choice
-        options:
-          - testpypi
-          - pypi
-        default: testpypi
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  versions:
+    name: Versions
+    runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.check.outputs.engine }}
+      linaldb: ${{ steps.check.outputs.linaldb }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check versions and CHANGELOG entries
+        id: check
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            scripts/check_versions.sh --release --tag "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            scripts/check_versions.sh --release >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Test (${{ matrix.os }})
+    needs: [versions]
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -89,13 +113,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # PEP 639 `license-files` can't reach outside the package directory, so
-      # the root LICENSE/NOTICE are copied in for the build (gitignored there).
-      # A committed copy would collide with the root files `maturin sdist`
-      # already packs, since the sdist is rooted at the repository.
       - name: Copy LICENSE and NOTICE into the package
         shell: bash
         run: cp LICENSE NOTICE clients/python-embedded/
+
+      # Lands inside the Python package (gitignored there), so the wheel
+      # ships it as linaldb/THIRD_PARTY_LICENSES.md.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+
+      - name: Third-party notices
+        shell: bash
+        run: |
+          scripts/third_party_notices.sh clients/python-embedded/Cargo.toml \
+            clients/python-embedded/python/linaldb/THIRD_PARTY_LICENSES.md
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -117,6 +150,18 @@ jobs:
               apt-get update && apt-get install -y cmake
             fi
 
+      - name: Check the wheel's license files
+        shell: bash
+        working-directory: clients/python-embedded
+        run: |
+          python3 - <<'PY'
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          for suffix in (".dist-info/licenses/LICENSE", ".dist-info/licenses/NOTICE",
+                         "linaldb/THIRD_PARTY_LICENSES.md"):
+              assert any(n.endswith(suffix) for n in names), f"wheel lacks {suffix}"
+          PY
+
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
@@ -124,14 +169,61 @@ jobs:
           path: clients/python-embedded/dist/*.whl
           if-no-files-found: error
 
+  stage:
+    name: Add wheels to the draft release
+    needs: [versions, build-wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ needs.versions.outputs.engine }}
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- *.whl > SHA256SUMS-linaldb.txt && cat SHA256SUMS-linaldb.txt
+
+      - name: Build-provenance attestations
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.whl
+
+      - name: Upload to the draft
+        run: |
+          set -euo pipefail
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq "[.[] | select(.tag_name == \"$TAG\")][0]")
+          if [ -z "$release" ] || [ "$release" = null ] || [ "$(jq -r .draft <<<"$release")" != true ]; then
+            echo "::error::no draft release $TAG: start the candidate from the Release workflow"; exit 1
+          fi
+          if [ "$(jq -r .target_commitish <<<"$release")" != "$GITHUB_SHA" ]; then
+            echo "::error::draft $TAG was built from another commit; rerun the Release workflow here"; exit 1
+          fi
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: dist/SHA256SUMS-linaldb.txt
+
   # Trusted publishing (OIDC) -- no API token stored anywhere. Requires a
-  # "pending publisher" registered on (test.)pypi.org for this exact repo +
-  # workflow filename + environment name before the first run; see
-  # https://docs.pypi.org/trusted-publishers/.
+  # publisher registered on (test.)pypi.org for this exact repo + workflow
+  # filename + environment name; see https://docs.pypi.org/trusted-publishers/.
+  # TestPyPI versions are immutable like PyPI's: if a candidate for this version
+  # was already uploaded, the upload is skipped and `verify` fails on the
+  # checksum mismatch -- bump the version instead of reusing it.
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [build-wheels]
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: [stage]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -149,24 +241,117 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist/
+          skip-existing: true
 
-  publish-pypi:
+  verify:
+    name: Verify from TestPyPI (${{ matrix.os }}, py${{ matrix.python }})
+    needs: [versions, publish-testpypi]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - { os: macos-14, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+      - name: Install from the index and verify
+        shell: bash
+        env:
+          VERSION: ${{ needs.versions.outputs.linaldb }}
+        run: scripts/verify_from_index.sh testpypi "$VERSION" SHA256SUMS-linaldb.txt
+
+  # Closest to a Kaggle kernel: Linux x86_64, Python 3.12, packages installed
+  # first, then the check runs in a container with no network at all.
+  verify-offline:
+    name: Verify offline (Kaggle-like)
+    needs: [versions, publish-testpypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+      - name: Install, then verify with the network off
+        env:
+          VERSION: ${{ needs.versions.outputs.linaldb }}
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e VERSION python:3.12-slim \
+            bash scripts/verify_from_index.sh testpypi "$VERSION" SHA256SUMS-linaldb.txt /w/site
+          docker run --rm --network none -v "$PWD:/w" -w /tmp -e PYTHONPATH=/w/site python:3.12-slim \
+            python /w/scripts/verify_wheel.py --version "$VERSION"
+
+  promote:
     name: Publish to PyPI
-    needs: [build-wheels]
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    needs: [versions]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      contents: write # read the draft release
       id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ needs.versions.outputs.engine }}
     steps:
-      - name: Download wheels
-        uses: actions/download-artifact@v4
+      - name: Take the wheels from the candidate
+        run: |
+          set -euo pipefail
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq "[.[] | select(.tag_name == \"$TAG\")][0]")
+          if [ -z "$release" ] || [ "$release" = null ]; then
+            echo "::error::no candidate release $TAG: run the Release workflow on this commit first"; exit 1
+          fi
+          if [ "$(jq -r .target_commitish <<<"$release")" != "$GITHUB_SHA" ]; then
+            echo "::error::the candidate $TAG was built from another commit than this tag"; exit 1
+          fi
+          mkdir dist && cd dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.whl' --pattern SHA256SUMS-linaldb.txt
+          sha256sum -c SHA256SUMS-linaldb.txt
+          mv SHA256SUMS-linaldb.txt ..
+
+      - uses: actions/upload-artifact@v4
         with:
-          pattern: wheels-*
-          path: dist/
-          merge-multiple: true
+          name: sha256sums
+          path: SHA256SUMS-linaldb.txt
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  verify-pypi:
+    name: Verify from PyPI (${{ matrix.os }})
+    needs: [versions, promote]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+      - name: Install from PyPI and verify
+        shell: bash
+        env:
+          VERSION: ${{ needs.versions.outputs.linaldb }}
+        run: scripts/verify_from_index.sh pypi "$VERSION" SHA256SUMS-linaldb.txt

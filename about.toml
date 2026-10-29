@@ -1,0 +1,31 @@
+# cargo-about config: third-party notices shipped with release binaries and
+# wheels (`scripts/third_party_notices.sh`). Order is preference: where a crate
+# offers a choice (e.g. `MIT OR Apache-2.0`), the first accepted one is used.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+
+# The vendored HDF5 C library declares `license = "(HDF5)"`; its LICENSE file is
+# the 3-clause BSD text with The HDF Group's copyright (also cited in NOTICE).
+[hdf5-metno-src.clarify]
+license = "BSD-3-Clause"
+[[hdf5-metno-src.clarify.files]]
+path = "ext/hdf5/LICENSE"
+license = "BSD-3-Clause"
+checksum = "b384492d25c6e4a49f371b646d9a81bc0a4b97cf0c66c2f3ed1b35f78a148732"
