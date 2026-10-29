@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `WHERE tag <> 'a'` lexes to the same `!=` token, so SQL copied from elsewhere runs unchanged.
 
+### Changed — peak-list load figure restated
+
+- The 0.1.94 notes and `DSL_REFERENCE.md` quoted "2.5M spectra / 75M peaks in ~12 s", a
+  synthetic run with ~30 peaks per spectrum. The real CASMI 2026 library has 401M peaks (median
+  42 per spectrum, p99 1,347) and loads in 132 s on 4 CPUs, in shards; both places now say so.
+
 ### Fixed — database names could escape `data_dir`
 
 - **`POST/DELETE /databases/:name` and `linal db create|drop <name>` validate the name.** A
@@ -93,7 +99,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records it.
 - **Peak lists from two Arrow list columns** (P11): `Db.load_arrow(..., peaks={"peaks": (mz_col,
   intensity_col)}, cast="f32", sort=False)` / `TensorDb::load_record_batch_with_peaks` builds a
-  `Matrix(2, *)` column in Rust instead of a Python loop -- 2.5M spectra / 75M peaks in ~12 s.
+  `Matrix(2, *)` column in Rust instead of a Python loop -- 2.5M synthetic spectra / 75M peaks
+  in ~12 s on an M-series laptop. *Correction:* the real CASMI 2026 library is 2.53M spectra /
+  401M peaks; it loads in 132 s on 4 CPUs (Kaggle), in 250k-row shards because a single load
+  peaks at ~68 bytes per raw peak.
   `float64` lists are only accepted with the explicit `cast="f32"`; errors name column and row;
   identical to `peaks_array()` (same content hash).
 - **Run manifest** (P15): lineage steps that produce one dataset record its row count

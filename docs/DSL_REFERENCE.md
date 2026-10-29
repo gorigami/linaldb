@@ -802,8 +802,10 @@ columns are dropped. Per row both lists must be present (or both `NULL`, giving 
 spectrum), of equal length, finite, and with ascending m/z -- `sort=True` sorts the pairs instead.
 `float64` lists are rejected unless `cast="f32"` asks for them to be rounded to `float32`, the
 only precision peak lists have. The result is identical to building the column with
-`linaldb.peaks_array()` (same content hash); 2.5M spectra / 75M peaks load in about 12 s on an
-M-series laptop. Lineage records the source columns, the cast and whether peaks were sorted. With the
+`linaldb.peaks_array()` (same content hash). Measured: 2.5M synthetic spectra / 75M peaks load
+in about 12 s on an M-series laptop; the CASMI 2026 library (2.53M spectra, 401M peaks) loads in
+132 s on 4 CPUs, in 250k-row shards, because a single load peaks at ~68 bytes per raw peak
+(8 at rest). Lineage records the source columns, the cast and whether peaks were sorted. With the
 write-ahead log enabled, a checkpoint is taken right after the load, because the log only
 replays DSL statements.
 
