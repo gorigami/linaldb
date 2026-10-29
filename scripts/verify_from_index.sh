@@ -9,10 +9,12 @@
 # the check is left to the caller -- the Kaggle-like job runs it afterwards
 # in a container without network.
 set -euo pipefail
-here="$(cd "$(dirname "$0")" && pwd)"
+# Paths stay relative to the current directory: on Windows, Git Bash's
+# absolute paths (/tmp/..., /d/a/...) mean something else to a native Python.
+scripts="$(dirname "$0")"
 index="${1:?usage: $0 <testpypi|pypi> <version> <SHA256SUMS> [target dir]}"
 version="${2:?version}"
-sums="$(cd "$(dirname "${3:?SHA256SUMS file}")" && pwd)/$(basename "$3")"
+sums="${3:?SHA256SUMS file}"
 target="${4:-}"
 
 case "$index" in
@@ -21,9 +23,10 @@ case "$index" in
   *) echo "unknown index $index" >&2; exit 2 ;;
 esac
 
-python=python3
-command -v "$python" >/dev/null 2>&1 || python=python
-work="$(mktemp -d)"
+python=python
+command -v "$python" >/dev/null 2>&1 || python=python3
+work=".verify-linaldb"
+rm -rf "$work"
 
 # A freshly uploaded file can take a few minutes to show up in the index.
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -58,5 +61,5 @@ if [ -n "$target" ]; then
 else
   "$python" -m pip install --no-cache-dir pyarrow
   "$python" -m pip install --no-cache-dir --no-deps --force-reinstall "$wheel"
-  cd "$work" && "$python" "$here/verify_wheel.py" --version "$version"
+  "$python" "$scripts/verify_wheel.py" --version "$version"
 fi

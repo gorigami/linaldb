@@ -44,3 +44,4 @@ clients/r-embedded/*.Rcheck/
 clients/r-embedded/*.tar.gz
 # macOS Finder metadata
 .DS_Store
+.verify-linaldb/

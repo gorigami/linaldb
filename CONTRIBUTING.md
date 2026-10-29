@@ -400,9 +400,9 @@ artifact is built once, checked, and promoted unchanged.
    `CHANGELOG.md` files get a dated `## [X.Y.Z] - YYYY-MM-DD` entry. `scripts/check_versions.sh
    --release` must pass (CI runs it without `--release` on every PR).
 2. **Candidate**: after the PR merges, run the **Release** workflow (Actions → Release → Run
-   workflow, on `main`). It builds and smoke-tests the binaries, attaches them with
-   `SHA256SUMS-linal.txt`, `THIRD_PARTY_LICENSES.md` and build-provenance attestations to a
-   **draft** release `vX.Y.Z`, then starts the wheel candidate: wheels added to the same draft
+   workflow, on `main`). It builds and smoke-tests the binaries (each archive carries `LICENSE`,
+   `NOTICE` and `THIRD_PARTY_LICENSES.md`), attaches them with `SHA256SUMS-linal.txt` and
+   build-provenance attestations to a **draft** release `vX.Y.Z`, then starts the wheel candidate: wheels added to the same draft
    (`SHA256SUMS-linaldb.txt`), published to **TestPyPI** (approve the `release` environment),
    installed from there on Linux py3.10–3.13, macOS and Windows plus one Kaggle-like offline job,
    and checked with `scripts/verify_wheel.py` (version, queries, golden content hashes).
