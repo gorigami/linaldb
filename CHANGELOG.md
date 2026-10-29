@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — relicensed under Apache-2.0
+
+- **LINAL is now licensed under the Apache License, Version 2.0** (`LICENSE`, new `NOTICE`),
+  replacing the LinalDB Community License v1.0. Versions up to and including v0.1.94 (and the
+  `linaldb` Python package up to 0.1.19) stay under the Community License; Apache-2.0 applies from
+  the next release. Every manifest now declares it: `license = "Apache-2.0"` in the engine and
+  binding crates (the root crate had no `license` field), PEP 639 `license`/`license-files` in
+  both Python packages (proprietary classifier removed), `Apache License (== 2.0)` in both R
+  `DESCRIPTION`s. Release archives ship `NOTICE` next to `LICENSE`.
+- **CI job `License`** (`scripts/check_license.sh`): fails if `LICENSE` stops being the verbatim
+  Apache-2.0 text, a package's `LICENSE`/`NOTICE` copy drifts from the root one, a manifest
+  declares another license, or the old license is named outside the history notes.
+- **Planning docs consolidated** into `IMPROVEMENTS_PLAN.md` (license decision, the open CASMI
+  proposals P16–P23 and G1–G6, the release-workflow proposal, ordered as PRs with a verdict for
+  each). The closed `CASMI_WORKLOADS_PLAN.md`, `CASMI_WORKLOADS_PLAN_2.md`,
+  `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md` and `PERFORMANCE_OPTIMIZATION_PLAN.md` are removed per the
+  tracked-plan convention; `clients/CRAN_PUBLISHING_PLAN.md` is now tracked.
+
 ## [0.1.94] - 2026-10-08
 
 ### Added — scientific workloads round 2, medium and large tier (CASMI_WORKLOADS_PLAN_2.md: P9, P13, P14)

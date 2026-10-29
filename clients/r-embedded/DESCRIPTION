@@ -10,9 +10,7 @@ Description: In-process embedded engine for LINALDB, a SQL-inspired
     'linaldb.server' package under clients/r, a thin HTTP client for a running
     'linal serve' instance). See ../EMBEDDED_CONTRACT.md for the Rust/R
     result-shape contract this package implements against.
-License: LinalDB Community License v1.0 (see ../../LICENSE; not a
-    standard SPDX/CRAN-recognized license string yet -- fine for
-    scaffolding, revisit before any real CRAN submission)
+License: Apache License (== 2.0)
 Encoding: UTF-8
 Imports:
     arrow,

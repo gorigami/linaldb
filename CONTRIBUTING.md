@@ -347,7 +347,8 @@ linaldb/
 ├── README.md
 ├── CONTRIBUTING.md
 ├── SECURITY.md
-└── LICENSE
+├── LICENSE
+└── NOTICE
 ```
 
 ---
@@ -388,7 +389,7 @@ linaldb/
 
 ## License
 
-By contributing to LINALDB, you agree that your contributions will be licensed under the **LinalDB Community License v1.0**.
+LINALDB is licensed under the [Apache License, Version 2.0](LICENSE). Unless you state otherwise, any contribution you submit is licensed under the same terms (section 5 of the license); no separate contributor agreement is needed. Source files don't carry per-file license headers: the root `LICENSE` and `NOTICE` cover the whole repository.
 
 ---
 

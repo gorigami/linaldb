@@ -29,6 +29,9 @@ clients/python-embedded/build/
 clients/python-embedded/.venv/
 clients/python-embedded/python/linaldb/*.so
 clients/python-embedded/python/linaldb/*.pyd
+# Copied from the repo root at build time (pypi-publish-embedded.yml)
+clients/python-embedded/LICENSE
+clients/python-embedded/NOTICE
 
 # R native/embedded bindings (clients/r-embedded)
 clients/r-embedded/.Rhistory

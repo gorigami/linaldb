@@ -341,12 +341,16 @@ LINALDB is extensively documented to help you scale from local experiments to pr
 
 ## ⚖️ License
 
-LINALDB is licensed under the **LinalDB Community License v1.0**.
+LINALDB is licensed under the **[Apache License, Version 2.0](LICENSE)**: free to use, modify and
+redistribute, commercially or not, with an express patent grant. See [NOTICE](NOTICE) for
+attribution.
 
-- ✅ **Permitted**: Personal use, research, education, and internal organizational use.
-- ⚠️ **Restricted**: Commercial redistribution, managed services (DBaaS/SaaS), and direct monetization require a separate **Commercial License**.
-
-For commercial licensing inquiries, please contact: [develop@gorigami.xyz](mailto:develop@gorigami.xyz)
+- **Earlier versions**: engine releases up to and including v0.1.94 and the `linaldb` Python
+  package up to and including 0.1.19 were published under the LinalDB Community License v1.0 and
+  stay under it. Apache-2.0 applies from the next release on.
+- **Name**: the license covers the code, not the "LINALDB"/"LinalDB"/"LINAL" names (Apache-2.0
+  §6). Forks are welcome under another name.
+- **Support and consulting**: [develop@gorigami.xyz](mailto:develop@gorigami.xyz)
 
 ---
 

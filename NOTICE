@@ -1,0 +1,15 @@
+LINALDB
+Copyright 2025-2026 gorigami (https://gorigami.xyz)
+
+Licensed under the Apache License, Version 2.0 (see LICENSE). Versions up to
+and including engine v0.1.94 and the `linaldb` Python package 0.1.19 were
+released under the LinalDB Community License v1.0 and remain under it.
+
+"LINALDB", "LinalDB" and "LINAL" are names of gorigami. The Apache License
+does not grant permission to use them (section 6) beyond describing the origin
+of the work.
+
+Binary distributions statically link the HDF5 library:
+  Copyright 2006 by The HDF Group.
+  Copyright 1998-2006 by The Board of Trustees of the University of Illinois.
+  Distributed under the 3-clause BSD license.

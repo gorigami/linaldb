@@ -1291,5 +1291,5 @@ following headerless request, until something else changes it again.
 ---
 
 **LINALDB**: *Where SQL meets Linear Algebra.*
-Copyright (c) 2025 gorigami (gorigami.xyz)
-Licensed under the LinalDB Community License v1.0
+Copyright 2025-2026 gorigami (gorigami.xyz)
+Licensed under the Apache License, Version 2.0
