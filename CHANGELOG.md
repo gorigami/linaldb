@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provenance records stay. Logged to the WAL, so the drop survives a restart. Test:
   `tests/drop_dataset_test.rs`.
 
+### Added — `<>` as the SQL spelling of `!=`
+
+- `WHERE tag <> 'a'` lexes to the same `!=` token, so SQL copied from elsewhere runs unchanged.
+
 ### Fixed — database names could escape `data_dir`
 
 - **`POST/DELETE /databases/:name` and `linal db create|drop <name>` validate the name.** A

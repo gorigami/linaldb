@@ -549,9 +549,11 @@ LIMIT 10
 - **`LIMIT`/`OFFSET`**: `LIMIT <n>` caps the row count; `OFFSET <n>` skips the first `n` rows before applying `LIMIT` (both may be used together or independently).
 - **`FROM` is optional** for a `SELECT` list of only literal/computed expressions — no column, aggregate, or window reference, since there'd be no dataset to resolve one against: `SELECT L2_NORM([3.0, 4.0]) AS five` evaluates the list once and returns a single row. Any real column reference still requires `FROM`.
 
-**Predicate vocabulary** (usable in `WHERE`/`FILTER`/`HAVING`):
+**Predicate vocabulary** (usable in `WHERE`/`FILTER`/`HAVING`). Comparisons are `=`, `!=` (or
+`<>`, its SQL spelling), `<`, `<=`, `>`, `>=`:
 
 ```sql
+SELECT * FROM items WHERE category <> 'archived'
 SELECT * FROM items WHERE category IN ('a', 'b', 'c')
 SELECT * FROM items WHERE price BETWEEN 5 AND 25
 SELECT * FROM items WHERE tag IS NULL

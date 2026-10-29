@@ -316,6 +316,7 @@ pub enum Token {
     #[token("<=")]
     LtEq,
     #[token("!=")]
+    #[token("<>")]
     NotEq,
     #[token("~=")]
     ApproxEq,
@@ -426,6 +427,13 @@ mod tests {
         assert_eq!(tok("LAZY"), vec![Token::Lazy]);
         assert_eq!(tok("STRICT"), vec![Token::Strict]);
         assert_eq!(tok("ADD"), vec![Token::Add]);
+    }
+
+    #[test]
+    fn not_equal_has_two_spellings() {
+        assert_eq!(tok("!="), vec![Token::NotEq]);
+        assert_eq!(tok("<>"), vec![Token::NotEq]);
+        assert_eq!(tok("< >"), vec![Token::Lt, Token::Gt]);
     }
 
     #[test]
