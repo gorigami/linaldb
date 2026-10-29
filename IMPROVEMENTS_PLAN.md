@@ -19,7 +19,7 @@ table says:
 | CASMI `docs/LINALDB_SUGGESTIONS.md` (2026-10-28) | DROP DATASET, MMAP for scalar-only datasets, slow wide `SPEC_COSINE_MOD` | PR 2, PR 5, backlog |
 | `CASMI_WORKLOADS_PLAN.md`, `CASMI_WORKLOADS_PLAN_2.md`, `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md` | — | Closed. Deleted per the tracked-plan convention; code comments that cite them by name resolve through git history |
 | `PERFORMANCE_OPTIMIZATION_PLAN.md` | one open item | Backlog. Deleted |
-| `clients/CRAN_PUBLISHING_PLAN.md` | R packages to CRAN | Kept as its own plan and now tracked (detailed audit, cited by `ARCHITECTURE.md`); listed in the backlog |
+| `clients/CRAN_PUBLISHING_PLAN.md` | R packages to CRAN | Kept as its own plan and now tracked (detailed audit, cited by `ARCHITECTURE.md`); on hold in the backlog |
 
 Rules for every PR (unchanged from the CASMI rounds): validate against an independent
 implementation, fail loudly, keep new behavior opt-in, update `DSL_REFERENCE.md`,
@@ -255,7 +255,7 @@ Engine impact: low–medium.
 | HNSW vs IVF vs scan latency/recall benchmark | performance plan, Phase 1 | low | **do** when touching indexes |
 | Columnar `String` values (if load is still > 3× at-rest after PR 4) | round 4 | large | **if evidence** |
 | Binary (versioned) content hash | load-memory proposal | medium | **no** for now: changes every saved hash |
-| R packages to CRAN | `clients/CRAN_PUBLISHING_PLAN.md` | medium | **do** after PR 1 (license was one of its blockers); the `r-embedded` path dependency is the real blocker |
+| R packages to CRAN | `clients/CRAN_PUBLISHING_PLAN.md` | medium | **on hold**, not scheduled: CRAN submission is a manual process; decide later whether to publish (or just ship via GitHub). PR 1 removes the license blocker; the `r-embedded` path dependency is still the real one |
 | Linux aarch64, macOS x86_64, musl targets | release workflow R6 | low | after CASMI (D3) |
 
 ## Not doing

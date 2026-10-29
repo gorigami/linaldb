@@ -8,7 +8,8 @@ clients (`linaldb` embedded + `linaldb-server` HTTP, both live on PyPI as of
 the equivalent effort for the two R packages, `clients/r` (`linaldb.server`)
 and `clients/r-embedded` (`linaldb`), targeting CRAN.
 
-**Status: planning only.** Nothing in this document has been implemented
+**Status: on hold (2026-10-29), planning only.** Publishing to CRAN is a manual
+process and not scheduled; we decide later whether to do it. Nothing in this document has been implemented
 yet — no code changes, no `.Rbuildignore`/`DESCRIPTION` edits, nothing
 committed. This is meant to land as its own PR (or the first of a short
 stack) the next time we pick this up.
