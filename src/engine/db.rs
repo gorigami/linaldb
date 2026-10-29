@@ -592,6 +592,28 @@ impl DatabaseInstance {
     }
 }
 
+/// A database name becomes a directory under `data_dir`, and dropping the
+/// database deletes that directory, so the name must be a single plain path
+/// component. The DSL only parses identifiers, but `linal db create|drop` and
+/// `POST/DELETE /databases/:name` pass any string through (`..`, `../x`,
+/// `/abs`), so every entry point checks here: ASCII letters, digits, `_` and
+/// `-`, at most 128 characters.
+pub fn validate_db_name(name: &str) -> Result<(), EngineError> {
+    let ok = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidOp(format!(
+            "Invalid database name '{}': use only letters, digits, '_' and '-' (max 128 characters)",
+            name
+        )))
+    }
+}
+
 /// Session-wide named pipeline registry (`DEFINE`/`APPLY`/`DROP PIPELINE`).
 ///
 /// Pipelines aren't scoped to a database: one defined while `USE a` is
@@ -774,6 +796,7 @@ impl TensorDb {
 
     /// Create a new database
     pub fn create_database(&mut self, name: String) -> Result<(), EngineError> {
+        validate_db_name(&name)?;
         if self.databases.contains_key(&name) {
             return Err(EngineError::InvalidOp(format!(
                 "Database '{}' already exists",
@@ -814,6 +837,7 @@ impl TensorDb {
 
     /// Drop a database
     pub fn drop_database(&mut self, name: &str) -> Result<(), EngineError> {
+        validate_db_name(name)?;
         if name == "default" {
             return Err(EngineError::InvalidOp(
                 "Cannot drop the 'default' database".to_string(),

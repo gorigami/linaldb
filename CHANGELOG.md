@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SCIENTIFIC_ENGINE_EXPANSION_PLAN.md` and `PERFORMANCE_OPTIMIZATION_PLAN.md` are removed per the
   tracked-plan convention; `clients/CRAN_PUBLISHING_PLAN.md` is now tracked.
 
+### Fixed — database names could escape `data_dir`
+
+- **`POST/DELETE /databases/:name` and `linal db create|drop <name>` validate the name.** A
+  database name becomes a directory under `data_dir`, and dropping the database deletes it with
+  `remove_dir_all`. The DSL only parses identifiers, but the HTTP routes (axum percent-decodes
+  `..%2Fvictim` into `../victim`) and the CLI passed any string through, so creating and then
+  dropping `../victim` deleted a directory next to `data_dir`, with everything in it. Names are now
+  ASCII letters, digits, `_` and `-` (max 128), checked by one `validate_db_name` used by
+  `TensorDb` and the server's `SharedEngine`; anything else is a `400` / CLI error before the
+  filesystem is touched. Test: `tests/database_name_validation_test.rs` (engine, server registry
+  and the real HTTP route).
+
 ## [0.1.94] - 2026-10-08
 
 ### Added — scientific workloads round 2, medium and large tier (CASMI_WORKLOADS_PLAN_2.md: P9, P13, P14)

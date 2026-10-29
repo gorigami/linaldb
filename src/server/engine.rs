@@ -22,7 +22,7 @@
 use crate::core::config::EngineConfig;
 use crate::dsl::ast::{ShowTarget, Statement};
 use crate::dsl::{can_execute_shared, execute_line, execute_line_shared, DslError, DslOutput};
-use crate::engine::db::DatabaseInstance;
+use crate::engine::db::{validate_db_name, DatabaseInstance};
 use crate::engine::{EngineError, PipelineRegistry, TensorDb};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -93,6 +93,7 @@ impl SharedEngine {
 
     /// Same checks and messages as `TensorDb::create_database`.
     pub fn create_database(&self, name: String) -> Result<(), EngineError> {
+        validate_db_name(&name)?;
         let mut dbs = self.dbs.write().unwrap();
         if dbs.contains_key(&name) {
             return Err(EngineError::InvalidOp(format!(
@@ -117,6 +118,7 @@ impl SharedEngine {
     /// in-flight statement on the database to finish before deleting its
     /// directory.
     pub fn drop_database(&self, name: &str) -> Result<(), EngineError> {
+        validate_db_name(name)?;
         if name == "default" {
             return Err(EngineError::InvalidOp(
                 "Cannot drop the 'default' database".to_string(),
