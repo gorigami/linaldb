@@ -3,6 +3,7 @@ name = "linal"
 version = "0.1.94"
 edition = "2021"
 description = "In-memory linear algebra engine for vectors, matrices and tensors"
+license = "Apache-2.0"
 
 [[bin]]
 name = "linal"

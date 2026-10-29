@@ -5,6 +5,14 @@ here. See the parent repository's `CHANGELOG.md` for the engine's own
 changelog and `PYTHON_R_INTEROP_PLAN.md` (repo root, until all its
 checkpoints land) for the full build history.
 
+## [Unreleased]
+
+### Changed
+
+- Licensed under the Apache License, Version 2.0 (was the LinalDB Community License v1.0;
+  0.1.2 and earlier stay under it). The package carries `LICENSE` and `NOTICE` and declares
+  `License-Expression: Apache-2.0` (PEP 639); builds need `hatchling>=1.27`.
+
 ## [0.1.2] - 2026-09-16
 
 Documentation-only release, no functional changes:

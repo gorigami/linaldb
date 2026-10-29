@@ -44,11 +44,25 @@ jobs:
       # Git Bash's path handling tripped this up). `maturin build` + `pip
       # install` the resulting wheel needs neither -- same approach the
       # package's own README documents as the alternative to `develop`.
+      # PEP 639 `license-files` can't reach outside the package directory, so
+      # the root LICENSE/NOTICE are copied in for the build (gitignored there).
+      # A committed copy would collide with the root files `maturin sdist`
+      # already packs, since the sdist is rooted at the repository.
+      - name: Copy LICENSE and NOTICE into the package
+        shell: bash
+        run: cp LICENSE NOTICE clients/python-embedded/
+
       - name: Build + install wheel
         shell: bash
         working-directory: clients/python-embedded
         run: |
           maturin build --release --out dist
+          python - <<'PY'
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          for f in ("LICENSE", "NOTICE"):
+              assert any(n.endswith(".dist-info/licenses/" + f) for n in names), f"wheel lacks {f}"
+          PY
           pip install --force-reinstall dist/*.whl
 
       - name: Run tests
@@ -74,6 +88,14 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+
+      # PEP 639 `license-files` can't reach outside the package directory, so
+      # the root LICENSE/NOTICE are copied in for the build (gitignored there).
+      # A committed copy would collide with the root files `maturin sdist`
+      # already packs, since the sdist is rooted at the repository.
+      - name: Copy LICENSE and NOTICE into the package
+        shell: bash
+        run: cp LICENSE NOTICE clients/python-embedded/
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1

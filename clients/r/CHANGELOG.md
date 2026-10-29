@@ -5,6 +5,13 @@ See the parent repository's `CHANGELOG.md` for the engine's own
 changelog and `PYTHON_R_INTEROP_PLAN.md` (repo root, until all its
 checkpoints land) for the full build history.
 
+## [Unreleased]
+
+### Changed
+
+- `License: Apache License (== 2.0)`, a standard CRAN license string (was the non-standard
+  LinalDB Community License v1.0, a blocker for CRAN submission).
+
 ## [0.1.0] - 2026-07-23 (unreleased, not yet published to CRAN)
 
 Initial client, built across checkpoints 0-5 of `PYTHON_R_INTEROP_PLAN.md`:

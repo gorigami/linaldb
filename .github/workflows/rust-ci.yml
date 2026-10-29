@@ -42,6 +42,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+  license:
+    name: License
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check license metadata
+        run: bash scripts/check_license.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

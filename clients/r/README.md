@@ -8,9 +8,8 @@ engine treating vectors, matrices, and tensors as first-class citizens.
 landed) — `/execute` and `/delivery` are both implemented and tested
 against a real server
 (55 passing `testthat` tests, including a full `R CMD check` pass, plus a
-real end-to-end example, see below). Not yet published to CRAN — the
-non-standard license string in `DESCRIPTION` needs resolving first, see
-checkpoint 0's notes there.
+real end-to-end example, see below). Not yet published to CRAN; the
+license is now the CRAN-recognized `Apache License (== 2.0)`.
 
 Talks to a running `linal serve` instance over its HTTP API
 (`POST /execute` for ad-hoc DSL, `/delivery/*` for real Parquet dataset

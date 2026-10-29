@@ -6,6 +6,12 @@ engine's own changelog.
 
 ## [Unreleased]
 
+### Changed
+
+- Licensed under the Apache License, Version 2.0 (was the LinalDB Community License v1.0;
+  0.1.19 and earlier stay under it). The wheel carries `LICENSE` and `NOTICE` and declares
+  `License-Expression: Apache-2.0` (PEP 639); builds need `maturin>=1.9`.
+
 ## [0.1.19] - 2026-10-08
 
 Picks up the root engine's `v0.1.94`: round 2 of the CASMI scientific-workloads plan

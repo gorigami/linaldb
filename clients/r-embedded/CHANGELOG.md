@@ -4,6 +4,13 @@ All notable changes to the `linaldb` R binding will be
 documented here. See the parent repository's `CHANGELOG.md` for the
 engine's own changelog.
 
+## [Unreleased]
+
+### Changed
+
+- `License: Apache License (== 2.0)`, a standard CRAN license string (was the non-standard
+  LinalDB Community License v1.0, a blocker for CRAN submission).
+
 ## [0.1.0] - 2026-09-06 (unreleased, not yet published to CRAN)
 
 Initial embedded/native binding, built alongside `clients/python-embedded`

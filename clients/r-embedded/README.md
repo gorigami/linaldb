@@ -15,9 +15,10 @@ Rust/R result-shape contract this package implements against, and
 [`../python-embedded/README.md`](../python-embedded/README.md) for the
 Python counterpart (same design, `pyo3` instead of `extendr`).
 
-Not yet published to CRAN — the non-standard license string in
-`DESCRIPTION` needs resolving first (same caveat as `clients/r`), and
-this hasn't gone through a real `R CMD check` pass yet either.
+Not yet published to CRAN — `R CMD check --as-cran` still fails on the
+relative path dependency on the engine crate, which a standalone
+package tarball can't resolve.
+The license (`Apache License (== 2.0)`) is no longer a blocker.
 
 ## Usage
 
