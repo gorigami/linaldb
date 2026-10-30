@@ -32,6 +32,9 @@ clients/python-embedded/python/linaldb/*.pyd
 # Copied from the repo root at build time (pypi-publish-embedded.yml)
 clients/python-embedded/LICENSE
 clients/python-embedded/NOTICE
+# Third-party notices, generated at release time (scripts/third_party_notices.sh)
+/THIRD_PARTY_LICENSES.md
+clients/python-embedded/python/linaldb/THIRD_PARTY_LICENSES.md
 
 # R native/embedded bindings (clients/r-embedded)
 clients/r-embedded/.Rhistory
@@ -41,3 +44,4 @@ clients/r-embedded/*.Rcheck/
 clients/r-embedded/*.tar.gz
 # macOS Finder metadata
 .DS_Store
+.verify-linaldb/

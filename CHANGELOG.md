@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — release pipeline: candidate, verify, promote
+
+- **Releases are built once and promoted unchanged** (`CONTRIBUTING.md` → Releasing). Running
+  the Release workflow by hand makes a candidate: binaries and `linaldb` wheels in a *draft*
+  GitHub Release with `SHA256SUMS-linal.txt` / `SHA256SUMS-linaldb.txt` and build-provenance
+  attestations, wheels on TestPyPI, then installed from TestPyPI on Linux (py3.10–3.13), macOS
+  and Windows and in a Kaggle-like offline container and checked by `scripts/verify_wheel.py`
+  (version, queries, golden content hashes, which match the published 0.1.19). Pushing `vX` /
+  `linaldb-vX` on the candidate's commit publishes those same files after a checksum check; a
+  manual run can no longer publish straight to PyPI.
+- **Third-party notices**: `THIRD_PARTY_LICENSES.md` (`cargo about`, `about.toml`) ships in
+  every release archive and inside the wheel (`linaldb/THIRD_PARTY_LICENSES.md`), covering every
+  linked crate and the vendored HDF5. PR CI fails on a dependency whose license isn't accepted.
+- **Version consistency** (`scripts/check_versions.sh`, PR CI): engine `Cargo.toml` and
+  `Cargo.lock`, `linaldb`'s `Cargo.toml` / `pyproject.toml` / lock, and the engine version that
+  lock pins must agree; at release time both CHANGELOGs need a dated entry and the tag must
+  name the version.
+
 ### Changed — relicensed under Apache-2.0
 
 - **LINAL is now licensed under the Apache License, Version 2.0** (`LICENSE`, new `NOTICE`),

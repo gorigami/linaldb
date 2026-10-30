@@ -196,23 +196,37 @@ Engine impact: low. No answer or content-hash changes.
       unchanged. Bring the code and `scripts/measure_load_memory.py`, not the design doc.
 - [x] Repo hygiene: untrack `.DS_Store` and add it to `.gitignore`.
 
-### PR 3. Release pipeline — do (before the first release under the new license)
+### PR 3. Release pipeline — in progress
 
-Engine impact: none. CI only. From the release-workflow proposal (R2–R5, R7):
+Engine impact: none. CI only. From the release-workflow proposal (R2–R5, R7). Runbook:
+`CONTRIBUTING.md` → Releasing.
 
-- [ ] Third-party notices (from PR 1) in the release archives and wheels.
-- [ ] Version-consistency check: crate, embedded `Cargo.toml`, `pyproject`, tag (R2).
-- [ ] Release candidate on manual dispatch: build wheels + binaries, publish to **TestPyPI** and a
-      **draft** GitHub Release with `SHA256SUMS` and build-provenance attestations (R3, R5).
-- [ ] Verify job: install from TestPyPI in clean containers (Linux x86_64 py3.10–3.13, macOS
-      arm64, Windows), run smoke + a golden content-hash test; one Kaggle-like job (py3.12,
-      no network after install) (R4).
-- [ ] Promote on tag: same artifacts (checked by checksum) to PyPI, undraft; fail if
-      `CHANGELOG.md` has no entry for the version (R7).
+- [x] Third-party notices: `THIRD_PARTY_LICENSES.md` from `cargo about` (`about.toml`, HDF5
+      clarified as BSD-3-Clause) in every release archive and in the wheel
+      (`linaldb/THIRD_PARTY_LICENSES.md`); PR CI fails on a dependency with an unaccepted license
+      (instead of `cargo deny`).
+- [x] Version-consistency check (`scripts/check_versions.sh`): crate + lock, `linaldb`
+      `Cargo.toml` + `pyproject` + lock, the engine version that lock pins; with `--release`
+      both CHANGELOG entries; with `--tag` the tag (R2, R7).
+- [x] Release candidate on manual dispatch of `release.yml`: binaries + wheels in a **draft**
+      GitHub Release with `SHA256SUMS-linal.txt` / `SHA256SUMS-linaldb.txt` and build-provenance
+      attestations; wheels to **TestPyPI** (R3, R5). Wheel jobs stay in
+      `pypi-publish-embedded.yml` (trusted publishing is bound to that file + `release` env).
+- [x] Verify job (`scripts/verify_from_index.sh` + `scripts/verify_wheel.py`): install from
+      TestPyPI on Linux py3.10–3.13, macOS arm64, Windows; the downloaded wheel's sha256 must be
+      the candidate's; version, `<>` query, search, golden content hashes (captured, and checked
+      against the published 0.1.19). Kaggle-like job: py3.12 container, install, then verify with
+      `--network none` (R4).
+- [x] Promote on tag: `vX` checks the draft's checksums and publishes it; `linaldb-vX` publishes
+      the draft's wheels (not rebuilt) to PyPI, then verifies them from PyPI. Both fail without a
+      candidate on the tagged commit; CHANGELOG entry required (R7). Manual direct-to-PyPI
+      publishing removed.
+- [ ] First real run (needs the bump PR): the Kaggle-like job and attestations are untested
+      until then (no Docker locally).
 - [ ] Then: **release** (engine + `linaldb`) with PR 1 and PR 2 inside, target ~Nov 23, leaving
       buffer for a fix release before Dec 7. Kaggle mirror (R8) is CASMI-side work.
 
-Out of scope for now: R6 extra targets (D3).
+Out of scope for now: R6 extra targets (D3), sdist upload.
 
 ### PR 4. Streaming load and append — do (after the release)
 

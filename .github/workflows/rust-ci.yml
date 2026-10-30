@@ -49,6 +49,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check license metadata
         run: bash scripts/check_license.sh
+      - name: Check version consistency
+        run: bash scripts/check_versions.sh
+      # Fails on a new dependency whose license isn't accepted in about.toml,
+      # here rather than at release time.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - name: Third-party notices resolve
+        run: |
+          bash scripts/third_party_notices.sh Cargo.toml "$RUNNER_TEMP/engine.md"
+          bash scripts/third_party_notices.sh clients/python-embedded/Cargo.toml "$RUNNER_TEMP/linaldb.md"
 
   clippy:
     name: Clippy

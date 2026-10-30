@@ -12,6 +12,7 @@ Thank you for your interest in contributing to LINAL! This document provides gui
 6. [Documentation](#documentation)
 7. [Submitting Changes](#submitting-changes)
 8. [Project Structure](#project-structure)
+9. [Releasing](#releasing) (maintainers)
 
 ---
 
@@ -384,6 +385,42 @@ linaldb/
 - **Discussions**: Use GitHub Discussions for questions
 - **Documentation**: Check `docs/` directory for detailed information
 - **Security**: See [SECURITY.md](SECURITY.md) for how to report a vulnerability — don't use a public issue for that
+
+---
+
+## Releasing
+
+Maintainers only. Two version lines: the engine `linal` (`Cargo.toml`, tags `vX.Y.Z`) and the
+embedded Python package `linaldb` (`clients/python-embedded`, tags `linaldb-vX.Y.Z`). Every
+artifact is built once, checked, and promoted unchanged.
+
+1. **Version bump PR** (`chore: bump to vX.Y.Z`): engine version in `Cargo.toml` and
+   `Cargo.lock`; `linaldb` version in `clients/python-embedded/Cargo.toml`, `pyproject.toml` and
+   its `Cargo.lock` (run `cargo update -p linal` there so it records the new engine); both
+   `CHANGELOG.md` files get a dated `## [X.Y.Z] - YYYY-MM-DD` entry. `scripts/check_versions.sh
+   --release` must pass (CI runs it without `--release` on every PR).
+2. **Candidate**: after the PR merges, run the **Release** workflow (Actions → Release → Run
+   workflow, on `main`). It builds and smoke-tests the binaries (each archive carries `LICENSE`,
+   `NOTICE` and `THIRD_PARTY_LICENSES.md`), attaches them with `SHA256SUMS-linal.txt` and
+   build-provenance attestations to a **draft** release `vX.Y.Z`, then starts the wheel candidate: wheels added to the same draft
+   (`SHA256SUMS-linaldb.txt`), published to **TestPyPI** (approve the `release` environment),
+   installed from there on Linux py3.10–3.13, macOS and Windows plus one Kaggle-like offline job,
+   and checked with `scripts/verify_wheel.py` (version, queries, golden content hashes).
+3. **Promote**: when the candidate is green, tag the same commit and push both tags:
+   ```bash
+   git tag -a vX.Y.Z -m "vX.Y.Z: <summary>"
+   git tag -a linaldb-vA.B.C -m "linaldb A.B.C"
+   git push origin vX.Y.Z linaldb-vA.B.C
+   ```
+   `vX.Y.Z` checks the draft's files against their checksums and publishes the release;
+   `linaldb-vA.B.C` publishes the draft's wheels (not a rebuild) to PyPI after approval, then
+   installs them from PyPI and verifies them again. A tag on another commit than the candidate,
+   or without a candidate, fails.
+
+A candidate can be rerun (the draft is replaced), but TestPyPI and PyPI never accept the same
+version twice: if wheels for this version already reached TestPyPI, bump the version.
+Verify a downloaded artifact with `sha256sum -c SHA256SUMS-*.txt` or
+`gh attestation verify <file> --repo gorigami/linaldb`.
 
 ---
 
