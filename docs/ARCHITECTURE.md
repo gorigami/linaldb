@@ -1354,8 +1354,11 @@ backend = "cpu"                # "cpu" | "gpu" (experimental, needs the gpu-wgpu
   selection").
 
 `linal.toml` is read from the process's working directory. `linal init` writes only the
-`[storage]` section. `[wal]` and `[compute]` are optional, and a file without them keeps
-pre-WAL, CPU-only behavior.
+`[storage]` section. Every section and key is optional and takes the default shown above, so a
+file with only `[wal] enabled = true` or only `[compute] backend = "gpu"` works; a file without
+`[wal]`/`[compute]` keeps pre-WAL, CPU-only behavior. (Before 0.1.95, `[storage]` with
+`data_dir` and `default_db` was required: a file without them failed to parse and the engine
+ran with every default, after a warning.)
 
 ---
 

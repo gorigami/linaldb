@@ -166,7 +166,7 @@ file-level, and the statically linked HDF5, whose BSD terms ask for its full not
 distributions), and optionally `cargo deny check licenses` in CI. Releases up to 0.1.94 didn't
 ship them either, so this is not a regression.
 
-### PR 2. Small fixes — in progress
+### PR 2. Small fixes — merged (#145)
 
 Engine impact: low. No answer or content-hash changes.
 
@@ -196,7 +196,7 @@ Engine impact: low. No answer or content-hash changes.
       unchanged. Bring the code and `scripts/measure_load_memory.py`, not the design doc.
 - [x] Repo hygiene: untrack `.DS_Store` and add it to `.gitignore`.
 
-### PR 3. Release pipeline — in progress
+### PR 3. Release pipeline — merged (#146)
 
 Engine impact: none. CI only. From the release-workflow proposal (R2–R5, R7). Runbook:
 `CONTRIBUTING.md` → Releasing.
@@ -227,6 +227,47 @@ Engine impact: none. CI only. From the release-workflow proposal (R2–R5, R7). 
       buffer for a fix release before Dec 7. Kaggle mirror (R8) is CASMI-side work.
 
 Out of scope for now: R6 extra targets (D3), sdist upload.
+
+### Release 0.1.95 / linaldb 0.1.20 — audit before and after the candidate
+
+The first Apache-2.0 release, one PR (bump + the fixes below + docs). Checked three times: a
+local build of the release branch, the candidate from TestPyPI and the draft release, and the
+published artifacts from PyPI. Each time: `linal-hub` pytest, all 17 notebooks (outputs diffed
+against the 0.1.19 run), the 22 `examples/*.lnl` with the binary, and probes of the new
+statements (DROP DATASET with indexes, `load_arrow`/`load_numpy` reloads, WAL restarts, the
+server and CLI paths for database names).
+
+Found on the local build of `main`:
+
+- [x] **B1. A partial `linal.toml` was ignored as a whole.** `[storage]` and its `data_dir` /
+      `default_db` were required, so a file with only `[wal] enabled = true` (the snippet in
+      `DSL_REFERENCE.md`) failed to parse; the engine printed a warning and ran with every
+      default, WAL off. Every section and key now has a default (`src/core/config.rs`, unit
+      test).
+- [x] **B2. Peak lists held 48 bytes of slack per cell after P17.** `Matrix(2, *)` cells from
+      Arrow were built by a `Result` collect, which leaves room for 4 rows; the old clone in
+      `record_batch_to_rows` trimmed it, the P17 move keeps it. `SHOW MEMORY` for notebook 16's
+      54,684-spectrum library rose 162.0 → 164.7 MB (~120 MB on the 2.5M-spectrum CASMI
+      library). Sized up front now; sparse-vector indices shrunk the same way. Test:
+      `decoded_peak_lists_have_no_slack`. With the fix, both notebooks' `SHOW MEMORY` match
+      0.1.19 exactly. Never released (P17 ships in this release).
+- [x] **B3. The release workflows couldn't run their scripts.** `scripts/*.sh` were committed
+      as `100644`; `release.yml` and `pypi-publish-embedded.yml` call them directly, so the
+      first candidate would have stopped at `Versions` with "Permission denied". PR CI didn't
+      notice because it ran them through `bash`. Now `100755`, and PR CI calls them directly
+      too, so a wrong mode fails there.
+
+Checked and fine on that build: hub pytest 55/55; notebooks 01–17 pass with the same results
+(only timestamps, ids and timings differ; notebook 16's 3x slower filtered search was a
+compile running alongside, 17.2 s vs 17.0 s when rerun alone); 22/22 `examples/*.lnl`; DROP
+DATASET with IVF/HNSW indexes, `SAVE`/`LOAD`, materialized views, `load_numpy` reloads and WAL
+restarts (drop survives, memory loads come back from the checkpoint); `<>` with single and
+double quotes; database names over HTTP (`..%2Fvictim` → 400) and the CLI; the gitignored
+`THIRD_PARTY_LICENSES.md` does land in the wheel.
+
+Still to do: the candidate run (TestPyPI, draft release, verify matrix, Kaggle-like job,
+attestations), the hub re-run against the TestPyPI wheel and the draft's macOS binary, then
+promotion and a last re-run against PyPI before the hub notebooks and docs are committed.
 
 ### PR 4. Streaming load and append — do (after the release)
 

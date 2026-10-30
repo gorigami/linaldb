@@ -2,8 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {
+    /// `[storage]`. Optional, like every section and key: a `linal.toml`
+    /// holding only `[wal] enabled = true` must turn the WAL on, not fail to
+    /// parse and silently fall back to the defaults.
+    #[serde(default)]
     pub storage: StorageConfig,
     /// Write-ahead log (`[wal]` in `linal.toml`). Optional: a config file
     /// without this section keeps the WAL off, the pre-WAL behavior.
@@ -77,6 +81,7 @@ pub enum WalSync {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     pub data_dir: PathBuf,
     pub default_db: String,
@@ -97,17 +102,13 @@ pub struct StorageConfig {
     pub mmap_columns: bool,
 }
 
-impl Default for EngineConfig {
+impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            storage: StorageConfig {
-                data_dir: PathBuf::from("./data"),
-                default_db: "default".to_string(),
-                mmap_index_snapshots: false,
-                mmap_columns: false,
-            },
-            wal: WalConfig::default(),
-            compute: ComputeConfig::default(),
+            data_dir: PathBuf::from("./data"),
+            default_db: "default".to_string(),
+            mmap_index_snapshots: false,
+            mmap_columns: false,
         }
     }
 }
@@ -125,5 +126,26 @@ impl EngineConfig {
             }
         }
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_files_keep_the_other_defaults() {
+        let c: EngineConfig = toml::from_str("[wal]\nenabled = true\n").unwrap();
+        assert!(c.wal.enabled);
+        assert_eq!(c.storage.data_dir, PathBuf::from("./data"));
+        assert_eq!(c.storage.default_db, "default");
+
+        let c: EngineConfig = toml::from_str("[storage]\nmmap_columns = true\n").unwrap();
+        assert!(c.storage.mmap_columns);
+        assert_eq!(c.storage.data_dir, PathBuf::from("./data"));
+        assert!(!c.wal.enabled);
+
+        let c: EngineConfig = toml::from_str("").unwrap();
+        assert_eq!(c.storage.default_db, "default");
     }
 }

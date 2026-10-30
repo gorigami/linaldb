@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.95] - 2026-10-30
+
+First release under Apache-2.0. Ships with `linaldb` 0.1.20.
+
 ### Changed — release pipeline: candidate, verify, promote
 
 - **Releases are built once and promoted unchanged** (`CONTRIBUTING.md` → Releasing). Running
@@ -74,6 +78,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TensorDb` and the server's `SharedEngine`; anything else is a `400` / CLI error before the
   filesystem is touched. Test: `tests/database_name_validation_test.rs` (engine, server registry
   and the real HTTP route).
+
+### Fixed — a partial `linal.toml` was ignored as a whole
+
+- **Every section and key of `linal.toml` is now optional.** `[storage]` with `data_dir` and
+  `default_db` used to be required, so a file holding only `[wal] enabled = true` (the snippet in
+  `DSL_REFERENCE.md` and the README) or only `[compute] backend = "gpu"` failed to parse: the
+  engine printed `Failed to parse linal.toml ... Using defaults` and ran with every default,
+  WAL off, while the user believed in-memory state would survive a restart. Missing keys now take
+  their defaults (`./data`, `default`). Found re-running the `linal-hub` notebooks before this
+  release. Test: `core::config::tests::partial_files_keep_the_other_defaults`.
+
+### Fixed — peak lists kept 48 bytes of slack per cell after P17
+
+- Never released (P17 is in this release too). A `Matrix(2, *)` cell decoded from Arrow (`load_arrow` peak lists, `LOAD DATASET`, `IMPORT`) had
+  room for 4 rows in its outer vector. Before P17 the clone in `record_batch_to_rows` trimmed it;
+  moving the value kept it for the dataset's lifetime, so `SHOW MEMORY` for `linal-hub` notebook
+  16's 54,684-spectrum library rose from 162.0 to 164.7 MB (≈120 MB on the 2.5M-spectrum CASMI
+  library). The outer vector is now sized up front, and sparse-vector indices are trimmed the
+  same way. Values and content hashes are unchanged. Test:
+  `core::storage::tests::decoded_peak_lists_have_no_slack`.
+
+### Fixed — release scripts weren't executable
+
+- `scripts/*.sh` (and the two Python scripts) were committed without the executable bit, and
+  `release.yml` / `pypi-publish-embedded.yml` call them directly, so the first candidate run
+  would have failed at `Versions` with "Permission denied". They're `100755` now, and PR CI calls
+  them the same way, so a wrong mode fails on the PR.
 
 ### Changed — load memory (P16, P17)
 
