@@ -6,8 +6,20 @@ engine's own changelog.
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-10-30
+
+Built on engine v0.1.95. The first Apache-2.0 `linaldb` on PyPI: 0.1.20 below reached TestPyPI
+only, where the candidate checks stopped it. Everything listed under 0.1.20 ships here.
+
+### Fixed
+
+- `linaldb.__version__` reported `0.1.19` in the 0.1.20 wheels (it was hard-coded in
+  `__init__.py` and missed by the bump). It is now read from the installed distribution's
+  metadata, so it always matches the wheel; a source tree without an install reports `0+unknown`.
+
 ## [0.1.20] - 2026-10-30
 
+Not published to PyPI (TestPyPI only): every candidate check failed on `__version__`; see 0.1.21.
 Built on engine v0.1.95 (see the root `CHANGELOG.md`). Content hashes are unchanged from 0.1.19.
 
 ### Changed

@@ -265,7 +265,15 @@ restarts (drop survives, memory loads come back from the checkpoint); `<>` with 
 double quotes; database names over HTTP (`..%2Fvictim` → 400) and the CLI; the gitignored
 `THIRD_PARTY_LICENSES.md` does land in the wheel.
 
-Still to do: the candidate run (TestPyPI, draft release, verify matrix, Kaggle-like job,
+Found on the first candidate (PyPI Publish run 41085362148, `linaldb` 0.1.20 on TestPyPI):
+
+- [x] **B4. `linaldb.__version__` said 0.1.19.** It was a literal in `__init__.py`, outside the
+      manifests `scripts/check_versions.sh` compares, so the bump missed it. The wheels built,
+      uploaded and matched their SHA-256 sums; all seven verify jobs (Linux 3.10–3.13, macOS,
+      Windows, Kaggle-like offline) then failed on `verify_wheel.py --version`. Now read from the
+      distribution metadata; `linaldb` → 0.1.21, since TestPyPI keeps 0.1.20.
+
+Still to do: the candidate run for 0.1.21 (TestPyPI, draft release, verify matrix, Kaggle-like job,
 attestations), the hub re-run against the TestPyPI wheel and the draft's macOS binary, then
 promotion and a last re-run against PyPI before the hub notebooks and docs are committed.
 
