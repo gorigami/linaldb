@@ -6,16 +6,37 @@ engine's own changelog.
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-10-30
+
+Built on engine v0.1.95 (see the root `CHANGELOG.md`). Content hashes are unchanged from 0.1.19.
+
 ### Changed
 
 - Licensed under the Apache License, Version 2.0 (was the LinalDB Community License v1.0;
   0.1.19 and earlier stay under it). The wheel carries `LICENSE` and `NOTICE` and declares
   `License-Expression: Apache-2.0` (PEP 639); builds need `maturin>=1.9`.
+- The wheel also ships `linaldb/THIRD_PARTY_LICENSES.md`: the licenses of every crate and the
+  HDF5 library linked into the extension.
+- Released through a candidate: the same wheels were installed from TestPyPI and checked on
+  Linux (Python 3.10–3.13), macOS, Windows and an offline Kaggle-like container before being
+  promoted to PyPI. `SHA256SUMS-linaldb.txt` and build-provenance attestations are on the
+  GitHub release `v0.1.95`.
 
 ### Added
 
 - `DROP DATASET [IF EXISTS] <name>` through `db.execute(...)`: frees a dataset loaded with
   `load_numpy`/`load_arrow` (rows, indexes) so the name can be loaded again in the same `Db`.
+- `<>` as the SQL spelling of `!=`.
+
+### Fixed
+
+- A `linal.toml` without a `[storage]` section (for example only `[wal] enabled = true`) was
+  ignored as a whole, so the WAL stayed off. Every section and key is now optional.
+
+### Performance
+
+- Loading large Arrow tables no longer holds two copies of every vector and matrix value, and
+  the content hash is streamed instead of built as JSON in memory.
 
 ## [0.1.19] - 2026-10-08
 

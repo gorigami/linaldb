@@ -1141,20 +1141,20 @@ fn matrix_array_to_values(array: &ArrayRef, num_rows: usize) -> Result<Vec<Value
                     .ok_or_else(|| {
                         StorageError::Serialization("Expected List rows in Matrix column".into())
                     })?;
-                (0..rows.len())
-                    .map(|r| {
-                        let row = rows.value(r);
-                        row.as_any()
-                            .downcast_ref::<Float32Array>()
-                            .map(|f| f.values().to_vec())
-                            .ok_or_else(|| {
-                                StorageError::Serialization(
-                                    "Expected Float32 values inside Matrix column".into(),
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(Value::Matrix)
+                // Sized up front: a `Result` collect would leave room for 4
+                // rows, and since P17 moves the cell into its row as is, that
+                // slack (48 bytes a cell) stays for the dataset's lifetime.
+                let mut matrix = Vec::with_capacity(rows.len());
+                for r in 0..rows.len() {
+                    let row = rows.value(r);
+                    let values = row.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                        StorageError::Serialization(
+                            "Expected Float32 values inside Matrix column".into(),
+                        )
+                    })?;
+                    matrix.push(values.values().to_vec());
+                }
+                Ok(Value::Matrix(matrix))
             })
             .collect();
     }
@@ -1741,11 +1741,13 @@ fn sparse_array_to_values(
             let idx = arrow::compute::cast(&index_list.value(r), &DataType::Int64)
                 .map_err(StorageError::Arrow)?;
             let idx = idx.as_any().downcast_ref::<Int64Array>().unwrap();
-            let indices = idx
+            let mut indices = idx
                 .values()
                 .iter()
                 .map(|&i| u32::try_from(i).map_err(|_| bad(&format!("index {} out of range", i))))
                 .collect::<Result<Vec<u32>, _>>()?;
+            // A `Result` collect over-allocates; the cell keeps this vector.
+            indices.shrink_to_fit();
             let vals = value_list.value(r);
             let vals = vals
                 .as_any()
@@ -2174,5 +2176,33 @@ mod tests {
         assert!(Path::new(&format!("{}/datasets", temp_dir)).exists());
         assert!(Path::new(&format!("{}/tensors", temp_dir)).exists());
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    /// Since P17 a decoded cell is moved into its row as is, so whatever
+    /// capacity the decoder left is what the dataset keeps.
+    #[test]
+    fn decoded_peak_lists_have_no_slack() {
+        use crate::core::tuple::Field;
+        let schema = Arc::new(Schema::new(vec![Field::new("p", ValueType::Matrix(2, 0))]));
+        let rows = (0..3)
+            .map(|i| {
+                let row = vec![1.0 + i as f32; 3 + i];
+                Tuple::new(schema.clone(), vec![Value::Matrix(vec![row.clone(), row])]).unwrap()
+            })
+            .collect();
+        let ds = Dataset::with_rows(
+            crate::core::dataset_legacy::DatasetId(1),
+            schema.clone(),
+            rows,
+            None,
+        )
+        .unwrap();
+        let batch = dataset_to_record_batch(&ds).unwrap();
+        for tuple in record_batch_to_rows(&batch, &schema).unwrap() {
+            let Value::Matrix(m) = &tuple.values[0] else {
+                panic!("not a matrix")
+            };
+            assert_eq!(m.capacity(), 2, "outer Vec of a Matrix(2, *) cell");
+        }
     }
 }

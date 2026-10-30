@@ -1082,6 +1082,11 @@ DROP DATABASE obsolete_db
 SHOW DATABASES          -- also: SHOW ALL DATABASES
 ```
 
+A database is a directory under `data_dir`, so its name is limited to ASCII letters, digits, `_`
+and `-` (at most 128 characters). The DSL only parses identifiers anyway; `POST/DELETE
+/databases/:name` and `linal db create|drop <name>` reject any other name (`400` / CLI error)
+before touching the filesystem.
+
 ### RESET SESSION
 
 Clears all in-memory registers (Tensors and Datasets) for the current session.
@@ -1098,6 +1103,11 @@ sync = "always"         # "always" (fsync per write, survives power loss) or "ne
                         # (survives a process crash / kill -9, not an OS crash)
 checkpoint_bytes = 67108864   # auto-checkpoint once wal.log passes this size (default 64 MiB)
 ```
+
+Every section and key of `linal.toml` is optional: a file with only the `[wal]` lines above
+keeps the default `[storage]` (`data_dir = "./data"`, `default_db = "default"`). (Before 0.1.95 a
+file without `[storage]` failed to parse and the engine ran with every default, WAL off.) The file
+is read from the current directory.
 
 Every successful mutating statement (`VECTOR`, `LET`, `INSERT`, `UPDATE`, `CREATE INDEX`,
 `LOAD`, `IMPORT`, `DEFINE PIPELINE`, ...) is appended to `{data_dir}/{db}/wal.log`. On startup,
