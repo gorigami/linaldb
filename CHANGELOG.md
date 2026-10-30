@@ -28,6 +28,8 @@ First release under Apache-2.0. Ships with `linaldb` 0.1.21 (0.1.20 stopped at t
   `Cargo.lock`, `linaldb`'s `Cargo.toml` / `pyproject.toml` / lock, and the engine version that
   lock pins must agree; at release time both CHANGELOGs need a dated entry and the tag must
   name the version.
+- **macOS jobs run on `macos-15`** (was `macos-14`, which GitHub retires on 2026-11-02). Still
+  aarch64.
 
 ### Changed — relicensed under Apache-2.0
 

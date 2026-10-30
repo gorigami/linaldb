@@ -273,6 +273,11 @@ Found on the first candidate (PyPI Publish run 41085362148, `linaldb` 0.1.20 on 
       Windows, Kaggle-like offline) then failed on `verify_wheel.py --version`. Now read from the
       distribution metadata; `linaldb` → 0.1.21, since TestPyPI keeps 0.1.20.
 
+Second candidate (run 41102970323, on #148): cancelled in `Test (macos-14)` by GitHub's scheduled
+macOS 14 brownout (the image retires 2026-11-02). Release and wheel workflows now use `macos-15`
+(still aarch64), so the candidate and the later tag-push verify-from-PyPI matrix don't land on a
+retired image.
+
 Still to do: the candidate run for 0.1.21 (TestPyPI, draft release, verify matrix, Kaggle-like job,
 attestations), the hub re-run against the TestPyPI wheel and the draft's macOS binary, then
 promotion and a last re-run against PyPI before the hub notebooks and docs are committed.
