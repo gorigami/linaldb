@@ -1789,6 +1789,35 @@ mod tests {
     }
 
     #[test]
+    fn select_where_not_binds_looser_than_comparison() {
+        // `NOT a = 1 AND b > 2` is `(NOT (a = 1)) AND (b > 2)`, as in SQL
+        let stmt = parse_ok("SELECT * FROM t WHERE NOT a = 1 AND b > 2");
+        let Statement::Select(s) = stmt else {
+            panic!("expected Select")
+        };
+        let Some(Expr::And(lhs, rhs)) = s.filter else {
+            panic!("expected AND at the top, got {:?}", s.filter)
+        };
+        let Expr::Not(inner) = *lhs else {
+            panic!("expected NOT on the left, got {:?}", lhs)
+        };
+        assert!(matches!(
+            *inner,
+            Expr::Infix {
+                op: InfixOp::Eq,
+                ..
+            }
+        ));
+        assert!(matches!(
+            *rhs,
+            Expr::Infix {
+                op: InfixOp::Gt,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn select_where_compound_three_and() {
         let stmt = parse_ok("SELECT * FROM t WHERE a > 1 AND b > 2 AND c > 3");
         let Statement::Select(s) = stmt else {

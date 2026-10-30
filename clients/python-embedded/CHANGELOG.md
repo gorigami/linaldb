@@ -6,10 +6,24 @@ engine's own changelog.
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-10-30
+
+Built on engine v0.1.95. The first Apache-2.0 `linaldb` on PyPI: 0.1.20 and 0.1.21 below reached
+TestPyPI only. Everything listed under them ships here.
+
+### Fixed
+
+- `NULL` in `WHERE` and other predicates follows SQL's three-valued logic: `x < 2`, `x <> 2` and
+  `NOT (x = 2)` no longer select rows where `x` is `NULL`, and `NULL = NULL` is not true (use
+  `IS NULL`). A `SORTED INDEX` and a scan now agree on such ranges, `CASE WHEN` takes `ELSE` for a
+  `NULL` comparison, and an equi-join no longer matches `NULL` keys.
+- `NOT` binds looser than a comparison, as in SQL: `NOT x = 2` is `NOT (x = 2)`. It meant
+  `(NOT x) = 2` and matched nothing.
+
 ## [0.1.21] - 2026-10-30
 
-Built on engine v0.1.95. The first Apache-2.0 `linaldb` on PyPI: 0.1.20 below reached TestPyPI
-only, where the candidate checks stopped it. Everything listed under 0.1.20 ships here.
+Not published to PyPI (TestPyPI only): the release check in `linal-hub` notebook 18 found the
+predicate bugs fixed in 0.1.22 before promotion.
 
 ### Fixed
 

@@ -671,126 +671,131 @@ pub fn evaluate_predicate(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool 
     evaluate_expr(expr, row)
 }
 
+/// A predicate keeps a row only when it is *true*: `false` and unknown
+/// (`NULL`) both drop it, as in SQL.
 fn evaluate_expr(expr: &Expr, row: &crate::core::tuple::Tuple) -> bool {
+    truth(expr, row) == Some(true)
+}
+
+/// `a <op> b` for the comparison operators, in SQL's three-valued logic:
+/// `None` (unknown) when either side is `NULL` or the two can't be compared
+/// (`1 = 'a'`). `Value::compare` orders `NULL` below everything, which is
+/// right for `ORDER BY` but made `NULL < 2`, `NULL <> 2` and `NULL = NULL`
+/// true in a `WHERE`.
+pub(crate) fn sql_compare(
+    l: &crate::core::value::Value,
+    op: &str,
+    r: &crate::core::value::Value,
+) -> Option<bool> {
+    use std::cmp::Ordering;
+    if l.is_null() || r.is_null() {
+        return None;
+    }
+    if op == "=" || op == "!=" {
+        // Value::equals(), not compare()'s Ordering -- see its doc comment
+        // (Complex has real equality but no order).
+        return l.equals(r).map(|eq| eq == (op == "="));
+    }
+    let ord = l.compare(r)?;
+    match op {
+        ">" => Some(ord == Ordering::Greater),
+        "<" => Some(ord == Ordering::Less),
+        ">=" => Some(ord != Ordering::Less),
+        "<=" => Some(ord != Ordering::Greater),
+        _ => None,
+    }
+}
+
+/// `AND` in three-valued logic: false wins over unknown.
+pub(crate) fn and3(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+
+/// `OR` in three-valued logic: true wins over unknown.
+pub(crate) fn or3(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// `x IN (list)` in three-valued logic: true on a match; otherwise unknown
+/// if `x` or any item is `NULL`, else false.
+pub(crate) fn sql_in(
+    val: &crate::core::value::Value,
+    items: impl IntoIterator<Item = crate::core::value::Value>,
+) -> Option<bool> {
+    let mut acc = Some(false);
+    for item in items {
+        acc = or3(acc, sql_compare(val, "=", &item));
+        if acc == Some(true) {
+            break;
+        }
+    }
+    acc
+}
+
+/// A predicate's truth value: `Some(true)`, `Some(false)` or `None` for
+/// unknown (a comparison with `NULL`, or an expression that can't be
+/// evaluated as a predicate). `NOT` keeps unknown unknown, which is what
+/// keeps `NOT (x = 2)` from selecting the rows where `x` is `NULL`.
+fn truth(expr: &Expr, row: &crate::core::tuple::Tuple) -> Option<bool> {
+    use crate::core::value::Value;
+    let value = |e: &Expr| eval_value(e, row).unwrap_or(Value::Null);
     match expr {
         // A bare column reference used as a whole predicate (`WHERE active`,
         // no explicit `= true`) is only meaningful for a Bool column -- any
         // other type has no defined truthiness, so it never matches (same
         // "never silently wrong, just doesn't match" stance as an
         // incomparable BinaryExpr below).
-        Expr::Column(name) => {
-            matches!(row.get(name), Some(crate::core::value::Value::Bool(true)))
-        }
+        Expr::Column(name) => match row.get(name) {
+            Some(Value::Bool(b)) => Some(*b),
+            Some(Value::Null) | None => None,
+            Some(_) => Some(false),
+        },
         // `WHERE true` / `PREFILTER true`. Fell through to "never matches"
         // before, so a literal `true` predicate selected nothing.
-        Expr::Literal(crate::core::value::Value::Bool(b)) => *b,
-        Expr::And(left, right) => evaluate_expr(left, row) && evaluate_expr(right, row),
-        Expr::Or(left, right) => evaluate_expr(left, row) || evaluate_expr(right, row),
-        Expr::Not(inner) => !evaluate_expr(inner, row),
-        Expr::IsNull(inner) => matches!(
-            eval_value(inner, row),
-            Some(crate::core::value::Value::Null) | None
-        ),
-        Expr::IsNotNull(inner) => !matches!(
-            eval_value(inner, row),
-            Some(crate::core::value::Value::Null) | None
-        ),
-        Expr::In { expr, list } => {
-            if let Some(val) = eval_value(expr, row) {
-                list.iter().any(|item| {
-                    eval_value(item, row)
-                        .map(|v| val.equals(&v) == Some(true))
-                        .unwrap_or(false)
-                })
-            } else {
-                false
-            }
-        }
+        Expr::Literal(Value::Bool(b)) => Some(*b),
+        Expr::Literal(Value::Null) => None,
+        Expr::And(left, right) => and3(truth(left, row), truth(right, row)),
+        Expr::Or(left, right) => or3(truth(left, row), truth(right, row)),
+        Expr::Not(inner) => truth(inner, row).map(|b| !b),
+        Expr::IsNull(inner) => Some(matches!(eval_value(inner, row), Some(Value::Null) | None)),
+        Expr::IsNotNull(inner) => Some(!matches!(eval_value(inner, row), Some(Value::Null) | None)),
+        Expr::In { expr, list } => sql_in(&value(expr), list.iter().map(value)),
         Expr::Between { expr, low, high } => {
-            let val = eval_value(expr, row);
-            let lo = eval_value(low, row);
-            let hi = eval_value(high, row);
-            if let (Some(v), Some(l), Some(h)) = (val, lo, hi) {
-                let ge = matches!(
-                    v.compare(&l),
-                    Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-                );
-                let le = matches!(
-                    v.compare(&h),
-                    Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-                );
-                ge && le
-            } else {
-                false
-            }
+            let v = value(expr);
+            and3(
+                sql_compare(&v, ">=", &value(low)),
+                sql_compare(&v, "<=", &value(high)),
+            )
         }
-        Expr::BinaryExpr { left, op, right } => {
-            let left_val = eval_value(left, row);
-            let right_val = eval_value(right, row);
-
-            if let (Some(l), Some(r)) = (left_val, right_val) {
-                if op == "=" || op == "!=" {
-                    // Value::equals(), not compare()'s Ordering -- see its
-                    // doc comment (Complex has real equality but no order).
-                    let eq = l.equals(&r);
-                    return if op == "=" {
-                        eq == Some(true)
-                    } else {
-                        eq == Some(false)
-                    };
-                }
-                let ord = l.compare(&r);
-                match op.as_str() {
-                    ">" => ord == Some(std::cmp::Ordering::Greater),
-                    "<" => ord == Some(std::cmp::Ordering::Less),
-                    ">=" => matches!(
-                        ord,
-                        Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-                    ),
-                    "<=" => matches!(
-                        ord,
-                        Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-                    ),
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        }
+        Expr::BinaryExpr { left, op, right } => sql_compare(&value(left), op, &value(right)),
         Expr::Case {
             operand,
             branches,
             else_expr,
         } => {
-            let operand_val = operand
-                .as_ref()
-                .map(|e| eval_value(e, row).unwrap_or(crate::core::value::Value::Null));
+            let operand_val = operand.as_ref().map(|e| value(e));
             for (cond, result) in branches {
-                let matched = if let Some(ref ov) = operand_val {
-                    eval_value(cond, row)
-                        .map(|cv| ov.compare(&cv) == Some(std::cmp::Ordering::Equal))
-                        .unwrap_or(false)
-                } else {
-                    evaluate_expr(cond, row)
+                let matched = match operand_val {
+                    Some(ref ov) => sql_compare(ov, "=", &value(cond)),
+                    None => truth(cond, row),
                 };
-                if matched {
-                    return evaluate_expr(result, row);
+                if matched == Some(true) {
+                    return truth(result, row);
                 }
             }
-            else_expr.as_ref().is_some_and(|e| evaluate_expr(e, row))
+            else_expr.as_ref().map_or(Some(false), |e| truth(e, row))
         }
-        Expr::Coalesce(args) => {
-            for arg in args {
-                if let Some(v) = eval_value(arg, row) {
-                    if !v.is_null() {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-        Expr::ScalarFn { .. } | Expr::Cast { .. } | Expr::Nullif(_, _) => false,
-        _ => false,
+        Expr::Coalesce(args) => Some(args.iter().any(|a| !value(a).is_null())),
+        Expr::ScalarFn { .. } | Expr::Cast { .. } | Expr::Nullif(_, _) => Some(false),
+        _ => Some(false),
     }
 }
 
