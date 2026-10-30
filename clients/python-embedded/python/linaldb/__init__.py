@@ -25,12 +25,18 @@ splits `wire.py` (raw unwrap) from `client.py` (ergonomics).
 from __future__ import annotations
 
 import json
+from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
 from ._native import Db as _NativeDb
 from ._native import LinalError
 
-__version__ = "0.1.19"
+# The installed distribution's version (pyproject.toml), so it cannot drift from the wheel:
+# 0.1.20 shipped with a hard-coded "0.1.19" here.
+try:
+    __version__ = _dist_version("linaldb")
+except PackageNotFoundError:  # imported from a source tree without an install
+    __version__ = "0+unknown"
 
 __all__ = [
     "Db",

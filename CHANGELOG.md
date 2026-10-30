@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.95] - 2026-10-30
 
-First release under Apache-2.0. Ships with `linaldb` 0.1.20.
+First release under Apache-2.0. Ships with `linaldb` 0.1.21 (0.1.20 stopped at the TestPyPI candidate).
 
 ### Changed — release pipeline: candidate, verify, promote
 
