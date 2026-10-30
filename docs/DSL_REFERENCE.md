@@ -564,6 +564,21 @@ SELECT * FROM items LIMIT 10 OFFSET 20
 - `<expr> IN (<v1>, <v2>, ...)`: true if `<expr>` equals any of the listed values.
 - `<expr> BETWEEN <low> AND <high>`: inclusive range check, equivalent to `<expr> >= <low> AND <expr> <= <high>`.
 - `<expr> IS NULL` / `<expr> IS NOT NULL`: null checks.
+- `NOT <predicate>`, `AND`, `OR`. Precedence, tightest first: comparisons (and `IN`, `BETWEEN`,
+  `IS NULL`), then `NOT`, then `AND`, then `OR` — as in SQL, so `NOT a = 1 AND b > 2` is
+  `(NOT (a = 1)) AND (b > 2)`. Before v0.1.95 `NOT` bound tightest and that predicate meant
+  `((NOT a) = 1) AND ...`, which matched no row unless `a` was a `Bool`.
+
+**`NULL` in predicates** follows SQL's three-valued logic. A comparison with `NULL` — `=`,
+`<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN` — is *unknown*, not true or false; `NOT unknown` is
+unknown; `false AND unknown` is false and `true OR unknown` is true. `WHERE`, `FILTER`,
+`HAVING`, `UPDATE ... WHERE`, `DELETE ... WHERE` and `PREFILTER` keep a row only when the
+predicate is **true**. So `WHERE x < 2` and `WHERE x <> 2` both skip rows where `x` is `NULL`,
+`NULL = NULL` is not true (use `IS NULL`), and `CASE WHEN x < 2 ...` takes the `ELSE` branch for
+them. An equi-`JOIN` never matches a `NULL` key (a `LEFT`/`RIGHT`/`FULL` join still keeps the
+row, unmatched). `ORDER BY` is unchanged: `NULL` sorts first. Before v0.1.95, `NULL` compared as
+the smallest value, so `x < 2`, `x <> 2` and `NULL = NULL` were true for `NULL` rows, and a
+`SORTED INDEX` (which doesn't hold `NULL`s) could answer a range differently from a scan.
 
 **Automatic partition pruning**: a `WHERE`/`FILTER` predicate of the form `col <op> literal` (`<`, `<=`, `>`, `>=`, either operand order) or `col BETWEEN low AND high`, against a column with no index at all, is still optimized automatically once the dataset is large enough to span more than one internal 1024-row partition. Each partition tracks its own column min/max; a partition whose range can't satisfy the predicate is skipped without reading its rows. This needs no `CREATE INDEX` and no special syntax — it's purely a scan optimization, so the query's result is identical with or without it. Datasets under ~1024 rows never engage it (nothing to prune yet).
 

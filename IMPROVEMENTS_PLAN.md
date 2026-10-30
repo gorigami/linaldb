@@ -278,9 +278,28 @@ macOS 14 brownout (the image retires 2026-11-02). Release and wheel workflows no
 (still aarch64), so the candidate and the later tag-push verify-from-PyPI matrix don't land on a
 retired image.
 
-Still to do: the candidate run for 0.1.21 (TestPyPI, draft release, verify matrix, Kaggle-like job,
-attestations), the hub re-run against the TestPyPI wheel and the draft's macOS binary, then
-promotion and a last re-run against PyPI before the hub notebooks and docs are committed.
+Third candidate (Release run 41121019806, PyPI Publish run 41123200562, on `f009405`): every CI job
+green, `linaldb` 0.1.21 on TestPyPI. The hub re-run against it passed (pytest 55/55, 17/17
+notebooks unchanged, 22/22 `examples/*.lnl` with the draft's macOS binary, checksums and
+attestations verified). A new release-check notebook (`linal-hub` notebook 18: every fix and
+feature of this release against an outside reference, predicates property-tested against a SQL
+evaluator) then found four older predicate bugs, so 0.1.21 was not promoted:
+
+- [x] **B5. `NOT` bound tighter than a comparison.** `NOT x = 2` parsed as `(NOT x) = 2` and
+      matched no row; `NOT a = 1 AND ...` filtered out everything. Now SQL precedence.
+- [x] **B6. `NULL` compared as the smallest value in predicates.** `x < 2`, `x <> 2`,
+      `NOT (x = 2)` selected `NULL` rows, `NULL = NULL` was true, `CASE WHEN x < 2` took `THEN`.
+      Predicates and expressions now use three-valued logic.
+- [x] **B7. A sorted index answered differently from a scan** on ranges over columns with
+      `NULL`s (the index holds none): 90 vs 193 rows for `x < 100`. Fixed by B6.
+- [x] **B8. The hash join matched `NULL` keys** with each other. They match nothing now.
+
+`linaldb` → 0.1.22 (TestPyPI keeps 0.1.21); the engine stays v0.1.95, never published.
+
+Still to do: the candidate run for 0.1.22 (TestPyPI, draft release, verify matrix, Kaggle-like job,
+attestations), the hub re-run (all notebooks, 18 included) against the TestPyPI wheel and the
+draft's macOS binary, then promotion and a last re-run against PyPI before the hub notebooks and
+docs are committed.
 
 ### PR 4. Streaming load and append — do (after the release)
 

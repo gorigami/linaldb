@@ -2015,6 +2015,22 @@ impl PhysicalPlan for CosineFilterExec {
     }
 }
 
+/// A three-valued truth value as a `Value`: unknown is `NULL`.
+fn truth_value(t: Option<bool>) -> crate::core::value::Value {
+    t.map_or(
+        crate::core::value::Value::Null,
+        crate::core::value::Value::Bool,
+    )
+}
+
+/// A `Value` as a three-valued truth value: only a Bool is true or false.
+fn as_truth(v: &crate::core::value::Value) -> Option<bool> {
+    match v {
+        crate::core::value::Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
 pub fn evaluate_expression(
     expr: &crate::query::logical::Expr,
     row: &crate::core::tuple::Tuple,
@@ -2029,18 +2045,17 @@ pub fn evaluate_expression(
             None => Value::Null,
         },
         crate::query::logical::Expr::Literal(val) => val.clone(),
-        crate::query::logical::Expr::And(l, r) => {
-            match (evaluate_expression(l, row), evaluate_expression(r, row)) {
-                (Value::Bool(a), Value::Bool(b)) => Value::Bool(a && b),
-                _ => Value::Null,
-            }
-        }
-        crate::query::logical::Expr::Or(l, r) => {
-            match (evaluate_expression(l, row), evaluate_expression(r, row)) {
-                (Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
-                _ => Value::Null,
-            }
-        }
+        // Three-valued, like a WHERE (`query::planner::truth`): `false AND
+        // NULL` is false and `true OR NULL` is true; anything else NULL-ish
+        // (or not a Bool) is NULL.
+        crate::query::logical::Expr::And(l, r) => truth_value(crate::query::planner::and3(
+            as_truth(&evaluate_expression(l, row)),
+            as_truth(&evaluate_expression(r, row)),
+        )),
+        crate::query::logical::Expr::Or(l, r) => truth_value(crate::query::planner::or3(
+            as_truth(&evaluate_expression(l, row)),
+            as_truth(&evaluate_expression(r, row)),
+        )),
         crate::query::logical::Expr::BinaryExpr { left, op, right } => {
             let left_val = evaluate_expression(left, row);
             let right_val = evaluate_expression(right, row);
@@ -2055,34 +2070,14 @@ pub fn evaluate_expression(
             // always taking the ELSE branch instead of erroring or evaluating
             // correctly. WHERE clauses were unaffected: they route through
             // `evaluate_expr`, not this function.
-            if op == "=" || op == "!=" {
-                // Value::equals() (not compare()'s Ordering) -- handles
-                // Complex's real equality-without-order correctly; see its
-                // doc comment. compare()-based Ordering is still exactly
-                // right for every other type's = / != (its own cross-type
-                // numeric/bool promotions are unchanged), equals() just
-                // delegates to it for anything that isn't Complex.
-                let eq = left_val.equals(&right_val);
-                return Value::Bool(if op == "=" {
-                    eq == Some(true)
-                } else {
-                    eq == Some(false)
-                });
-            }
-            if matches!(op.as_str(), ">" | "<" | ">=" | "<=") {
-                let ord = left_val.compare(&right_val);
-                return Value::Bool(match op.as_str() {
-                    ">" => ord == Some(std::cmp::Ordering::Greater),
-                    "<" => ord == Some(std::cmp::Ordering::Less),
-                    ">=" => matches!(
-                        ord,
-                        Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-                    ),
-                    _ => matches!(
-                        ord,
-                        Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-                    ), // "<="
-                });
+            // A comparison with NULL (or between values that can't be
+            // compared) is NULL, not true or false -- the same rule as a
+            // WHERE (`query::planner::sql_compare`), so `CASE WHEN x < 2`
+            // takes the ELSE branch when `x` is NULL.
+            if matches!(op.as_str(), "=" | "!=" | ">" | "<" | ">=" | "<=") {
+                return truth_value(crate::query::planner::sql_compare(
+                    &left_val, op, &right_val,
+                ));
             }
 
             // Any pairing touching Complex promotes to Complex (num_complex's
@@ -2229,24 +2224,19 @@ pub fn evaluate_expression(
         },
         crate::query::logical::Expr::In { expr, list } => {
             let val = evaluate_expression(expr, row);
-            let found = list.iter().any(|item| {
-                val.compare(&evaluate_expression(item, row)) == Some(std::cmp::Ordering::Equal)
-            });
-            Value::Bool(found)
+            truth_value(crate::query::planner::sql_in(
+                &val,
+                list.iter().map(|item| evaluate_expression(item, row)),
+            ))
         }
         crate::query::logical::Expr::Between { expr, low, high } => {
             let val = evaluate_expression(expr, row);
             let lo = evaluate_expression(low, row);
             let hi = evaluate_expression(high, row);
-            let ge = matches!(
-                val.compare(&lo),
-                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-            );
-            let le = matches!(
-                val.compare(&hi),
-                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-            );
-            Value::Bool(ge && le)
+            truth_value(crate::query::planner::and3(
+                crate::query::planner::sql_compare(&val, ">=", &lo),
+                crate::query::planner::sql_compare(&val, "<=", &hi),
+            ))
         }
         crate::query::logical::Expr::Case {
             operand,
@@ -2257,7 +2247,7 @@ pub fn evaluate_expression(
             for (cond, result) in branches {
                 let matched = if let Some(ref ov) = operand_val {
                     let cv = evaluate_expression(cond, row);
-                    ov.compare(&cv) == Some(std::cmp::Ordering::Equal)
+                    crate::query::planner::sql_compare(ov, "=", &cv) == Some(true)
                 } else {
                     matches!(evaluate_expression(cond, row), Value::Bool(true))
                 };
@@ -2747,6 +2737,11 @@ impl PhysicalPlan for HashJoinExec {
             // Build on LEFT (smaller), probe with RIGHT.
             let mut build_map: HashMap<Value, Vec<usize>> = HashMap::new();
             for (i, row) in left_rows.iter().enumerate() {
+                // NULL never equals anything, NULL included: a NULL key
+                // matches no row (an outer join still keeps its row).
+                if row.values[left_col_idx].is_null() {
+                    continue;
+                }
                 build_map
                     .entry(row.values[left_col_idx].clone())
                     .or_default()
@@ -2802,6 +2797,11 @@ impl PhysicalPlan for HashJoinExec {
             // Build on RIGHT (smaller-or-tied), probe with LEFT.
             let mut build_map: HashMap<Value, Vec<usize>> = HashMap::new();
             for (i, row) in right_rows.iter().enumerate() {
+                // NULL never equals anything, NULL included: a NULL key
+                // matches no row (an outer join still keeps its row).
+                if row.values[right_col_idx].is_null() {
+                    continue;
+                }
                 build_map
                     .entry(row.values[right_col_idx].clone())
                     .or_default()

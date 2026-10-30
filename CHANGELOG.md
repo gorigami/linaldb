@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.95] - 2026-10-30
 
-First release under Apache-2.0. Ships with `linaldb` 0.1.21 (0.1.20 stopped at the TestPyPI candidate).
+First release under Apache-2.0. Ships with `linaldb` 0.1.22 (0.1.20 and 0.1.21 stopped at the TestPyPI candidate).
 
 ### Changed — release pipeline: candidate, verify, promote
 
@@ -68,6 +68,32 @@ First release under Apache-2.0. Ships with `linaldb` 0.1.21 (0.1.20 stopped at t
 - The 0.1.94 notes and `DSL_REFERENCE.md` quoted "2.5M spectra / 75M peaks in ~12 s", a
   synthetic run with ~30 peaks per spectrum. The real CASMI 2026 library has 401M peaks (median
   42 per spectrum, p99 1,347) and loads in 132 s on 4 CPUs, in shards; both places now say so.
+
+### Fixed — `NULL` in predicates follows SQL; `NOT` binds looser than a comparison
+
+- **A comparison with `NULL` is unknown, and `WHERE` keeps only true rows.** `Value::compare`
+  orders `NULL` below every value -- right for `ORDER BY`, but predicates used it directly, so
+  `WHERE x < 2`, `x <= 2` and `x <> 2` selected the rows where `x` is `NULL`, `NULL = NULL` was
+  true, and `NOT (x = 2)` selected them too (`NOT` of "false"). A `SORTED INDEX`, which doesn't
+  hold `NULL`s, then answered a range differently from a scan of the same data: `x < 100` over
+  3,000 rows with every tenth `x` `NULL` gave 90 rows indexed and 193 scanned. Predicates
+  (`WHERE`/`FILTER`/`HAVING`, `UPDATE`/`DELETE ... WHERE`, `PREFILTER`) now evaluate in
+  three-valued logic (`query::planner::truth`; `false AND unknown` is false, `true OR unknown`
+  is true, `NOT unknown` is unknown), and so do expressions (`CASE WHEN x < 2` takes `ELSE` for
+  a `NULL` `x`; a comparison's value is `NULL`). The hash join no longer matches `NULL` keys
+  (`ON l.k = r.k` paired every `NULL` with every `NULL`); outer joins keep those rows unmatched.
+  `ORDER BY`, `GROUP BY` and `DISTINCT` are unchanged.
+- **`NOT` binds looser than a comparison.** It bound tightest, so `NOT x = 2` parsed as
+  `(NOT x) = 2`: `NULL` for any non-`Bool` `x`, so the row silently never matched, and
+  `NOT a = 1 AND ...` filtered out everything. Now `NOT a = 1 AND b > 2` is
+  `(NOT (a = 1)) AND (b > 2)`, as in SQL.
+- Found by `linal-hub` notebook 18, which generates predicates (comparisons either way round,
+  column vs column, `IN`, `BETWEEN`, `IS [NOT] NULL`, `AND`/`OR`/`NOT`) and compares the engine
+  with a SQL reference evaluator on small and multi-partition tables, with and without indexes
+  and `NULL`s: before the fix 388 of 2,800 as-written forms differed from their parenthesized
+  form, 33 of 1,400 differed between indexed and scanned, and 717 of 1,400 differed from SQL on
+  tables with `NULL`s. On `NULL`-free tables with explicit parentheses all matched. Tests:
+  `tests/sql_null_semantics_test.rs`, `select_where_not_binds_looser_than_comparison`.
 
 ### Fixed — database names could escape `data_dir`
 

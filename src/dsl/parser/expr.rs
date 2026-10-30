@@ -256,7 +256,12 @@ impl Parser {
             }
             Some(Token::Not) => {
                 self.advance();
-                let inner = self.parse_pratt(11)?;
+                // SQL precedence: NOT binds looser than a comparison and
+                // tighter than AND/OR, so `NOT a = 1 AND b` is
+                // `(NOT (a = 1)) AND b`. It used to bind tightest, making
+                // that `((NOT a) = 1) AND b`: NULL for any non-Bool `a`, so
+                // the row silently never matched.
+                let inner = self.parse_pratt(5)?;
                 return Ok(Expr::Not(Box::new(inner)));
             }
             Some(Token::LParen) => {
